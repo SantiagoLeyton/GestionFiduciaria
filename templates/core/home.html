@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Inicio | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="hero">
+        <div>
+          <h1>Bienvenido a Centenario Gestion Fiduciaria</h1>
+          <p>
+            Plataforma local para centralizar la informacion fiduciaria, proteger el acceso por roles
+            y servir como base para las fases funcionales posteriores.
+          </p>
+        </div>
+      </div>
+      <section class="phase-panel">
+        <h2>Fase 1 activa</h2>
+        <p>Autenticacion, control de acceso y navegacion base disponibles.</p>
+        <div class="role-summary">
+          <span>Usuario: {{ request.user.username }}</span>
+          <span>Rol: {{ request.user.get_role_display }}</span>
+          <span>Estado: {% if request.user.is_active %}Activo{% else %}Inactivo{% endif %}</span>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

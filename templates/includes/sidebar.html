@@ -1,0 +1,26 @@
+<aside class="sidebar">
+  <div class="brand">
+    <div class="brand-icon">C</div>
+    <div>
+      <strong>Centenario</strong>
+      <span>Gestion Fiduciaria</span>
+    </div>
+  </div>
+  <nav class="nav flex-column gap-1">
+    <a class="nav-link active" href="{% url 'home' %}">Inicio</a>
+    <span class="nav-link disabled">Importar libro historico</span>
+    <span class="nav-link disabled">Importar reportes fiduciarios</span>
+    <span class="nav-link disabled">Proyectos</span>
+    <span class="nav-link disabled">Unidades</span>
+    <span class="nav-link disabled">Clientes</span>
+    <span class="nav-link disabled">Encargos fiduciarios</span>
+    <span class="nav-link disabled">Pagos</span>
+    <span class="nav-link disabled">Novedades</span>
+    <span class="nav-link disabled">Consultas</span>
+    {% if request.user.is_accounting_admin or request.user.is_superuser %}
+      <span class="nav-link disabled">Auditoria</span>
+      <a class="nav-link" href="{% url 'user_list' %}">Usuarios</a>
+    {% endif %}
+  </nav>
+  <div class="sidebar-footer">v1.0.0 - 2026</div>
+</aside>

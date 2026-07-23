@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block title %}Gestion de Usuarios | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Gestion de Usuarios</h1>
+          <p>Administre los accesos, roles y permisos de los colaboradores en la plataforma.</p>
+        </div>
+        <a class="btn btn-success" href="{% url 'user_create' %}">Nuevo usuario</a>
+      </div>
+
+      <form class="filter-panel" method="get">
+        <div>
+          <label class="form-label" for="{{ search_form.q.id_for_label }}">{{ search_form.q.label }}</label>
+          {{ search_form.q }}
+        </div>
+        <div>
+          <label class="form-label" for="{{ search_form.role.id_for_label }}">{{ search_form.role.label }}</label>
+          {{ search_form.role }}
+        </div>
+        <div>
+          <label class="form-label" for="{{ search_form.status.id_for_label }}">{{ search_form.status.label }}</label>
+          {{ search_form.status }}
+        </div>
+        <div class="filter-actions">
+          <button class="btn btn-success" type="submit">Filtrar</button>
+          <a class="btn btn-outline-secondary" href="{% url 'user_list' %}">Limpiar</a>
+        </div>
+      </form>
+
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Usuarios registrados</h2>
+          <span>Mostrando {{ page_obj.object_list|length }} usuario{{ page_obj.object_list|length|pluralize }}</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr>
+                <th>Nombre completo</th>
+                <th>Usuario</th>
+                <th>Correo</th>
+                <th>Rol</th>
+                <th>Estado</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for managed_user in users %}
+                <tr>
+                  <td>{{ managed_user.full_name }}</td>
+                  <td>{{ managed_user.username }}</td>
+                  <td>{{ managed_user.email }}</td>
+                  <td>{{ managed_user.get_role_display }}</td>
+                  <td>
+                    {% if managed_user.is_active %}
+                      <span class="status-pill status-active">Activo</span>
+                    {% else %}
+                      <span class="status-pill status-inactive">Inactivo</span>
+                    {% endif %}
+                  </td>
+                  <td class="actions-cell">
+                    <a class="btn btn-sm btn-outline-secondary" href="{% url 'user_update' managed_user.pk %}">Editar</a>
+                    {% if managed_user.pk != request.user.pk %}
+                      <form method="post" action="{% url 'user_status' managed_user.pk 'deactivate' %}">
+                        {% csrf_token %}
+                        <button class="btn btn-sm btn-outline-secondary" type="submit" {% if not managed_user.is_active %}disabled{% endif %}>Desactivar</button>
+                      </form>
+                      <form method="post" action="{% url 'user_status' managed_user.pk 'activate' %}">
+                        {% csrf_token %}
+                        <button class="btn btn-sm btn-outline-secondary" type="submit" {% if managed_user.is_active %}disabled{% endif %}>Activar</button>
+                      </form>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr>
+                  <td colspan="6">No hay usuarios registrados con los filtros seleccionados.</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if is_paginated %}
+          <nav class="pagination-bar" aria-label="Paginacion de usuarios">
+            {% if page_obj.has_previous %}
+              <a class="btn btn-outline-secondary btn-sm" href="?page={{ page_obj.previous_page_number }}">Anterior</a>
+            {% endif %}
+            <span>Pagina {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}</span>
+            {% if page_obj.has_next %}
+              <a class="btn btn-outline-secondary btn-sm" href="?page={{ page_obj.next_page_number }}">Siguiente</a>
+            {% endif %}
+          </nav>
+        {% endif %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

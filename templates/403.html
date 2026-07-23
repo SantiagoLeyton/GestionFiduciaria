@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}Acceso restringido | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<main class="error-page">
+  <section>
+    <h1>Acceso restringido</h1>
+    <p>No cuenta con permisos para realizar esta operacion.</p>
+    <a class="btn btn-success" href="{% url 'home' %}">Volver al inicio</a>
+  </section>
+</main>
+{% endblock %}
