@@ -1,18 +1,17 @@
 from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth import login, logout
-from django.db import transaction
 from django.db.models import Q
-from django.http import Http404
-from django.shortcuts import get_object_or_404, redirect, render
+from django.core.exceptions import PermissionDenied
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
-from django.views.generic import CreateView, ListView, UpdateView, View
+from django.views.generic import ListView, View
 
-from .forms_admin import ManagedUserCreateForm, ManagedUserUpdateForm, UserSearchForm
+from .forms_admin import UserSearchForm
 from .forms import LoginForm
-from .permissions import UserManagementRequiredMixin
+from .permissions import UserReadRequiredMixin
 
 
 User = get_user_model()
@@ -52,14 +51,14 @@ def logout_view(request):
     return redirect(reverse("login"))
 
 
-class UserListView(UserManagementRequiredMixin, ListView):
+class UserListView(UserReadRequiredMixin, ListView):
     model = User
     template_name = "users/user_list.html"
     context_object_name = "users"
     paginate_by = 10
 
     def get_queryset(self):
-        queryset = User.objects.order_by("first_name", "last_name", "username")
+        queryset = User.objects.order_by("first_name", "last_name", "email")
         self.search_form = UserSearchForm(self.request.GET)
         if self.search_form.is_valid():
             query = self.search_form.cleaned_data.get("q")
@@ -69,7 +68,6 @@ class UserListView(UserManagementRequiredMixin, ListView):
                 queryset = queryset.filter(
                     Q(first_name__icontains=query)
                     | Q(last_name__icontains=query)
-                    | Q(username__icontains=query)
                     | Q(email__icontains=query)
                 )
             if role:
@@ -83,62 +81,14 @@ class UserListView(UserManagementRequiredMixin, ListView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["search_form"] = getattr(self, "search_form", UserSearchForm(self.request.GET))
+        query_params = self.request.GET.copy()
+        query_params.pop("page", None)
+        context["page_querystring"] = query_params.urlencode()
         return context
 
 
-class UserCreateView(UserManagementRequiredMixin, CreateView):
-    model = User
-    form_class = ManagedUserCreateForm
-    template_name = "users/user_form.html"
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs["actor"] = self.request.user
-        return kwargs
-
-    def form_valid(self, form):
-        with transaction.atomic():
-            self.object = form.save()
-        messages.success(self.request, "Usuario creado correctamente.")
-        return redirect("user_list")
-
-    def form_invalid(self, form):
-        messages.error(self.request, "No fue posible guardar el usuario. Revise la informacion ingresada.")
-        return super().form_invalid(form)
-
-
-class UserUpdateView(UserManagementRequiredMixin, UpdateView):
-    model = User
-    form_class = ManagedUserUpdateForm
-    template_name = "users/user_form.html"
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs["actor"] = self.request.user
-        return kwargs
-
-    def form_valid(self, form):
-        with transaction.atomic():
-            self.object = form.save()
-        messages.success(self.request, "Usuario actualizado correctamente.")
-        return redirect("user_list")
-
-    def form_invalid(self, form):
-        messages.error(self.request, "No fue posible actualizar el usuario. Revise la informacion ingresada.")
-        return super().form_invalid(form)
-
-
-class UserStatusView(UserManagementRequiredMixin, View):
-    def post(self, request, pk, action):
-        user = get_object_or_404(User, pk=pk)
-        if action not in {"activate", "deactivate"}:
-            raise Http404("Accion no disponible.")
-        if user.pk == request.user.pk:
-            messages.error(request, "No puede cambiar el estado de su propia cuenta.")
-            return redirect("user_list")
-
-        user.is_active = action == "activate"
-        user.save(update_fields=["is_active"])
-        message = "Usuario activado correctamente." if user.is_active else "Usuario inactivado correctamente."
-        messages.success(request, message)
-        return redirect("user_list")
+class BlockedUserManagementView(UserReadRequiredMixin, View):
+    def dispatch(self, request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return self.handle_no_permission()
+        raise PermissionDenied

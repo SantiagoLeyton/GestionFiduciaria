@@ -7,6 +7,13 @@ from django.core.exceptions import ValidationError
 User = get_user_model()
 
 
+ROLE_FILTER_CHOICES = [
+    ("", "Todos los roles"),
+    (User.Role.COMMERCIAL, "Comercial"),
+    (User.Role.ACCOUNTING_ADMIN, "Contabilidad"),
+]
+
+
 class UserSearchForm(forms.Form):
     q = forms.CharField(
         label="Busqueda de usuarios",
@@ -21,9 +28,12 @@ class UserSearchForm(forms.Form):
     role = forms.ChoiceField(
         label="Rol del sistema",
         required=False,
-        choices=[("", "Todos los roles")] + list(User.Role.choices),
+        choices=ROLE_FILTER_CHOICES,
         widget=forms.Select(attrs={"class": "form-select"}),
     )
+
+    def clean_q(self):
+        return self.cleaned_data["q"].strip()
     status = forms.ChoiceField(
         label="Estado",
         required=False,

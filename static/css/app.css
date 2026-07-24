@@ -244,6 +244,21 @@ body {
   grid-template-columns: minmax(220px, 1fr) 180px auto;
 }
 
+.real-estate-filter {
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+}
+
+.context-panel {
+  background: var(--centenario-soft);
+  border: 1px solid #cfe6d5;
+  color: #255d35;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 14px 16px;
+}
+
 .filter-actions,
 .form-actions,
 .actions-cell {

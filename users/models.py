@@ -31,6 +31,12 @@ class User(AbstractUser):
     def full_name(self):
         return self.get_full_name() or self.username
 
+    @property
+    def role_label(self):
+        if self.role == self.Role.ACCOUNTING_ADMIN:
+            return "Contabilidad"
+        return self.get_role_display()
+
     def is_accounting_admin(self):
         return self.role == self.Role.ACCOUNTING_ADMIN
 

@@ -17,6 +17,91 @@ class SearchForm(forms.Form):
         widget=forms.Select(attrs={"class": "form-select"}),
     )
 
+    def clean_q(self):
+        return self.cleaned_data["q"].strip()
+
+
+class StructuralGroupFilterForm(SearchForm):
+    project = forms.ModelChoiceField(
+        label="Proyecto",
+        required=False,
+        queryset=Project.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    parent = forms.ModelChoiceField(
+        label="Agrupacion padre",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["project"].queryset = Project.objects.order_by("name")
+        self.fields["grouping_type"].queryset = GroupingType.objects.order_by("name")
+        parent_queryset = StructuralGroup.objects.select_related("project", "grouping_type").order_by(
+            "project__name", "name", "code"
+        )
+        project_id = self.data.get("project") if self.is_bound else None
+        if project_id:
+            parent_queryset = parent_queryset.filter(project_id=project_id)
+        self.fields["parent"].queryset = parent_queryset
+
+
+class PropertyUnitFilterForm(SearchForm):
+    DIRECT_VALUE = "__direct__"
+
+    project = forms.ModelChoiceField(
+        label="Proyecto",
+        required=False,
+        queryset=Project.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    structural_group = forms.ChoiceField(
+        label="Agrupacion",
+        required=False,
+        choices=(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["project"].queryset = Project.objects.order_by("name")
+        self.fields["grouping_type"].queryset = GroupingType.objects.order_by("name")
+        groups = StructuralGroup.objects.select_related("project", "grouping_type").order_by(
+            "project__name", "name", "code"
+        )
+        project_id = self.data.get("project") if self.is_bound else None
+        grouping_type_id = self.data.get("grouping_type") if self.is_bound else None
+        if project_id:
+            groups = groups.filter(project_id=project_id)
+        if grouping_type_id:
+            groups = groups.filter(grouping_type_id=grouping_type_id)
+        choices = [("", "Seleccione una agrupacion"), (self.DIRECT_VALUE, "Directamente al proyecto")]
+        choices.extend((str(group.pk), str(group)) for group in groups)
+        self.fields["structural_group"].choices = choices
+
+    def clean_structural_group(self):
+        value = self.cleaned_data["structural_group"]
+        if value in {"", self.DIRECT_VALUE}:
+            return value
+        try:
+            return StructuralGroup.objects.get(pk=value)
+        except StructuralGroup.DoesNotExist as exc:
+            raise ValidationError("Seleccione una agrupacion valida.") from exc
+
 
 class ChangeReasonMixin(forms.Form):
     change_reason = forms.CharField(
@@ -94,6 +179,8 @@ class StructuralGroupForm(BaseEntityForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["code"].required = False
+        self.fields["name"].required = False
         self.fields["parent"].required = False
         queryset = StructuralGroup.objects.select_related("project", "grouping_type").order_by("project__name", "name")
         if self.instance.pk:
@@ -105,6 +192,9 @@ class StructuralGroupForm(BaseEntityForm):
         project = cleaned_data.get("project")
         parent = cleaned_data.get("parent")
         code = cleaned_data.get("code")
+        name = cleaned_data.get("name")
+        if not code and not name:
+            raise ValidationError("Debe registrar codigo, nombre o ambos.")
         if project and parent and parent.project_id != project.id:
             self.add_error("parent", "La agrupacion padre debe pertenecer al mismo proyecto.")
         if project and code:
@@ -141,6 +231,8 @@ class PropertyUnitForm(BaseEntityForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["code"].required = False
+        self.fields["name"].required = False
         self.fields["structural_group"].required = False
         self.fields["structural_group"].queryset = StructuralGroup.objects.select_related("project").order_by(
             "project__name", "name"
@@ -151,6 +243,9 @@ class PropertyUnitForm(BaseEntityForm):
         project = cleaned_data.get("project")
         structural_group = cleaned_data.get("structural_group")
         code = cleaned_data.get("code")
+        name = cleaned_data.get("name")
+        if not code and not name:
+            raise ValidationError("Debe registrar codigo, nombre o ambos.")
         if project and structural_group and structural_group.project_id != project.id:
             self.add_error("structural_group", "La agrupacion debe pertenecer al mismo proyecto.")
         if project and code:

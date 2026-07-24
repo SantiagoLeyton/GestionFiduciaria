@@ -3,7 +3,7 @@
   <div class="user-menu">
     <div class="user-name">
       <strong>{{ request.user.full_name }}</strong>
-      <span>{{ request.user.get_role_display }}</span>
+      <span>{{ request.user.role_label }}</span>
     </div>
     <form method="post" action="{% url 'logout' %}">
       {% csrf_token %}

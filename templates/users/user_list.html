@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Gestion de Usuarios | Centenario Gestion Fiduciaria{% endblock %}
+{% block title %}Usuarios | Centenario Gestion Fiduciaria{% endblock %}
 
 {% block body %}
 <div class="app-shell">
@@ -11,10 +11,9 @@
       {% include "includes/messages.html" %}
       <div class="page-heading">
         <div>
-          <h1>Gestion de Usuarios</h1>
-          <p>Administre los accesos, roles y permisos de los colaboradores en la plataforma.</p>
+          <h1>Usuarios</h1>
+          <p>Consulte los colaboradores registrados y su estado de acceso.</p>
         </div>
-        <a class="btn btn-success" href="{% url 'user_create' %}">Nuevo usuario</a>
       </div>
 
       <form class="filter-panel" method="get">
@@ -46,20 +45,18 @@
             <thead>
               <tr>
                 <th>Nombre completo</th>
-                <th>Usuario</th>
                 <th>Correo</th>
                 <th>Rol</th>
                 <th>Estado</th>
-                <th>Acciones</th>
+                <th>Ultimo acceso</th>
               </tr>
             </thead>
             <tbody>
               {% for managed_user in users %}
                 <tr>
                   <td>{{ managed_user.full_name }}</td>
-                  <td>{{ managed_user.username }}</td>
                   <td>{{ managed_user.email }}</td>
-                  <td>{{ managed_user.get_role_display }}</td>
+                  <td>{{ managed_user.role_label }}</td>
                   <td>
                     {% if managed_user.is_active %}
                       <span class="status-pill status-active">Activo</span>
@@ -67,24 +64,16 @@
                       <span class="status-pill status-inactive">Inactivo</span>
                     {% endif %}
                   </td>
-                  <td class="actions-cell">
-                    <a class="btn btn-sm btn-outline-secondary" href="{% url 'user_update' managed_user.pk %}">Editar</a>
-                    {% if managed_user.pk != request.user.pk %}
-                      <form method="post" action="{% url 'user_status' managed_user.pk 'deactivate' %}">
-                        {% csrf_token %}
-                        <button class="btn btn-sm btn-outline-secondary" type="submit" {% if not managed_user.is_active %}disabled{% endif %}>Desactivar</button>
-                      </form>
-                      <form method="post" action="{% url 'user_status' managed_user.pk 'activate' %}">
-                        {% csrf_token %}
-                        <button class="btn btn-sm btn-outline-secondary" type="submit" {% if managed_user.is_active %}disabled{% endif %}>Activar</button>
-                      </form>
+                  <td>
+                    {% if managed_user.last_login %}
+                      {{ managed_user.last_login|date:"d/m/Y H:i" }}
+                    {% else %}
+                      Nunca
                     {% endif %}
                   </td>
                 </tr>
               {% empty %}
-                <tr>
-                  <td colspan="6">No hay usuarios registrados con los filtros seleccionados.</td>
-                </tr>
+                <tr><td colspan="5">No hay usuarios registrados con los filtros seleccionados.</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -92,11 +81,11 @@
         {% if is_paginated %}
           <nav class="pagination-bar" aria-label="Paginacion de usuarios">
             {% if page_obj.has_previous %}
-              <a class="btn btn-outline-secondary btn-sm" href="?page={{ page_obj.previous_page_number }}">Anterior</a>
+              <a class="btn btn-outline-secondary btn-sm" href="?{% if page_querystring %}{{ page_querystring }}&{% endif %}page={{ page_obj.previous_page_number }}">Anterior</a>
             {% endif %}
             <span>Pagina {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}</span>
             {% if page_obj.has_next %}
-              <a class="btn btn-outline-secondary btn-sm" href="?page={{ page_obj.next_page_number }}">Siguiente</a>
+              <a class="btn btn-outline-secondary btn-sm" href="?{% if page_querystring %}{{ page_querystring }}&{% endif %}page={{ page_obj.next_page_number }}">Siguiente</a>
             {% endif %}
           </nav>
         {% endif %}

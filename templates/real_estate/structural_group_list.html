@@ -13,7 +13,10 @@
         <div><h1>Agrupaciones</h1><p>Consulte y administre la jerarquia configurable de cada proyecto.</p></div>
         {% if can_manage %}<a class="btn btn-success" href="{% url create_url_name %}">Nueva agrupacion</a>{% endif %}
       </div>
-      <form class="filter-panel compact-filter" method="get">
+      <form class="filter-panel real-estate-filter" method="get">
+        <div><label class="form-label" for="{{ search_form.project.id_for_label }}">{{ search_form.project.label }}</label>{{ search_form.project }}</div>
+        <div><label class="form-label" for="{{ search_form.grouping_type.id_for_label }}">{{ search_form.grouping_type.label }}</label>{{ search_form.grouping_type }}</div>
+        <div><label class="form-label" for="{{ search_form.parent.id_for_label }}">{{ search_form.parent.label }}</label>{{ search_form.parent }}</div>
         <div><label class="form-label" for="{{ search_form.q.id_for_label }}">{{ search_form.q.label }}</label>{{ search_form.q }}</div>
         <div><label class="form-label" for="{{ search_form.status.id_for_label }}">{{ search_form.status.label }}</label>{{ search_form.status }}</div>
         <div class="filter-actions"><button class="btn btn-success" type="submit">Buscar</button><a class="btn btn-outline-secondary" href="{% url 'real_estate:structural_group_list' %}">Limpiar</a></div>
@@ -22,18 +25,20 @@
         <div class="section-header"><h2>Agrupaciones registradas</h2><span>{{ structural_groups|length }} registro{{ structural_groups|length|pluralize }}</span></div>
         <div class="table-responsive">
           <table class="table align-middle data-table">
-            <thead><tr><th>Codigo</th><th>Nombre</th><th>Proyecto</th><th>Tipo</th><th>Padre</th><th>Estado</th><th>Acciones</th></tr></thead>
+            <thead><tr><th>Codigo</th><th>Nombre</th><th>Proyecto</th><th>Tipo</th><th>Padre</th><th>Estado</th><th>Consultas</th><th>Acciones</th></tr></thead>
             <tbody>
               {% for entity in structural_groups %}
                 <tr>
-                  <td>{{ entity.code }}</td><td>{{ entity.name }}</td><td>{{ entity.project.name }}</td><td>{{ entity.grouping_type.name }}</td><td>{{ entity.parent.name|default:"Directa al proyecto" }}</td>
+                  <td>{{ entity.code|default:"-" }}</td><td>{{ entity.name|default:"-" }}</td><td>{{ entity.project.name }}</td><td>{{ entity.grouping_type.name }}</td><td>{{ entity.parent|default:"Directa al proyecto" }}</td>
                   <td>{% if entity.is_active %}<span class="status-pill status-active">Activo</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
+                  <td><a class="btn btn-sm btn-outline-secondary" href="{% url 'real_estate:property_unit_list' %}?project={{ entity.project_id }}&grouping_type={{ entity.grouping_type_id }}&structural_group={{ entity.pk }}">Unidades</a></td>
                   <td class="actions-cell">{% if can_manage %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a>{% endif %}{% include "real_estate/includes/status_action.html" %}</td>
                 </tr>
-              {% empty %}<tr><td colspan="7">No hay agrupaciones registradas.</td></tr>{% endfor %}
+              {% empty %}<tr><td colspan="8">No hay agrupaciones registradas.</td></tr>{% endfor %}
             </tbody>
           </table>
         </div>
+        {% include "includes/pagination.html" %}
       </section>
     </section>
   </main>

@@ -171,6 +171,30 @@ def test_structural_group_creation_and_valid_hierarchy(project, grouping_type, b
 
 
 @pytest.mark.django_db
+def test_structural_group_can_be_created_with_code_only(project, grouping_type):
+    group = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="101", name="")
+
+    assert group.code == "101"
+    assert group.name == ""
+
+
+@pytest.mark.django_db
+def test_structural_group_can_be_created_with_name_only(project, grouping_type):
+    group = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="", name="Zona social")
+
+    assert group.code == ""
+    assert group.name == "Zona social"
+
+
+@pytest.mark.django_db
+def test_structural_group_strips_values_and_rejects_both_empty(project, grouping_type):
+    group = StructuralGroup(project=project, grouping_type=grouping_type, code="   ", name="   ")
+
+    with pytest.raises(ValidationError):
+        group.full_clean()
+
+
+@pytest.mark.django_db
 def test_structural_group_multiple_levels(project, grouping_type, block_type):
     sector = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="S1", name="Sector 1")
     stage = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, parent=sector, code="E1", name="Etapa 1")
@@ -200,6 +224,15 @@ def test_structural_group_duplicate_code_in_same_parent_is_rejected(project, gro
 
 
 @pytest.mark.django_db
+def test_structural_group_allows_multiple_without_code_in_same_parent(project, grouping_type, block_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    first = StructuralGroup.objects.create(project=project, grouping_type=block_type, parent=tower, code="", name="Zona social")
+    second = StructuralGroup.objects.create(project=project, grouping_type=block_type, parent=tower, code="", name="Piscina")
+
+    assert first.parent == second.parent
+
+
+@pytest.mark.django_db
 def test_structural_group_rejects_cycle(project, grouping_type, block_type):
     tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
     block = StructuralGroup.objects.create(project=project, grouping_type=block_type, parent=tower, code="B1", name="Bloque 1")
@@ -225,10 +258,69 @@ def test_structural_group_permissions(admin_client, commercial_client):
 
 
 @pytest.mark.django_db
+def test_structural_group_filters_by_project_type_parent_and_status(admin_client, project, second_project, grouping_type, block_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    block = StructuralGroup.objects.create(project=project, grouping_type=block_type, parent=tower, code="B1", name="Bloque 1")
+    StructuralGroup.objects.create(project=second_project, grouping_type=block_type, code="B1", name="Bloque externo")
+
+    response = admin_client.get(
+        reverse("real_estate:structural_group_list"),
+        {
+            "project": project.pk,
+            "grouping_type": block_type.pk,
+            "parent": tower.pk,
+            "status": "active",
+            "q": "Bloque",
+        },
+    )
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert block.name in content
+    assert "Bloque externo" not in content
+
+
+@pytest.mark.django_db
+def test_structural_group_parent_filter_choices_are_limited_by_project(admin_client, project, second_project, grouping_type):
+    StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    external = StructuralGroup.objects.create(project=second_project, grouping_type=grouping_type, code="T2", name="Torre externa")
+
+    response = admin_client.get(reverse("real_estate:structural_group_list"), {"project": project.pk})
+    content = response.content.decode()
+
+    assert "Torre 1" in content
+    assert external.name not in content
+
+
+@pytest.mark.django_db
 def test_property_unit_creation_direct_project(project):
     unit = PropertyUnit.objects.create(project=project, code="A101", name="Apartamento 101")
 
     assert unit.structural_group is None
+
+
+@pytest.mark.django_db
+def test_property_unit_can_be_created_with_code_only(project):
+    unit = PropertyUnit.objects.create(project=project, code="101", name="")
+
+    assert unit.code == "101"
+    assert unit.name == ""
+
+
+@pytest.mark.django_db
+def test_property_unit_can_be_created_with_name_only(project):
+    unit = PropertyUnit.objects.create(project=project, code="", name="Miscelanea El Punto")
+
+    assert unit.code == ""
+    assert unit.name == "Miscelanea El Punto"
+
+
+@pytest.mark.django_db
+def test_property_unit_strips_values_and_rejects_both_empty(project):
+    unit = PropertyUnit(project=project, code="   ", name="   ")
+
+    with pytest.raises(ValidationError):
+        unit.full_clean()
 
 
 @pytest.mark.django_db
@@ -257,6 +349,15 @@ def test_property_unit_duplicate_code_same_group_is_rejected(project, grouping_t
 
     with pytest.raises(ValidationError):
         duplicate.full_clean()
+
+
+@pytest.mark.django_db
+def test_property_unit_allows_multiple_without_code_in_same_group(project, grouping_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    first = PropertyUnit.objects.create(project=project, structural_group=tower, code="", name="Zona social")
+    second = PropertyUnit.objects.create(project=project, structural_group=tower, code="", name="Deposito")
+
+    assert first.structural_group == second.structural_group
 
 
 @pytest.mark.django_db
@@ -295,6 +396,116 @@ def test_property_unit_activation_inactivation_and_permissions(admin_client, com
     )
     unit.refresh_from_db()
     assert unit.is_active is True
+
+
+@pytest.mark.django_db
+def test_property_unit_list_requires_project_context(admin_client, project):
+    PropertyUnit.objects.create(project=project, code="A101", name="Apartamento 101")
+
+    response = admin_client.get(reverse("real_estate:property_unit_list"))
+
+    assert response.status_code == 200
+    assert "Apartamento 101" not in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_property_unit_filters_by_project_type_group_and_text(admin_client, project, second_project, grouping_type, block_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    unit = PropertyUnit.objects.create(project=project, structural_group=tower, code="A101", name="Apartamento 101")
+    other_group = StructuralGroup.objects.create(project=second_project, grouping_type=grouping_type, code="T1", name="Torre externa")
+    PropertyUnit.objects.create(project=second_project, structural_group=other_group, code="A101", name="Unidad externa")
+    StructuralGroup.objects.create(project=project, grouping_type=block_type, code="B1", name="Bloque 1")
+
+    response = admin_client.get(
+        reverse("real_estate:property_unit_list"),
+        {
+            "project": project.pk,
+            "grouping_type": grouping_type.pk,
+            "structural_group": tower.pk,
+            "q": "Apartamento",
+        },
+    )
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert unit.name in content
+    assert "Unidad externa" not in content
+    assert "Sin titular" in content
+    assert "Sin encargo fiduciario" in content
+    assert "No se han realizado pagos aun" in content
+
+
+@pytest.mark.django_db
+def test_property_unit_direct_project_query(admin_client, project, grouping_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    direct = PropertyUnit.objects.create(project=project, code="D1", name="Directa")
+    PropertyUnit.objects.create(project=project, structural_group=tower, code="A101", name="Agrupada")
+
+    response = admin_client.get(
+        reverse("real_estate:property_unit_list"),
+        {"project": project.pk, "structural_group": "__direct__"},
+    )
+    content = response.content.decode()
+
+    assert direct.name in content
+    assert "Agrupada" not in content
+    assert "Unidades asociadas directamente al proyecto" in content
+
+
+@pytest.mark.django_db
+def test_property_unit_group_choices_are_limited_by_project_and_type(admin_client, project, second_project, grouping_type, block_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    block = StructuralGroup.objects.create(project=project, grouping_type=block_type, code="B1", name="Bloque 1")
+    external = StructuralGroup.objects.create(project=second_project, grouping_type=grouping_type, code="T2", name="Torre externa")
+
+    response = admin_client.get(
+        reverse("real_estate:property_unit_list"),
+        {"project": project.pk, "grouping_type": grouping_type.pk},
+    )
+    content = response.content.decode()
+
+    assert tower.name in content
+    assert block.name not in content
+    assert external.name not in content
+
+
+@pytest.mark.django_db
+def test_property_unit_pagination_preserves_filters_and_shows_second_page(admin_client, project, grouping_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    for index in range(18):
+        PropertyUnit.objects.create(project=project, structural_group=tower, code=f"A{index:03}", name=f"Unidad {index:03}")
+
+    response = admin_client.get(
+        reverse("real_estate:property_unit_list"),
+        {"project": project.pk, "grouping_type": grouping_type.pk, "structural_group": tower.pk, "page": 2},
+    )
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Pagina 2 de 2" in content
+    assert "Unidad 010" in content
+    assert "Unidad 017" in content
+    assert f"project={project.pk}" in content
+    assert f"grouping_type={grouping_type.pk}" in content
+    assert f"structural_group={tower.pk}" in content
+
+
+@pytest.mark.django_db
+def test_structural_group_pagination_preserves_filters(admin_client, project, grouping_type):
+    for index in range(18):
+        StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code=f"T{index:03}", name=f"Torre {index:03}")
+
+    response = admin_client.get(
+        reverse("real_estate:structural_group_list"),
+        {"project": project.pk, "grouping_type": grouping_type.pk, "page": 2},
+    )
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Pagina 2 de 2" in content
+    assert "Torre 010" in content
+    assert f"project={project.pk}" in content
+    assert f"grouping_type={grouping_type.pk}" in content
 
 
 @pytest.mark.django_db

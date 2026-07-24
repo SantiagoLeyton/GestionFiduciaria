@@ -177,7 +177,7 @@ def test_navigation_for_commercial_does_not_show_admin_future_items(client, comm
 
     assert "Importar libro historico" in content
     assert "Auditoria" not in content
-    assert "Usuarios" not in content
+    assert "Usuarios" in content
 
 
 @pytest.mark.django_db
@@ -188,4 +188,5 @@ def test_navigation_for_accounting_admin_shows_admin_future_items(client, accoun
 
     assert "Auditoria" in content
     assert "Usuarios" in content
-    assert accounting_admin_user.get_role_display() in content
+    assert accounting_admin_user.role_label in content
+    assert "Administrador de Contabilidad" not in content

@@ -13,27 +13,48 @@
         <div><h1>Unidades inmobiliarias</h1><p>Consulte y administre las unidades finales asociadas a cada proyecto.</p></div>
         {% if can_manage %}<a class="btn btn-success" href="{% url create_url_name %}">Nueva unidad</a>{% endif %}
       </div>
-      <form class="filter-panel compact-filter" method="get">
+      <form class="filter-panel real-estate-filter" method="get">
+        <div><label class="form-label" for="{{ search_form.project.id_for_label }}">{{ search_form.project.label }}</label>{{ search_form.project }}</div>
+        <div><label class="form-label" for="{{ search_form.grouping_type.id_for_label }}">{{ search_form.grouping_type.label }}</label>{{ search_form.grouping_type }}</div>
+        <div><label class="form-label" for="{{ search_form.structural_group.id_for_label }}">{{ search_form.structural_group.label }}</label>{{ search_form.structural_group }}</div>
         <div><label class="form-label" for="{{ search_form.q.id_for_label }}">{{ search_form.q.label }}</label>{{ search_form.q }}</div>
         <div><label class="form-label" for="{{ search_form.status.id_for_label }}">{{ search_form.status.label }}</label>{{ search_form.status }}</div>
         <div class="filter-actions"><button class="btn btn-success" type="submit">Buscar</button><a class="btn btn-outline-secondary" href="{% url 'real_estate:property_unit_list' %}">Limpiar</a></div>
       </form>
+      <div class="context-panel">
+        <strong>Contexto de consulta</strong>
+        {% if selected_project %}
+          <span>Proyecto: {{ selected_project.name }}</span>
+          {% if selected_grouping_type %}<span>Tipo: {{ selected_grouping_type.name }}</span>{% endif %}
+          {% if selected_structural_group %}
+            <span>Agrupacion: {{ selected_structural_group }}</span>
+          {% elif direct_project_units %}
+            <span>Unidades asociadas directamente al proyecto</span>
+          {% else %}
+            <span>Seleccione tipo y agrupacion para acotar la consulta.</span>
+          {% endif %}
+        {% else %}
+          <span>Seleccione un proyecto para consultar unidades.</span>
+        {% endif %}
+      </div>
       <section class="data-section">
         <div class="section-header"><h2>Unidades registradas</h2><span>{{ property_units|length }} registro{{ property_units|length|pluralize }}</span></div>
         <div class="table-responsive">
           <table class="table align-middle data-table">
-            <thead><tr><th>Codigo</th><th>Nombre</th><th>Proyecto</th><th>Agrupacion</th><th>Estado</th><th>Acciones</th></tr></thead>
+            <thead><tr><th>Codigo</th><th>Nombre</th><th>Proyecto</th><th>Agrupacion</th><th>Titular</th><th>Encargo fiduciario</th><th>Ultimo pago</th><th>Estado</th><th>Acciones</th></tr></thead>
             <tbody>
               {% for entity in property_units %}
                 <tr>
-                  <td>{{ entity.code }}</td><td>{{ entity.name }}</td><td>{{ entity.project.name }}</td><td>{{ entity.structural_group.name|default:"Directa al proyecto" }}</td>
+                  <td>{{ entity.code|default:"-" }}</td><td>{{ entity.name|default:"-" }}</td><td>{{ entity.project.name }}</td><td>{{ entity.structural_group|default:"Directa al proyecto" }}</td>
+                  <td>Sin titular</td><td>Sin encargo fiduciario</td><td>No se han realizado pagos aun</td>
                   <td>{% if entity.is_active %}<span class="status-pill status-active">Activo</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
                   <td class="actions-cell">{% if can_manage %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a>{% endif %}{% include "real_estate/includes/status_action.html" %}</td>
                 </tr>
-              {% empty %}<tr><td colspan="6">No hay unidades registradas.</td></tr>{% endfor %}
+              {% empty %}<tr><td colspan="9">No hay unidades para el contexto seleccionado.</td></tr>{% endfor %}
             </tbody>
           </table>
         </div>
+        {% include "includes/pagination.html" %}
       </section>
     </section>
   </main>

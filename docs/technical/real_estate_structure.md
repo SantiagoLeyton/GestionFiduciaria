@@ -41,8 +41,8 @@ Campos principales:
 - `project`: proyecto propietario.
 - `grouping_type`: tipo configurable de la agrupacion.
 - `parent`: agrupacion padre opcional.
-- `code`: codigo obligatorio.
-- `name`: nombre obligatorio.
+- `code`: codigo opcional.
+- `name`: nombre opcional.
 - `description`: descripcion opcional.
 - `is_active`: estado activo/inactivo.
 - `last_change_reason`: ultimo motivo registrado en una modificacion o cambio de estado.
@@ -51,6 +51,8 @@ Reglas:
 
 - Si no tiene padre, el codigo es unico dentro del proyecto.
 - Si tiene padre, el codigo es unico dentro del padre inmediato.
+- La unicidad del codigo aplica solo cuando el codigo tiene un valor real.
+- Debe existir codigo, nombre o ambos.
 - La agrupacion padre debe pertenecer al mismo proyecto.
 - La jerarquia no puede contener ciclos.
 
@@ -62,8 +64,8 @@ Campos principales:
 
 - `project`: proyecto propietario.
 - `structural_group`: agrupacion estructural padre opcional.
-- `code`: codigo obligatorio.
-- `name`: nombre obligatorio.
+- `code`: codigo opcional.
+- `name`: nombre opcional.
 - `description`: descripcion opcional.
 - `is_active`: estado activo/inactivo.
 - `last_change_reason`: ultimo motivo registrado en una modificacion o cambio de estado.
@@ -72,6 +74,8 @@ Reglas:
 
 - Si no tiene agrupacion padre, el codigo es unico dentro del proyecto.
 - Si tiene agrupacion padre, el codigo es unico dentro de esa agrupacion.
+- La unicidad del codigo aplica solo cuando el codigo tiene un valor real.
+- Debe existir codigo, nombre o ambos.
 - La agrupacion padre debe pertenecer al mismo proyecto de la unidad.
 
 ## Relaciones
@@ -88,10 +92,21 @@ Todas las relaciones usan integridad referencial con `PROTECT`; no se implementa
 
 - `real_estate_project_code_unique`: codigo unico global para proyectos.
 - `real_estate_grouping_type_code_unique`: codigo unico global para tipos de agrupacion.
-- `real_estate_structural_group_root_code_unique`: codigo unico por proyecto para agrupaciones sin padre.
-- `real_estate_structural_group_parent_code_unique`: codigo unico por padre inmediato para agrupaciones con padre.
-- `real_estate_property_unit_project_code_unique`: codigo unico por proyecto para unidades sin agrupacion.
-- `real_estate_property_unit_group_code_unique`: codigo unico por agrupacion para unidades con agrupacion.
+- `real_estate_structural_group_root_code_unique`: codigo unico no vacio por proyecto para agrupaciones sin padre.
+- `real_estate_structural_group_parent_code_unique`: codigo unico no vacio por padre inmediato para agrupaciones con padre.
+- `real_estate_property_unit_project_code_unique`: codigo unico no vacio por proyecto para unidades sin agrupacion.
+- `real_estate_property_unit_group_code_unique`: codigo unico no vacio por agrupacion para unidades con agrupacion.
+
+## Consultas contextuales
+
+La consulta de unidades se realiza por contexto:
+
+- Proyecto.
+- Tipo de agrupacion.
+- Agrupacion concreta.
+- Opcion explicita para unidades asociadas directamente al proyecto.
+
+La pantalla no muestra indiscriminadamente unidades de todos los proyectos al ingresar sin contexto.
 
 ## Permisos
 

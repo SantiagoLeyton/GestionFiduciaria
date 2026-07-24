@@ -22,8 +22,8 @@
         <h2>Fase 1 activa</h2>
         <p>Autenticacion, control de acceso y navegacion base disponibles.</p>
         <div class="role-summary">
-          <span>Usuario: {{ request.user.username }}</span>
-          <span>Rol: {{ request.user.get_role_display }}</span>
+          <span>Usuario: {{ request.user.email }}</span>
+          <span>Rol: {{ request.user.role_label }}</span>
           <span>Estado: {% if request.user.is_active %}Activo{% else %}Inactivo{% endif %}</span>
         </div>
       </section>

@@ -12,7 +12,7 @@ El proyecto cuenta actualmente con las Fases 1, 2A y 2B implementadas:
 - Login y logout.
 - Autenticacion por usuario o correo electronico.
 - Control de acceso reutilizable por roles oficiales.
-- Gestion funcional de usuarios.
+- Consulta funcional de usuarios sin administracion de cuentas desde el panel empresarial.
 - Estructura inmobiliaria configurable: proyectos, tipos de agrupacion, agrupaciones jerarquicas y unidades inmobiliarias.
 - Plantillas base para Login, Inicio, Gestion de Usuarios y Estructura Inmobiliaria.
 - Configuracion PostgreSQL por variables de entorno.

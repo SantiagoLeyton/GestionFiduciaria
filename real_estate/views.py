@@ -11,9 +11,11 @@ from .forms import (
     GroupingTypeUpdateForm,
     ProjectForm,
     ProjectUpdateForm,
+    PropertyUnitFilterForm,
     PropertyUnitForm,
     PropertyUnitUpdateForm,
     SearchForm,
+    StructuralGroupFilterForm,
     StructuralGroupForm,
     StructuralGroupUpdateForm,
 )
@@ -46,6 +48,9 @@ class EntityListView(RealEstateReadRequiredMixin, ListView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["search_form"] = getattr(self, "search_form", SearchForm(self.request.GET))
+        query_params = self.request.GET.copy()
+        query_params.pop("page", None)
+        context["page_querystring"] = query_params.urlencode()
         context["can_manage"] = can_manage_real_estate(self.request.user)
         context["create_url_name"] = self.create_url_name
         context["update_url_name"] = self.update_url_name
@@ -191,7 +196,34 @@ class StructuralGroupListView(EntityListView):
     search_fields = ("code", "name", "project__name", "grouping_type__name")
 
     def get_queryset(self):
-        return super().get_queryset().select_related("project", "grouping_type", "parent")
+        queryset = self.model.objects.select_related("project", "grouping_type", "parent")
+        self.search_form = StructuralGroupFilterForm(self.request.GET)
+        if self.search_form.is_valid():
+            query = self.search_form.cleaned_data.get("q")
+            status = self.search_form.cleaned_data.get("status")
+            project = self.search_form.cleaned_data.get("project")
+            grouping_type = self.search_form.cleaned_data.get("grouping_type")
+            parent = self.search_form.cleaned_data.get("parent")
+            if query:
+                queryset = queryset.filter(
+                    Q(code__icontains=query)
+                    | Q(name__icontains=query)
+                    | Q(project__name__icontains=query)
+                    | Q(grouping_type__name__icontains=query)
+                    | Q(parent__name__icontains=query)
+                    | Q(parent__code__icontains=query)
+                )
+            if project:
+                queryset = queryset.filter(project=project)
+            if grouping_type:
+                queryset = queryset.filter(grouping_type=grouping_type)
+            if parent:
+                queryset = queryset.filter(parent=parent)
+            if status == "active":
+                queryset = queryset.filter(is_active=True)
+            elif status == "inactive":
+                queryset = queryset.filter(is_active=False)
+        return queryset
 
 
 class StructuralGroupCreateView(EntityCreateView):
@@ -227,7 +259,66 @@ class PropertyUnitListView(EntityListView):
     search_fields = ("code", "name", "project__name", "structural_group__name")
 
     def get_queryset(self):
-        return super().get_queryset().select_related("project", "structural_group")
+        queryset = self.model.objects.select_related("project", "structural_group", "structural_group__grouping_type")
+        self.search_form = PropertyUnitFilterForm(self.request.GET)
+        self.selected_project = None
+        self.selected_grouping_type = None
+        self.selected_structural_group = None
+        self.direct_project_units = False
+
+        if not self.search_form.is_valid():
+            return queryset.none()
+
+        query = self.search_form.cleaned_data.get("q")
+        status = self.search_form.cleaned_data.get("status")
+        project = self.search_form.cleaned_data.get("project")
+        grouping_type = self.search_form.cleaned_data.get("grouping_type")
+        structural_group = self.search_form.cleaned_data.get("structural_group")
+
+        self.selected_project = project
+        self.selected_grouping_type = grouping_type
+        if structural_group == PropertyUnitFilterForm.DIRECT_VALUE:
+            self.direct_project_units = True
+        elif isinstance(structural_group, StructuralGroup):
+            self.selected_structural_group = structural_group
+            if not project:
+                project = structural_group.project
+                self.selected_project = project
+            if not grouping_type:
+                grouping_type = structural_group.grouping_type
+                self.selected_grouping_type = grouping_type
+
+        if not project:
+            return queryset.none()
+
+        queryset = queryset.filter(project=project)
+        if query:
+            queryset = queryset.filter(
+                Q(code__icontains=query)
+                | Q(name__icontains=query)
+                | Q(project__name__icontains=query)
+                | Q(structural_group__name__icontains=query)
+                | Q(structural_group__code__icontains=query)
+            )
+        if grouping_type:
+            queryset = queryset.filter(structural_group__grouping_type=grouping_type)
+        if self.direct_project_units:
+            queryset = queryset.filter(structural_group__isnull=True)
+        elif self.selected_structural_group:
+            queryset = queryset.filter(structural_group=self.selected_structural_group)
+        if status == "active":
+            queryset = queryset.filter(is_active=True)
+        elif status == "inactive":
+            queryset = queryset.filter(is_active=False)
+        return queryset
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["selected_project"] = self.selected_project
+        context["selected_grouping_type"] = self.selected_grouping_type
+        context["selected_structural_group"] = self.selected_structural_group
+        context["direct_project_units"] = self.direct_project_units
+        return context
 
 
 class PropertyUnitCreateView(EntityCreateView):

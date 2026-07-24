@@ -19,8 +19,17 @@ class ActiveEntity(models.Model):
         self.full_clean()
         return super().save(*args, **kwargs)
 
+    def clean(self):
+        super().clean()
+        if self.code is not None:
+            self.code = self.code.strip()
+        if self.name is not None:
+            self.name = self.name.strip()
+
     def __str__(self):
-        return f"{self.code} - {self.name}"
+        if self.code and self.name:
+            return f"{self.code} - {self.name}"
+        return self.code or self.name
 
 
 class Project(ActiveEntity):
@@ -44,6 +53,8 @@ class GroupingType(ActiveEntity):
 
 
 class StructuralGroup(ActiveEntity):
+    code = models.CharField("codigo", max_length=50, blank=True)
+    name = models.CharField("nombre", max_length=150, blank=True)
     project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name="structural_groups")
     grouping_type = models.ForeignKey(GroupingType, on_delete=models.PROTECT, related_name="structural_groups")
     parent = models.ForeignKey(
@@ -59,12 +70,12 @@ class StructuralGroup(ActiveEntity):
         constraints = [
             models.UniqueConstraint(
                 fields=["project", "code"],
-                condition=Q(parent__isnull=True),
+                condition=Q(parent__isnull=True) & ~Q(code=""),
                 name="real_estate_structural_group_root_code_unique",
             ),
             models.UniqueConstraint(
                 fields=["parent", "code"],
-                condition=Q(parent__isnull=False),
+                condition=Q(parent__isnull=False) & ~Q(code=""),
                 name="real_estate_structural_group_parent_code_unique",
             ),
         ]
@@ -73,6 +84,8 @@ class StructuralGroup(ActiveEntity):
 
     def clean(self):
         super().clean()
+        if not self.code and not self.name:
+            raise ValidationError("Debe registrar codigo, nombre o ambos.")
         if self.parent and self.parent.project_id != self.project_id:
             raise ValidationError({"parent": "La agrupacion padre debe pertenecer al mismo proyecto."})
 
@@ -84,6 +97,8 @@ class StructuralGroup(ActiveEntity):
 
 
 class PropertyUnit(ActiveEntity):
+    code = models.CharField("codigo", max_length=50, blank=True)
+    name = models.CharField("nombre", max_length=150, blank=True)
     project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name="property_units")
     structural_group = models.ForeignKey(
         StructuralGroup,
@@ -98,12 +113,12 @@ class PropertyUnit(ActiveEntity):
         constraints = [
             models.UniqueConstraint(
                 fields=["project", "code"],
-                condition=Q(structural_group__isnull=True),
+                condition=Q(structural_group__isnull=True) & ~Q(code=""),
                 name="real_estate_property_unit_project_code_unique",
             ),
             models.UniqueConstraint(
                 fields=["structural_group", "code"],
-                condition=Q(structural_group__isnull=False),
+                condition=Q(structural_group__isnull=False) & ~Q(code=""),
                 name="real_estate_property_unit_group_code_unique",
             ),
         ]
@@ -112,6 +127,8 @@ class PropertyUnit(ActiveEntity):
 
     def clean(self):
         super().clean()
+        if not self.code and not self.name:
+            raise ValidationError("Debe registrar codigo, nombre o ambos.")
         if self.structural_group and self.structural_group.project_id != self.project_id:
             raise ValidationError(
                 {"structural_group": "La unidad no puede asociarse a una agrupacion de otro proyecto."}

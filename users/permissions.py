@@ -46,3 +46,10 @@ class UserManagementRequiredMixin(AccessMixin):
         if not user_can_manage_users(request.user):
             raise PermissionDenied
         return super().dispatch(request, *args, **kwargs)
+
+
+class UserReadRequiredMixin(AccessMixin):
+    def dispatch(self, request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return self.handle_no_permission()
+        return super().dispatch(request, *args, **kwargs)
