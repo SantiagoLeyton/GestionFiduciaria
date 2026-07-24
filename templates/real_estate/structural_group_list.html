@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}Agrupaciones | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>Agrupaciones</h1><p>Consulte y administre la jerarquia configurable de cada proyecto.</p></div>
+        {% if can_manage %}<a class="btn btn-success" href="{% url create_url_name %}">Nueva agrupacion</a>{% endif %}
+      </div>
+      <form class="filter-panel compact-filter" method="get">
+        <div><label class="form-label" for="{{ search_form.q.id_for_label }}">{{ search_form.q.label }}</label>{{ search_form.q }}</div>
+        <div><label class="form-label" for="{{ search_form.status.id_for_label }}">{{ search_form.status.label }}</label>{{ search_form.status }}</div>
+        <div class="filter-actions"><button class="btn btn-success" type="submit">Buscar</button><a class="btn btn-outline-secondary" href="{% url 'real_estate:structural_group_list' %}">Limpiar</a></div>
+      </form>
+      <section class="data-section">
+        <div class="section-header"><h2>Agrupaciones registradas</h2><span>{{ structural_groups|length }} registro{{ structural_groups|length|pluralize }}</span></div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead><tr><th>Codigo</th><th>Nombre</th><th>Proyecto</th><th>Tipo</th><th>Padre</th><th>Estado</th><th>Acciones</th></tr></thead>
+            <tbody>
+              {% for entity in structural_groups %}
+                <tr>
+                  <td>{{ entity.code }}</td><td>{{ entity.name }}</td><td>{{ entity.project.name }}</td><td>{{ entity.grouping_type.name }}</td><td>{{ entity.parent.name|default:"Directa al proyecto" }}</td>
+                  <td>{% if entity.is_active %}<span class="status-pill status-active">Activo</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
+                  <td class="actions-cell">{% if can_manage %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a>{% endif %}{% include "real_estate/includes/status_action.html" %}</td>
+                </tr>
+              {% empty %}<tr><td colspan="7">No hay agrupaciones registradas.</td></tr>{% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% if can_manage %}
+  <form method="post" action="{% url status_url_name entity.pk 'deactivate' %}" class="status-action-form">
+    {% csrf_token %}
+    <input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required>
+    <button class="btn btn-sm btn-outline-secondary" type="submit" {% if not entity.is_active %}disabled{% endif %}>Inactivar</button>
+  </form>
+  <form method="post" action="{% url status_url_name entity.pk 'activate' %}" class="status-action-form">
+    {% csrf_token %}
+    <input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required>
+    <button class="btn btn-sm btn-outline-secondary" type="submit" {% if entity.is_active %}disabled{% endif %}>Activar</button>
+  </form>
+{% endif %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}{% if object %}Editar{% else %}Nuevo{% endif %} {{ entity_label }} | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>{% if object %}Editar{% else %}Nuevo{% endif %} {{ entity_label }}</h1>
+          <p>Registre la informacion administrativa requerida para la estructura inmobiliaria.</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url list_url_name %}">Volver</a>
+      </div>
+
+      <form class="form-panel" method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}
+          <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+        {% endif %}
+        <div class="form-grid">
+          {% for field in form %}
+            <div class="{% if field.name == 'is_active' %}form-check form-switch{% endif %}">
+              {% if field.name == 'is_active' %}
+                {{ field }}
+                <label class="form-check-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {% else %}
+                <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+              {% endif %}
+              {{ field.errors }}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Guardar</button>
+          <a class="btn btn-outline-secondary" href="{% url list_url_name %}">Cancelar</a>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+{% endblock %}

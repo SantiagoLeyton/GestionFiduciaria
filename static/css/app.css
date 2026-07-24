@@ -240,12 +240,24 @@ body {
   align-items: end;
 }
 
+.compact-filter {
+  grid-template-columns: minmax(220px, 1fr) 180px auto;
+}
+
 .filter-actions,
 .form-actions,
 .actions-cell {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.status-action-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  width: 260px;
 }
 
 .section-header {

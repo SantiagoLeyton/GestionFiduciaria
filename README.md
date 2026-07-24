@@ -2,21 +2,23 @@
 
 Sistema web local para la gestion de informacion fiduciaria de Constructora Centenario S.A.S.
 
-## Alcance de esta fase
+## Alcance implementado
 
-La Fase 1 implementa los fundamentos del proyecto:
+El proyecto cuenta actualmente con las Fases 1, 2A y 2B implementadas:
 
 - Proyecto Django.
-- Aplicaciones `core` y `users`.
+- Aplicaciones `core`, `users` y `real_estate`.
 - Usuario personalizado configurado como `AUTH_USER_MODEL`.
 - Login y logout.
 - Autenticacion por usuario o correo electronico.
 - Control de acceso reutilizable por roles oficiales.
-- Plantillas base para Login e Inicio.
+- Gestion funcional de usuarios.
+- Estructura inmobiliaria configurable: proyectos, tipos de agrupacion, agrupaciones jerarquicas y unidades inmobiliarias.
+- Plantillas base para Login, Inicio, Gestion de Usuarios y Estructura Inmobiliaria.
 - Configuracion PostgreSQL por variables de entorno.
 - Archivos estaticos, logging tecnico inicial y pruebas con pytest.
 
-No se implementan en esta fase clientes, proyectos, pagos, novedades, importaciones, auditoria funcional ni integraciones externas.
+No se implementan todavia clientes, encargos fiduciarios, pagos, novedades, importaciones, auditoria funcional, API, Docker ni integraciones externas.
 
 ## Requisitos
 
@@ -51,11 +53,11 @@ copy .env.example .env
 .\.venv\Scripts\pytest
 ```
 
-Las pruebas usan una configuracion aislada en `config.test_settings` para validar la fase sin depender de datos reales.
+Las pruebas pueden usar una configuracion aislada en `config.test_settings` para validar sin depender de datos reales.
 
 Esta ejecucion aislada usa SQLite porque el entorno local puede no tener PostgreSQL disponible. No reemplaza la validacion oficial contra PostgreSQL 17.
 
-Cuando PostgreSQL este instalado, iniciado y configurado mediante las variables `DB_*`, ejecutar:
+La validacion oficial del proyecto se ejecuta contra PostgreSQL configurado mediante las variables `DB_*`:
 
 ```powershell
 .\.venv\Scripts\python manage.py check

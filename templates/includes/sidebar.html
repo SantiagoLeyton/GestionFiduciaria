@@ -10,8 +10,10 @@
     <a class="nav-link active" href="{% url 'home' %}">Inicio</a>
     <span class="nav-link disabled">Importar libro historico</span>
     <span class="nav-link disabled">Importar reportes fiduciarios</span>
-    <span class="nav-link disabled">Proyectos</span>
-    <span class="nav-link disabled">Unidades</span>
+    <a class="nav-link" href="{% url 'real_estate:project_list' %}">Proyectos</a>
+    <a class="nav-link" href="{% url 'real_estate:grouping_type_list' %}">Tipos de agrupacion</a>
+    <a class="nav-link" href="{% url 'real_estate:structural_group_list' %}">Agrupaciones</a>
+    <a class="nav-link" href="{% url 'real_estate:property_unit_list' %}">Unidades</a>
     <span class="nav-link disabled">Clientes</span>
     <span class="nav-link disabled">Encargos fiduciarios</span>
     <span class="nav-link disabled">Pagos</span>
