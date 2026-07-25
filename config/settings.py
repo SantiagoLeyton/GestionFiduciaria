@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     "core",
     "users",
     "real_estate",
+    "fiduciary",
 ]
 
 MIDDLEWARE = [

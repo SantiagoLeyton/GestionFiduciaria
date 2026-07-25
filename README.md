@@ -4,21 +4,24 @@ Sistema web local para la gestion de informacion fiduciaria de Constructora Cent
 
 ## Alcance implementado
 
-El proyecto cuenta actualmente con las Fases 1, 2A y 2B implementadas:
+El proyecto cuenta actualmente con las Fases 1, 2A, 2B y 3 implementadas:
 
 - Proyecto Django.
-- Aplicaciones `core`, `users` y `real_estate`.
+- Aplicaciones `core`, `users`, `real_estate` y `fiduciary`.
 - Usuario personalizado configurado como `AUTH_USER_MODEL`.
 - Login y logout.
 - Autenticacion por usuario o correo electronico.
 - Control de acceso reutilizable por roles oficiales.
 - Consulta funcional de usuarios sin administracion de cuentas desde el panel empresarial.
 - Estructura inmobiliaria configurable: proyectos, tipos de agrupacion, agrupaciones jerarquicas y unidades inmobiliarias.
+- Clientes, titularidades historicas y encargos fiduciarios.
+- Formulario temporal de validacion para encargos fiduciarios; el flujo definitivo vendra de importaciones.
 - Plantillas base para Login, Inicio, Gestion de Usuarios y Estructura Inmobiliaria.
+- Listados y detalles de clientes, titularidades y encargos fiduciarios.
 - Configuracion PostgreSQL por variables de entorno.
 - Archivos estaticos, logging tecnico inicial y pruebas con pytest.
 
-No se implementan todavia clientes, encargos fiduciarios, pagos, novedades, importaciones, auditoria funcional, API, Docker ni integraciones externas.
+No se implementan todavia pagos, novedades completas, importaciones, auditoria funcional, API, Docker ni integraciones externas.
 
 ## Requisitos
 

@@ -1,0 +1,304 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>{{ title }}</h1><p>Registre temporalmente un encargo para validar titulares, historicos y restricciones.</p></div>
+        <a class="btn btn-outline-secondary" href="{% url back_url %}">Volver</a>
+      </div>
+      <div class="alert alert-warning">{{ temporary_assignment_notice }}</div>
+      <form class="form-panel" method="post" novalidate id="assignment-form">
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+        {% if holder_formset.non_form_errors %}<div class="alert alert-danger">{{ holder_formset.non_form_errors }}</div>{% endif %}
+        <div class="form-grid">
+          {% for field in form %}
+            <div>
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {{ field.errors }}
+            </div>
+          {% endfor %}
+        </div>
+
+        <section class="data-section mt-4">
+          <div class="section-header">
+            <h2>Titulares secundarios</h2>
+            <button class="btn btn-outline-secondary btn-sm" type="button" id="add-secondary-holder">Agregar titular secundario</button>
+          </div>
+          <p class="text-muted" id="holder-help">Seleccione primero una unidad para cargar titulares vigentes.</p>
+          {{ holder_formset.management_form }}
+          <div id="secondary-holder-forms">
+            {% for secondary_form in holder_formset %}
+              <div class="holder-form-row">
+                {{ secondary_form.DELETE }}
+                <label class="form-label" for="{{ secondary_form.client.id_for_label }}">{{ secondary_form.client.label }}</label>
+                <div class="holder-form-controls">
+                  {{ secondary_form.client }}
+                  <button class="btn btn-outline-secondary btn-sm remove-secondary-holder" type="button">Retirar</button>
+                </div>
+                {{ secondary_form.client.errors }}
+              </div>
+            {% endfor %}
+          </div>
+          <template id="empty-secondary-holder-template">
+            <div class="holder-form-row">
+              {{ holder_formset.empty_form.DELETE }}
+              <label class="form-label" for="{{ holder_formset.empty_form.client.id_for_label }}">{{ holder_formset.empty_form.client.label }}</label>
+              <div class="holder-form-controls">
+                {{ holder_formset.empty_form.client }}
+                <button class="btn btn-outline-secondary btn-sm remove-secondary-holder" type="button">Retirar</button>
+              </div>
+            </div>
+          </template>
+        </section>
+
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Guardar</button>
+          <a class="btn btn-outline-secondary" href="{% url back_url %}">Cancelar</a>
+        </div>
+      </form>
+      <script>
+        (function () {
+          const endpoints = {
+            types: "{% url 'fiduciary:assignment_context_types' %}",
+            groups: "{% url 'fiduciary:assignment_context_groups' %}",
+            units: "{% url 'fiduciary:assignment_context_units' %}",
+            holders: "{% url 'fiduciary:assignment_context_holders' %}",
+          };
+          const projectSelect = document.querySelector("[data-context-field='project']");
+          const typeSelect = document.querySelector("[data-context-field='grouping-type']");
+          const groupSelect = document.querySelector("[data-context-field='structural-group']");
+          const unitSelect = document.querySelector("[data-context-field='property-unit']");
+          const primarySelect = document.querySelector("[data-holder-role='primary']");
+          const holderHelp = document.getElementById("holder-help");
+          const formContainer = document.getElementById("secondary-holder-forms");
+          const addButton = document.getElementById("add-secondary-holder");
+          const totalForms = document.getElementById("id_holders-TOTAL_FORMS");
+          const template = document.getElementById("empty-secondary-holder-template");
+          let holderOptions = [];
+
+          function buildUrl(endpoint, params) {
+            const url = new URL(endpoint, window.location.origin);
+            Object.entries(params).forEach(([key, value]) => {
+              if (value) url.searchParams.set(key, value);
+            });
+            return url;
+          }
+
+          function setOptions(select, rows, placeholder) {
+            if (!select) return;
+            select.innerHTML = "";
+            const empty = document.createElement("option");
+            empty.value = "";
+            empty.textContent = placeholder || "---------";
+            select.appendChild(empty);
+            rows.forEach((row) => {
+              const option = document.createElement("option");
+              option.value = row.id;
+              option.textContent = row.text || row.label;
+              select.appendChild(option);
+            });
+          }
+
+          function setDisabled(select, disabled) {
+            if (select) select.disabled = disabled;
+          }
+
+          async function loadOptions(endpoint, params) {
+            const response = await fetch(buildUrl(endpoint, params), {
+              headers: { "X-Requested-With": "XMLHttpRequest" },
+            });
+            if (!response.ok) return [];
+            const payload = await response.json();
+            return payload.results || [];
+          }
+
+          function currentUnitId() {
+            return unitSelect ? unitSelect.value : "";
+          }
+
+          function populateClientSelect(select, excludeIds) {
+            const currentValue = select.value;
+            select.innerHTML = '<option value="">---------</option>';
+            holderOptions
+              .filter((holder) => !excludeIds.has(String(holder.id)) || String(holder.id) === String(currentValue))
+              .forEach((holder) => {
+                const option = document.createElement("option");
+                option.value = holder.id;
+                option.textContent = holder.text || holder.label;
+                if (String(holder.id) === String(currentValue)) option.selected = true;
+                select.appendChild(option);
+              });
+            select.disabled = !currentUnitId() || holderOptions.length === 0;
+          }
+
+          function selectedSecondaryIds(currentSelect) {
+            const ids = new Set();
+            formContainer.querySelectorAll("[data-holder-role='secondary']").forEach((select) => {
+              const row = select.closest(".holder-form-row");
+              const deleteInput = row ? row.querySelector("input[name$='-DELETE']") : null;
+              if (select !== currentSelect && select.value && (!deleteInput || deleteInput.value !== "on")) {
+                ids.add(String(select.value));
+              }
+            });
+            if (primarySelect && primarySelect.value) ids.add(String(primarySelect.value));
+            return ids;
+          }
+
+          async function refreshHolderOptions(clearValues) {
+            if (clearValues && primarySelect) primarySelect.value = "";
+            holderOptions = currentUnitId() ? await loadOptions(endpoints.holders, { unit: currentUnitId() }) : [];
+            if (primarySelect) populateClientSelect(primarySelect, new Set());
+            formContainer.querySelectorAll("[data-holder-role='secondary']").forEach((select) => {
+              if (clearValues) select.value = "";
+              populateClientSelect(select, selectedSecondaryIds(select));
+            });
+            holderHelp.textContent = holderOptions.length
+              ? "Seleccione titulares vigentes de la unidad."
+              : currentUnitId()
+                ? "La unidad seleccionada no tiene titulares vigentes. Registre primero la titularidad de los clientes."
+                : "Seleccione primero una unidad para cargar titulares vigentes.";
+            if (addButton) addButton.disabled = !currentUnitId() || holderOptions.length === 0;
+          }
+
+          function resetSecondaryRows() {
+            const rows = Array.from(formContainer.querySelectorAll(".holder-form-row"));
+            rows.forEach((row, index) => {
+              const deleteInput = row.querySelector("input[name$='-DELETE']");
+              const select = row.querySelector("select");
+              if (deleteInput) deleteInput.value = "";
+              if (select) select.value = "";
+              if (index === 0) {
+                row.hidden = false;
+                if (select) {
+                  select.innerHTML = '<option value="">---------</option>';
+                  select.disabled = true;
+                }
+              } else {
+                row.remove();
+              }
+            });
+            if (totalForms) totalForms.value = "1";
+          }
+
+          async function addRow() {
+            const index = Number(totalForms.value);
+            const html = template.innerHTML.replace(/__prefix__/g, index);
+            formContainer.insertAdjacentHTML("beforeend", html);
+            totalForms.value = String(index + 1);
+            const row = formContainer.lastElementChild;
+            const select = row.querySelector("[data-holder-role='secondary']");
+            populateClientSelect(select, selectedSecondaryIds(select));
+          }
+
+          function clearContextFrom(select) {
+            if (select === projectSelect) {
+              setOptions(typeSelect, [], "---------");
+              setOptions(groupSelect, [], "---------");
+              setOptions(unitSelect, [], "---------");
+              setDisabled(typeSelect, true);
+              setDisabled(groupSelect, true);
+              setDisabled(unitSelect, true);
+            } else if (select === typeSelect) {
+              setOptions(groupSelect, [], "---------");
+              setOptions(unitSelect, [], "---------");
+              setDisabled(groupSelect, true);
+              setDisabled(unitSelect, true);
+            } else if (select === groupSelect) {
+              setOptions(unitSelect, [], "---------");
+              setDisabled(unitSelect, true);
+            }
+            resetSecondaryRows();
+          }
+
+          async function loadProjectContext() {
+            const projectId = projectSelect.value;
+            clearContextFrom(projectSelect);
+            if (!projectId) {
+              await refreshHolderOptions(true);
+              return;
+            }
+            const [types, groups] = await Promise.all([
+              loadOptions(endpoints.types, { project: projectId }),
+              loadOptions(endpoints.groups, { project: projectId }),
+            ]);
+            setOptions(typeSelect, types, "---------");
+            setOptions(groupSelect, groups, "---------");
+            setDisabled(typeSelect, false);
+            setDisabled(groupSelect, false);
+            await refreshHolderOptions(true);
+          }
+
+          async function loadTypeContext() {
+            const projectId = projectSelect.value;
+            const groupingTypeId = typeSelect.value;
+            clearContextFrom(typeSelect);
+            if (!projectId) {
+              await refreshHolderOptions(true);
+              return;
+            }
+            const groups = await loadOptions(endpoints.groups, {
+              project: projectId,
+              grouping_type: groupingTypeId,
+            });
+            setOptions(groupSelect, groups, "---------");
+            setDisabled(groupSelect, false);
+            await refreshHolderOptions(true);
+          }
+
+          async function loadGroupContext() {
+            const projectId = projectSelect.value;
+            const groupingTypeId = typeSelect.value;
+            const groupId = groupSelect.value;
+            clearContextFrom(groupSelect);
+            if (!projectId || !groupId) {
+              await refreshHolderOptions(true);
+              return;
+            }
+            const units = await loadOptions(endpoints.units, {
+              project: projectId,
+              grouping_type: groupingTypeId,
+              structural_group: groupId,
+            });
+            setOptions(unitSelect, units, "---------");
+            setDisabled(unitSelect, false);
+            await refreshHolderOptions(true);
+          }
+
+          addButton.addEventListener("click", addRow);
+          formContainer.addEventListener("click", function (event) {
+            if (!event.target.classList.contains("remove-secondary-holder")) return;
+            const row = event.target.closest(".holder-form-row");
+            const deleteInput = row.querySelector("input[name$='-DELETE']");
+            const select = row.querySelector("select");
+            if (deleteInput) deleteInput.value = "on";
+            if (select) select.value = "";
+            row.hidden = true;
+            refreshHolderOptions(false);
+          });
+          formContainer.addEventListener("change", function (event) {
+            if (event.target.matches("[data-holder-role='secondary']")) refreshHolderOptions(false);
+          });
+          if (primarySelect) primarySelect.addEventListener("change", function () { refreshHolderOptions(false); });
+          if (projectSelect) projectSelect.addEventListener("change", loadProjectContext);
+          if (typeSelect) typeSelect.addEventListener("change", loadTypeContext);
+          if (groupSelect) groupSelect.addEventListener("change", loadGroupContext);
+          if (unitSelect) unitSelect.addEventListener("change", function () {
+            resetSecondaryRows();
+            refreshHolderOptions(true);
+          });
+          refreshHolderOptions(false);
+        })();
+      </script>
+    </section>
+  </main>
+</div>
+{% endblock %}

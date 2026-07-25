@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>{{ title }}</h1><p>Registre la informacion autorizada para la gestion fiduciaria.</p></div>
+        <a class="btn btn-outline-secondary" href="{% url back_url %}">Volver</a>
+      </div>
+      <form class="form-panel" method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+        <div class="form-grid">
+          {% for field in form %}
+            <div class="{% if field.field.widget.input_type == 'checkbox' %}form-check form-switch{% endif %}">
+              {% if field.field.widget.input_type == 'checkbox' %}
+                {{ field }}
+                <label class="form-check-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {% else %}
+                <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+              {% endif %}
+              {{ field.errors }}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Guardar</button>
+          <a class="btn btn-outline-secondary" href="{% url back_url %}">Cancelar</a>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+{% endblock %}

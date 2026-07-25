@@ -108,6 +108,8 @@ La consulta de unidades se realiza por contexto:
 
 La pantalla no muestra indiscriminadamente unidades de todos los proyectos al ingresar sin contexto.
 
+La vista de unidades se integra con la app `fiduciary` para mostrar titulares vigentes y encargo fiduciario vigente cuando existan datos reales. Mientras no exista el modulo de pagos, conserva el texto temporal `No se han realizado pagos aun`.
+
 ## Permisos
 
 - Administrador de Contabilidad y superusuarios tecnicos: consultar, crear, editar, activar e inactivar.

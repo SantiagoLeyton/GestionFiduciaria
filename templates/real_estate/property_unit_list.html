@@ -46,7 +46,21 @@
               {% for entity in property_units %}
                 <tr>
                   <td>{{ entity.code|default:"-" }}</td><td>{{ entity.name|default:"-" }}</td><td>{{ entity.project.name }}</td><td>{{ entity.structural_group|default:"Directa al proyecto" }}</td>
-                  <td>Sin titular</td><td>Sin encargo fiduciario</td><td>No se han realizado pagos aun</td>
+                  <td>
+                    {% for ownership in entity.active_ownerships %}
+                      <a href="{% url 'fiduciary:client_detail' ownership.client.pk %}">{{ ownership.client.full_name }}</a> ({% if ownership.is_primary %}Principal{% else %}Secundario{% endif %}){% if not forloop.last %}, {% endif %}
+                    {% empty %}
+                      Sin titular
+                    {% endfor %}
+                  </td>
+                  <td>
+                    {% for assignment in entity.active_assignments %}
+                      <a href="{% url 'fiduciary:assignment_detail' assignment.pk %}">{{ assignment.assignment_number }}</a>
+                    {% empty %}
+                      Sin encargo fiduciario
+                    {% endfor %}
+                  </td>
+                  <td>No se han realizado pagos aun</td>
                   <td>{% if entity.is_active %}<span class="status-pill status-active">Activo</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
                   <td class="actions-cell">{% if can_manage %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a>{% endif %}{% include "real_estate/includes/status_action.html" %}</td>
                 </tr>

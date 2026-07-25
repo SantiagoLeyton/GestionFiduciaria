@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Clientes | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>Clientes</h1><p>Consulte y administre clientes asociados a unidades y encargos fiduciarios.</p></div>
+        {% if can_manage %}<a class="btn btn-success" href="{% url 'fiduciary:client_create' %}">Nuevo cliente</a>{% endif %}
+      </div>
+      <form class="filter-panel real-estate-filter" method="get">
+        <div><label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>{{ filter_form.q }}</div>
+        <div><label class="form-label" for="{{ filter_form.document_type.id_for_label }}">{{ filter_form.document_type.label }}</label>{{ filter_form.document_type }}</div>
+        <div><label class="form-label" for="{{ filter_form.information_status.id_for_label }}">{{ filter_form.information_status.label }}</label>{{ filter_form.information_status }}</div>
+        <div><label class="form-label" for="{{ filter_form.status.id_for_label }}">{{ filter_form.status.label }}</label>{{ filter_form.status }}</div>
+        <div><label class="form-label" for="{{ filter_form.project.id_for_label }}">{{ filter_form.project.label }}</label>{{ filter_form.project }}</div>
+        <div><label class="form-label" for="{{ filter_form.property_unit.id_for_label }}">{{ filter_form.property_unit.label }}</label>{{ filter_form.property_unit }}</div>
+        <div class="filter-actions"><button class="btn btn-success" type="submit">Buscar</button><a class="btn btn-outline-secondary" href="{% url 'fiduciary:client_list' %}">Limpiar</a></div>
+      </form>
+      <section class="data-section">
+        <div class="section-header"><h2>Clientes registrados</h2><span>{{ clients|length }} registro{{ clients|length|pluralize }}</span></div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead><tr><th>Documento</th><th>Cliente</th><th>Telefono</th><th>Correo</th><th>Info.</th><th>Estado</th><th>Unidades</th><th>Encargos</th><th>Acciones</th></tr></thead>
+            <tbody>
+              {% for client in clients %}
+                <tr>
+                  <td>{{ client.get_document_type_display }} {{ client.document_number }}</td>
+                  <td><a href="{% url 'fiduciary:client_detail' client.pk %}">{{ client.full_name }}</a></td>
+                  <td>{{ client.phone|default:"-" }}</td>
+                  <td>{{ client.email|default:"-" }}</td>
+                  <td>{{ client.get_information_status_display }}</td>
+                  <td>{% if client.is_active %}<span class="status-pill status-active">Activo</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
+                  <td>{{ client.current_units_count }}</td>
+                  <td>{{ client.assignments_count }}</td>
+                  <td class="actions-cell">
+                    <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:client_detail' client.pk %}">Ver</a>
+                    {% if can_manage %}
+                      <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:client_update' client.pk %}">Editar</a>
+                      <form method="post" action="{% url 'fiduciary:client_status' client.pk 'deactivate' %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><button class="btn btn-sm btn-outline-secondary" {% if not client.is_active %}disabled{% endif %}>Inactivar</button></form>
+                      <form method="post" action="{% url 'fiduciary:client_status' client.pk 'activate' %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><button class="btn btn-sm btn-outline-secondary" {% if client.is_active %}disabled{% endif %}>Activar</button></form>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% empty %}<tr><td colspan="9">No hay clientes con los filtros seleccionados.</td></tr>{% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% include "includes/pagination.html" %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

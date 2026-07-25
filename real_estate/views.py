@@ -1,6 +1,7 @@
 from django.contrib import messages
 from django.db import transaction
 from django.db.models import Q
+from django.db.models import Prefetch
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse_lazy
@@ -259,7 +260,22 @@ class PropertyUnitListView(EntityListView):
     search_fields = ("code", "name", "project__name", "structural_group__name")
 
     def get_queryset(self):
-        queryset = self.model.objects.select_related("project", "structural_group", "structural_group__grouping_type")
+        from fiduciary.models import FiduciaryAssignment, UnitOwnership
+
+        queryset = self.model.objects.select_related(
+            "project", "structural_group", "structural_group__grouping_type"
+        ).prefetch_related(
+            Prefetch(
+                "ownerships",
+                queryset=UnitOwnership.objects.filter(is_active=True).select_related("client"),
+                to_attr="active_ownerships",
+            ),
+            Prefetch(
+                "fiduciary_assignments",
+                queryset=FiduciaryAssignment.objects.filter(is_active=True),
+                to_attr="active_assignments",
+            ),
+        )
         self.search_form = PropertyUnitFilterForm(self.request.GET)
         self.selected_project = None
         self.selected_grouping_type = None

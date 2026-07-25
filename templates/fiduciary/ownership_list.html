@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Titularidades | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>Titularidades</h1><p>Consulte la relacion historica entre clientes y unidades.</p></div>
+        {% if can_manage %}<a class="btn btn-success" href="{% url 'fiduciary:ownership_create' %}">Nueva titularidad</a>{% endif %}
+      </div>
+      <section class="data-section">
+        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Cliente</th><th>Unidad</th><th>Proyecto</th><th>Rol</th><th>Periodo</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>
+          {% for ownership in ownerships %}
+            <tr><td><a href="{% url 'fiduciary:client_detail' ownership.client.pk %}">{{ ownership.client.full_name }}</a></td><td>{{ ownership.property_unit }}</td><td>{{ ownership.property_unit.project.name }}</td><td>{% if ownership.is_primary %}Principal{% else %}Secundario{% endif %}</td><td>{{ ownership.start_date }} - {{ ownership.end_date|default:"Vigente" }}</td><td>{% if ownership.is_active %}Vigente{% else %}Finalizada{% endif %}</td><td>{% if can_manage and ownership.is_active %}<form method="post" action="{% url 'fiduciary:ownership_finalize' ownership.pk %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><input class="form-control form-control-sm" type="date" name="end_date" required><button class="btn btn-sm btn-outline-secondary">Finalizar</button></form>{% endif %}</td></tr>
+          {% empty %}<tr><td colspan="7">No hay titularidades registradas.</td></tr>{% endfor %}
+        </tbody></table></div>
+        {% include "includes/pagination.html" %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

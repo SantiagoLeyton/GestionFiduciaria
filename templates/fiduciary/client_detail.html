@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}{{ client_obj.full_name }} | Cliente{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>{{ client_obj.full_name }}</h1><p>{{ client_obj.get_document_type_display }} {{ client_obj.document_number }}</p></div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:client_list' %}">Volver</a>
+      </div>
+      <section class="data-section">
+        <h2>Informacion general</h2>
+        <p>Telefono: {{ client_obj.phone|default:"-" }} | Correo: {{ client_obj.email|default:"-" }} | Direccion: {{ client_obj.address|default:"-" }}</p>
+        <p>Estado: {% if client_obj.is_active %}Activo{% else %}Inactivo{% endif %} | Informacion: {{ client_obj.get_information_status_display }}</p>
+      </section>
+      <section class="data-section">
+        <h2>Unidades relacionadas</h2>
+        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Unidad</th><th>Proyecto</th><th>Rol</th><th>Periodo</th><th>Estado</th></tr></thead><tbody>
+          {% for ownership in client_obj.unit_ownerships.all %}
+            <tr><td>{{ ownership.property_unit }}</td><td>{{ ownership.property_unit.project.name }}</td><td>{% if ownership.is_primary %}Principal{% else %}Secundario{% endif %}</td><td>{{ ownership.start_date }} - {{ ownership.end_date|default:"Vigente" }}</td><td>{% if ownership.is_active %}Vigente{% else %}Finalizada{% endif %}</td></tr>
+          {% empty %}<tr><td colspan="5">Sin titularidades registradas.</td></tr>{% endfor %}
+        </tbody></table></div>
+      </section>
+      <section class="data-section">
+        <h2>Encargos relacionados</h2>
+        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Encargo</th><th>Unidad</th><th>Rol</th><th>Periodo</th><th>Estado</th></tr></thead><tbody>
+          {% for holder in client_obj.fiduciary_assignment_holders.all %}
+            <tr><td><a href="{% url 'fiduciary:assignment_detail' holder.assignment.pk %}">{{ holder.assignment.assignment_number }}</a></td><td>{{ holder.assignment.property_unit }}</td><td>{% if holder.is_primary %}Principal{% else %}Secundario{% endif %}</td><td>{{ holder.start_date }} - {{ holder.end_date|default:"Vigente" }}</td><td>{% if holder.is_active %}Vigente{% else %}Finalizado{% endif %}</td></tr>
+          {% empty %}<tr><td colspan="5">Sin encargos fiduciarios relacionados.</td></tr>{% endfor %}
+        </tbody></table></div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

@@ -259,6 +259,18 @@ body {
   padding: 14px 16px;
 }
 
+.holder-form-row {
+  border-top: 1px solid var(--border-color);
+  padding: 12px 0;
+}
+
+.holder-form-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
 .filter-actions,
 .form-actions,
 .actions-cell {
