@@ -162,7 +162,7 @@ def test_user_list_shows_last_login_and_never(client, accounting_admin_user, com
     content = response.content.decode()
 
     assert "Ultimo acceso" in content
-    assert accounting_admin_user.last_login.strftime("%d/%m/%Y") in content
+    assert timezone.localtime(accounting_admin_user.last_login).strftime("%d/%m/%Y") in content
     assert "Nunca" in content
 
 
