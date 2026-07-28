@@ -22,12 +22,16 @@
           {% if can_cancel %}
             <a class="btn btn-outline-danger" href="{% url 'fiduciary:historical_import_cancel' batch.pk %}">Cancelar importación</a>
           {% endif %}
-          <button class="btn btn-secondary" type="button" disabled>La importación definitiva se habilitará en la siguiente fase.</button>
+          {% if can_finalize %}
+            <a class="btn btn-primary" href="{% url 'fiduciary:historical_import_finalize' batch.pk %}">Ejecutar importación definitiva</a>
+          {% else %}
+            <button class="btn btn-secondary" type="button" disabled>Importación definitiva no disponible</button>
+          {% endif %}
         </div>
       </div>
 
       {% if is_ready %}
-        <div class="alert alert-success">El lote esta listo para la importacion definitiva en la siguiente fase.</div>
+        <div class="alert alert-success">El lote esta listo para la importacion historica definitiva.</div>
       {% endif %}
 
       <section class="data-section">

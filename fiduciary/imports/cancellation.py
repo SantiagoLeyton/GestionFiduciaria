@@ -6,6 +6,7 @@ from django.db import transaction
 from fiduciary.models import (
     DetectedStructureElement,
     ImportBatch,
+    ImportAppliedRecord,
     ImportedHistoricalNovelty,
     ImportNovelty,
     ImportResolution,
@@ -80,5 +81,7 @@ def cancel_import_batch(*, batch: ImportBatch, cancelled_by) -> ImportCancellati
 def _ensure_no_definitive_entities(batch: ImportBatch, file_ids: list[int]) -> None:
     if Payment.objects.filter(source_file_id__in=file_ids).exists():
         raise ValidationError("No es seguro cancelar un lote que ya tiene pagos asociados.")
+    if ImportAppliedRecord.objects.filter(batch=batch).exists():
+        raise ValidationError("No es seguro cancelar un lote que ya tiene trazabilidad definitiva asociada.")
     if ImportNovelty.objects.filter(batch=batch, payment__isnull=False).exists():
         raise ValidationError("No es seguro cancelar un lote que ya tiene novedades asociadas a pagos.")

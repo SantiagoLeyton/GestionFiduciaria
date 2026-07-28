@@ -40,7 +40,7 @@ def create_imported_client(
     if not name:
         return ImportedClientResult(status="invalid", errors=["Registre el nombre del cliente importado."])
 
-    if doc_number and doc_type != Client.DocumentType.UNKNOWN:
+    if doc_number:
         existing = Client.objects.filter(document_type=doc_type, document_number=doc_number).first()
         if existing:
             return ImportedClientResult(status="existing", client=existing)

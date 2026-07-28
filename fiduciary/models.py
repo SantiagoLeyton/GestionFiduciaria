@@ -166,7 +166,7 @@ class UnitOwnership(DatedActiveRelation):
 
 
 class FiduciaryAssignment(DatedActiveRelation):
-    assignment_number = models.CharField("numero de encargo fiduciario", max_length=80)
+    assignment_number = models.CharField("numero de encargo fiduciario", max_length=80, unique=True)
     property_unit = models.ForeignKey(PropertyUnit, on_delete=models.PROTECT, related_name="fiduciary_assignments")
     observations = models.TextField("observaciones", blank=True)
 
@@ -270,6 +270,14 @@ class ImportBatch(models.Model):
     created_at = models.DateTimeField("fecha de creacion", auto_now_add=True)
     processing_started_at = models.DateTimeField("inicio de procesamiento", blank=True, null=True)
     processing_finished_at = models.DateTimeField("fin de procesamiento", blank=True, null=True)
+    imported_at = models.DateTimeField("fecha de importacion definitiva", blank=True, null=True)
+    imported_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="completed_import_batches",
+        blank=True,
+        null=True,
+    )
     total_files = models.PositiveIntegerField("archivos totales", default=0)
     processed_files = models.PositiveIntegerField("archivos procesados", default=0)
     total_rows = models.PositiveIntegerField("filas totales", default=0)
@@ -327,6 +335,7 @@ class ImportedFile(models.Model):
     error_count = models.PositiveIntegerField("errores", default=0)
     warning_count = models.PositiveIntegerField("advertencias", default=0)
     result_message = models.TextField("mensaje sanitizado", blank=True)
+    stored_path = models.CharField("ruta interna del archivo", max_length=500, blank=True)
     created_at = models.DateTimeField("fecha de creacion", auto_now_add=True)
 
     class Meta:
@@ -354,6 +363,7 @@ class ImportedFile(models.Model):
         self.extension = self.extension.strip().lower()
         self.sha256 = self.sha256.strip().lower()
         self.result_message = self.result_message.strip()
+        self.stored_path = self.stored_path.strip()
         if len(self.sha256) != 64:
             raise ValidationError({"sha256": "El hash SHA-256 debe tener 64 caracteres hexadecimales."})
 
@@ -763,6 +773,64 @@ class ImportNovelty(models.Model):
 
     def __str__(self):
         return f"{self.get_novelty_type_display()} - {self.get_status_display()}"
+
+
+class ImportAppliedRecord(models.Model):
+    class EntityKind(models.TextChoices):
+        PROJECT = "project", "Proyecto"
+        GROUPING_TYPE = "grouping_type", "Tipo de agrupacion"
+        STRUCTURAL_GROUP = "structural_group", "Agrupacion"
+        PROPERTY_UNIT = "property_unit", "Unidad"
+        CLIENT = "client", "Cliente"
+        UNIT_OWNERSHIP = "unit_ownership", "Titularidad"
+        FIDUCIARY_ASSIGNMENT = "fiduciary_assignment", "Encargo fiduciario"
+        ASSIGNMENT_HOLDER = "assignment_holder", "Titular de encargo"
+        PAYMENT = "payment", "Pago"
+        HISTORICAL_NOVELTY = "historical_novelty", "Novedad historica"
+
+    class Action(models.TextChoices):
+        CREATED = "created", "Creado"
+        REUSED = "reused", "Reutilizado"
+        SKIPPED = "skipped", "Omitido"
+        PRESERVED = "preserved", "Conservado"
+
+    batch = models.ForeignKey(ImportBatch, on_delete=models.PROTECT, related_name="applied_records")
+    imported_file = models.ForeignKey(
+        ImportedFile,
+        on_delete=models.PROTECT,
+        related_name="applied_records",
+        blank=True,
+        null=True,
+    )
+    sheet_result = models.ForeignKey(
+        ImportedSheetResult,
+        on_delete=models.PROTECT,
+        related_name="applied_records",
+        blank=True,
+        null=True,
+    )
+    entity_kind = models.CharField("tipo de entidad", max_length=32, choices=EntityKind.choices)
+    entity_id = models.PositiveBigIntegerField("id de entidad", blank=True, null=True)
+    action = models.CharField("accion", max_length=16, choices=Action.choices)
+    source_row = models.PositiveIntegerField("fila origen", blank=True, null=True)
+    source_column = models.CharField("columna origen", max_length=10, blank=True)
+    summary = models.TextField("resumen sanitizado", blank=True)
+    created_at = models.DateTimeField("fecha de registro", auto_now_add=True)
+
+    class Meta:
+        ordering = ("batch", "created_at")
+        indexes = [
+            models.Index(fields=["batch", "entity_kind"], name="fid_applied_batch_kind_idx"),
+            models.Index(fields=["imported_file", "source_row"], name="fid_applied_file_row_idx"),
+        ]
+
+    def clean(self):
+        super().clean()
+        self.source_column = self.source_column.strip().upper()
+        self.summary = self.summary.strip()
+
+    def __str__(self):
+        return f"{self.get_entity_kind_display()} - {self.get_action_display()}"
 
 
 class ImportedHistoricalNovelty(models.Model):

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}Confirmar importacion historica | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Ejecutar importacion definitiva</h1>
+          <p>Lote #{{ batch.pk }} - {{ batch.get_status_display }}</p>
+        </div>
+      </div>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Confirmacion</h2><span>{{ imported_file.original_name|default:"Sin archivo" }}</span></div>
+        <p>
+          Esta accion convertira el analisis historico en entidades definitivas de negocio.
+          El proceso se ejecutara en una unica transaccion: si ocurre un error, no quedaran datos parciales.
+        </p>
+        <div class="row g-3 mb-3">
+          <div class="col-md-3"><strong>Filas validas</strong><div>{{ batch.processed_rows }}</div></div>
+          <div class="col-md-3"><strong>Pendientes accionables</strong><div>{{ pending_count }}</div></div>
+          <div class="col-md-3"><strong>Bloqueados</strong><div>{{ blocked_count }}</div></div>
+          <div class="col-md-3"><strong>Novedades preservadas</strong><div>{{ historical_novelties_count }}</div></div>
+        </div>
+        {% if can_finalize %}
+          <form method="post">
+            {% csrf_token %}
+            <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}">Volver</a>
+            <button class="btn btn-primary" type="submit">Si, ejecutar importacion definitiva</button>
+          </form>
+        {% else %}
+          <div class="alert alert-warning">Este lote no esta en un estado importable.</div>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}">Volver</a>
+        {% endif %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

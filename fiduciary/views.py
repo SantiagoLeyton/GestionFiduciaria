@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 
 from django.contrib import messages
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.db.models import Count, Prefetch, Q
 from django.http import Http404, JsonResponse
@@ -31,7 +31,13 @@ from .forms import (
     eligible_assignment_clients,
     validate_assignment_holder_formset,
 )
-from .imports.historical import DuplicateHistoricalImportError, analyze_historical_import, find_existing_historical_import
+from .imports.historical import (
+    DuplicateHistoricalImportError,
+    analyze_historical_import,
+    finalize_historical_import,
+    find_existing_historical_import,
+    store_historical_import_file,
+)
 from .imports.cancellation import CANCELABLE_BATCH_STATUSES, cancel_import_batch
 from .imports.historical.resolutions import (
     apply_resolution_to_equivalent_elements,
@@ -120,11 +126,12 @@ class HistoricalImportCreateView(FiduciaryImportRequiredMixin, FormView):
                 total_files=1,
             )
             try:
-                analyze_historical_import(
+                analysis_result = analyze_historical_import(
                     batch=batch,
                     file_path=path,
                     grouping_type_hint=form.cleaned_data.get("grouping_type_hint"),
                 )
+                store_historical_import_file(imported_file=analysis_result.imported_file, source_path=path)
                 auto_resolve_new_units(batch, user=self.request.user)
                 update_batch_resolution_state(batch)
                 messages.success(self.request, "Archivo historico analizado correctamente.")
@@ -223,6 +230,51 @@ class HistoricalImportPreviewView(FiduciaryReadRequiredMixin, DetailView):
         context["unknown_count"] = detected.filter(resolution__action=ImportResolution.Action.UNRESOLVED).count()
         context["is_ready"] = batch.status == ImportBatch.Status.READY
         context["can_cancel"] = can_import_fiduciary(self.request.user) and batch.status in CANCELABLE_BATCH_STATUSES
+        context["can_finalize"] = can_import_fiduciary(self.request.user) and batch.status == ImportBatch.Status.READY
+        return context
+
+
+class HistoricalImportFinalizeView(FiduciaryImportRequiredMixin, DetailView):
+    model = ImportBatch
+    template_name = "fiduciary/import_finalize_confirm.html"
+    context_object_name = "batch"
+
+    def get_queryset(self):
+        return historical_batches().prefetch_related("files", "detected_elements", "historical_novelties")
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        try:
+            result = finalize_historical_import(batch_id=self.object.pk, user=request.user)
+        except PermissionDenied:
+            raise
+        except Exception as exc:
+            messages.error(request, str(exc))
+            return redirect("fiduciary:historical_import_preview", pk=self.object.pk)
+        messages.success(
+            request,
+            (
+                "Importacion historica definitiva completada. "
+                f"Unidades creadas: {result.created_property_units}. "
+                f"Clientes creados: {result.created_clients}. "
+                f"Pagos creados: {result.created_payments}."
+            ),
+        )
+        return redirect("fiduciary:historical_import_preview", pk=self.object.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        batch = self.object
+        context["imported_file"] = batch.files.order_by("order", "original_name").first()
+        context["pending_count"] = batch.detected_elements.filter(
+            status=DetectedStructureElement.Status.NEEDS_REVIEW
+        ).count()
+        context["blocked_count"] = batch.detected_elements.filter(
+            status=DetectedStructureElement.Status.DETECTED,
+            resolution__action=ImportResolution.Action.UNRESOLVED,
+        ).count()
+        context["historical_novelties_count"] = batch.historical_novelties.count()
+        context["can_finalize"] = batch.status == ImportBatch.Status.READY
         return context
 
 

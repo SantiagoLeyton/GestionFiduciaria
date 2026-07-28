@@ -20,6 +20,7 @@ from .views import (
     HistoricalImportBatchListView,
     HistoricalImportCancelView,
     HistoricalImportCreateView,
+    HistoricalImportFinalizeView,
     HistoricalImportPendingListView,
     HistoricalImportPreviewView,
     HistoricalImportReanalyzePendingView,
@@ -38,6 +39,7 @@ urlpatterns = [
     path("historical-imports/", HistoricalImportBatchListView.as_view(), name="historical_import_list"),
     path("historical-imports/new/", HistoricalImportCreateView.as_view(), name="historical_import_create"),
     path("historical-imports/<int:pk>/", HistoricalImportPreviewView.as_view(), name="historical_import_preview"),
+    path("historical-imports/<int:pk>/finalize/", HistoricalImportFinalizeView.as_view(), name="historical_import_finalize"),
     path("historical-imports/<int:pk>/cancel/", HistoricalImportCancelView.as_view(), name="historical_import_cancel"),
     path("historical-imports/<int:pk>/pending/", HistoricalImportPendingListView.as_view(), name="historical_import_pending"),
     path(

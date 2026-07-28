@@ -408,9 +408,18 @@ def test_migration_cleans_previous_preparation_duplicates(accounting_admin_user)
     )
     OldImportResolution.objects.create(detected_element=duplicate_element)
 
-    executor = MigrationExecutor(connection)
-    executor.migrate([("fiduciary", "0003_importedfile_fiduciary_imported_file_historical_sha_unique")])
+    try:
+        executor = MigrationExecutor(connection)
+        executor.migrate([("fiduciary", "0003_importedfile_fiduciary_imported_file_historical_sha_unique")])
+        migrated_apps = executor.loader.project_state(
+            [("fiduciary", "0003_importedfile_fiduciary_imported_file_historical_sha_unique")]
+        ).apps
+        MigratedImportBatch = migrated_apps.get_model("fiduciary", "ImportBatch")
+        MigratedImportedFile = migrated_apps.get_model("fiduciary", "ImportedFile")
 
-    assert ImportedFile.objects.filter(sha256="a" * 64, file_type=ImportedFile.FileType.HISTORICAL).count() == 1
-    assert ImportedFile.objects.get(sha256="a" * 64).original_name == canonical_file.original_name
-    assert not ImportBatch.objects.filter(pk=duplicate_batch.pk).exists()
+        assert MigratedImportedFile.objects.filter(sha256="a" * 64, file_type="historical").count() == 1
+        assert MigratedImportedFile.objects.get(sha256="a" * 64).original_name == canonical_file.original_name
+        assert not MigratedImportBatch.objects.filter(pk=duplicate_batch.pk).exists()
+    finally:
+        executor = MigrationExecutor(connection)
+        executor.migrate([("fiduciary", "0005_importbatch_imported_at_importbatch_imported_by_and_more")])

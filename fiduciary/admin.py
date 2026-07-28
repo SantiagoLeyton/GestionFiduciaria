@@ -5,6 +5,7 @@ from .models import (
     DetectedStructureElement,
     FiduciaryAssignment,
     FiduciaryAssignmentHolder,
+    ImportAppliedRecord,
     ImportBatch,
     ImportedFile,
     ImportedHistoricalNovelty,
@@ -111,6 +112,13 @@ class ImportNoveltyAdmin(NoDeleteAdmin):
     list_display = ("novelty_type", "status", "batch", "imported_file", "created_at")
     list_filter = ("novelty_type", "status")
     search_fields = ("description",)
+
+
+@admin.register(ImportAppliedRecord)
+class ImportAppliedRecordAdmin(NoDeleteAdmin):
+    list_display = ("batch", "entity_kind", "action", "entity_id", "imported_file", "source_row", "created_at")
+    list_filter = ("entity_kind", "action", "created_at")
+    search_fields = ("summary", "source_column")
 
 
 @admin.register(ImportedHistoricalNovelty)

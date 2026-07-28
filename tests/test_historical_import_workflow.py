@@ -322,7 +322,7 @@ def test_preview_shows_aggregates_issues_and_disabled_import_button(accounting_c
     assert "VS Viviendas" in content or "Agrupaciones detectadas" in content
     assert "Unidades existentes" in content
     assert "Unidades nuevas" in content
-    assert "La importación definitiva se habilitará en la siguiente fase." in content
+    assert "Importación definitiva no disponible" in content
     assert "disabled" in content
 
 
