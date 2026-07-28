@@ -11,7 +11,7 @@
       {% include "includes/messages.html" %}
       <div class="page-heading">
         <div><h1>Encargos fiduciarios</h1><p>Consulte encargos, titulares y relacion con unidades inmobiliarias.</p></div>
-        {% if can_manage %}<a class="btn btn-success" href="{% url 'fiduciary:assignment_create' %}">Nuevo encargo</a>{% endif %}
+        {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:assignment_create' %}">Nuevo encargo</a>{% endif %}
       </div>
       <form class="filter-panel real-estate-filter" method="get">
         <div><label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>{{ filter_form.q }}</div>
@@ -36,7 +36,7 @@
               <td>{% for holder in assignment.holders.all %}{% if holder.is_active and not holder.is_primary %}{{ holder.client.full_name }}{% if not forloop.last %}, {% endif %}{% endif %}{% empty %}-{% endfor %}</td>
               <td>{{ assignment.start_date }} - {{ assignment.end_date|default:"Vigente" }}</td>
               <td>{% if assignment.is_active %}<span class="status-pill status-active">Vigente</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
-              <td class="actions-cell"><a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Ver</a>{% if can_manage %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_update' assignment.pk %}">Editar</a>{% endif %}</td>
+              <td class="actions-cell"><a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Ver</a>{% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_update' assignment.pk %}">Editar</a>{% endif %}</td>
             </tr>
           {% empty %}<tr><td colspan="8">No hay encargos registrados.</td></tr>{% endfor %}
         </tbody></table></div>

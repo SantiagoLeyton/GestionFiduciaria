@@ -17,7 +17,7 @@ class CellData:
 
     @property
     def has_formula(self) -> bool:
-        return bool(self.formula)
+        return self.formula is not None
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,32 @@ class HistoricalMonthlyPayment:
 
 
 @dataclass(frozen=True)
+class HistoricalNoveltyCell:
+    coordinate: str
+    column_letter: str
+    column_index: int
+    header: str | None
+    value: Any = None
+    formula: str | None = None
+    has_cached_value: bool = False
+    is_date: bool = False
+
+
+@dataclass(frozen=True)
+class HistoricalNovelty:
+    sheet_name: str
+    row_number: int
+    project: str
+    grouping_type: str | None
+    grouping_code: str
+    grouping_name: str
+    unit_code: str | None = None
+    unit_name: str | None = None
+    assignment: HistoricalAssignment | None = None
+    cells: list[HistoricalNoveltyCell] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class HistoricalRow:
     sheet_name: str
     row_number: int
@@ -99,6 +125,7 @@ class SheetData:
     columns: dict[str, DetectedColumn] = field(default_factory=dict)
     payment_columns: list[DetectedPaymentColumn] = field(default_factory=list)
     rows: list[HistoricalRow] = field(default_factory=list)
+    novelties: list[HistoricalNovelty] = field(default_factory=list)
     ignored_rows: int = 0
     ignored_row_reasons: dict[str, int] = field(default_factory=dict)
     issues: list[ParserIssue] = field(default_factory=list)
@@ -114,6 +141,7 @@ class ParseStatistics:
     distinct_assignments_found: int = 0
     payment_entries_found: int = 0
     payment_columns_detected: int = 0
+    historical_novelties_found: int = 0
     issues_found: int = 0
 
 

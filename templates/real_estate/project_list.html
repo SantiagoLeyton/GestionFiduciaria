@@ -14,7 +14,7 @@
           <h1>Proyectos</h1>
           <p>Consulte y administre los proyectos inmobiliarios registrados.</p>
         </div>
-        {% if can_manage %}<a class="btn btn-success" href="{% url create_url_name %}">Nuevo proyecto</a>{% endif %}
+        {% if can_create %}<a class="btn btn-success" href="{% url create_url_name %}">Nuevo proyecto</a>{% endif %}
       </div>
       <form class="filter-panel compact-filter" method="get">
         <div><label class="form-label" for="{{ search_form.q.id_for_label }}">{{ search_form.q.label }}</label>{{ search_form.q }}</div>
@@ -35,7 +35,7 @@
                     <a class="btn btn-sm btn-outline-secondary" href="{% url 'real_estate:structural_group_list' %}?project={{ entity.pk }}">Agrupaciones</a>
                     <a class="btn btn-sm btn-outline-secondary" href="{% url 'real_estate:property_unit_list' %}?project={{ entity.pk }}">Unidades</a>
                   </td>
-                  <td class="actions-cell">{% if can_manage %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a>{% endif %}{% include "real_estate/includes/status_action.html" %}</td>
+                  <td class="actions-cell">{% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a>{% endif %}{% include "real_estate/includes/status_action.html" %}</td>
                 </tr>
               {% empty %}<tr><td colspan="6">No hay proyectos registrados.</td></tr>{% endfor %}
             </tbody>

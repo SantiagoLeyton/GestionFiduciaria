@@ -151,7 +151,7 @@ class XlsxWorkbookReader:
             column = excel_column_index(column_letter)
             formula_node = cell_node.find("main:f", NS)
             value_node = cell_node.find("main:v", NS)
-            formula = formula_node.text if formula_node is not None else None
+            formula = (formula_node.text or "") if formula_node is not None else None
             style_id = int(cell_node.attrib.get("s", "0")) if cell_node.attrib.get("s", "0").isdigit() else 0
             is_date = style_id in date_style_ids
             value = self._cell_value(cell_node, value_node, shared_strings, is_date)

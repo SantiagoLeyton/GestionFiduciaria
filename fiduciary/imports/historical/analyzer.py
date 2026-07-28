@@ -1,12 +1,16 @@
+import json
 from dataclasses import dataclass, field
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from fiduciary.models import (
     DetectedStructureElement,
     ImportBatch,
+    ImportedHistoricalNovelty,
     ImportedFile,
     ImportedSheetResult,
     ImportResolution,
@@ -57,12 +61,19 @@ class HistoricalImportPreview:
     client_appearance_count: int
     assignment_count: int
     payment_entry_count: int
+    historical_novelty_count: int
 
 
 @dataclass(frozen=True)
 class HistoricalImportAnalysisResult:
     preview: HistoricalImportPreview
     imported_file: ImportedFile
+
+
+class DuplicateHistoricalImportError(Exception):
+    def __init__(self, imported_file: ImportedFile):
+        self.imported_file = imported_file
+        super().__init__("Este archivo historico ya fue cargado anteriormente.")
 
 
 @dataclass(frozen=True)
@@ -80,11 +91,13 @@ def analyze_historical_import(
     grouping_type_hint: str | None = None,
 ) -> HistoricalImportAnalysisResult:
     path = Path(file_path)
+    imported_file = reserve_historical_import_file(batch=batch, file_path=path)
     workbook = HistoricalWorkbookParser(path, grouping_type_hint=grouping_type_hint).parse()
     with transaction.atomic():
-        imported_file = _upsert_imported_file(batch, path, workbook)
+        _update_imported_file_from_workbook(imported_file, workbook)
         _persist_sheet_results(imported_file, workbook)
         _persist_parser_issues(imported_file, workbook)
+        _persist_historical_novelties(batch, imported_file, workbook)
         index = _build_existing_structure_index()
         project_preview = _analyze_project(batch, imported_file, workbook, index)
         grouping_type_preview = _analyze_grouping_type(batch, imported_file, workbook, index, grouping_type_hint)
@@ -108,28 +121,71 @@ def analyze_historical_import(
         client_appearance_count=workbook.statistics.client_appearances_found,
         assignment_count=workbook.statistics.distinct_assignments_found,
         payment_entry_count=workbook.statistics.payment_entries_found,
+        historical_novelty_count=workbook.statistics.historical_novelties_found,
     )
     return HistoricalImportAnalysisResult(preview=preview, imported_file=imported_file)
 
 
-def _upsert_imported_file(batch: ImportBatch, path: Path, workbook: WorkbookData) -> ImportedFile:
+def find_existing_historical_import(file_path) -> ImportedFile | None:
+    sha256 = calculate_sha256(file_path)
+    return _historical_files().filter(sha256=sha256).first()
+
+
+def reserve_historical_import_file(*, batch: ImportBatch, file_path) -> ImportedFile:
+    path = Path(file_path)
     sha256 = calculate_sha256(path)
-    defaults = {
-        "original_name": path.name,
-        "extension": path.suffix.lower(),
-        "size_bytes": path.stat().st_size,
-        "file_type": ImportedFile.FileType.HISTORICAL,
-        "status": ImportedFile.Status.READY if not _has_blocking_issues(workbook) else ImportedFile.Status.FAILED,
-        "order": 1,
-        "total_rows": workbook.statistics.valid_rows + workbook.statistics.ignored_rows,
-        "processed_rows": workbook.statistics.valid_rows,
-        "skipped_rows": workbook.statistics.ignored_rows,
-        "error_count": sum(1 for issue in workbook.issues if issue.severity in {"error", "blocking"}),
-        "warning_count": sum(1 for issue in workbook.issues if issue.severity == "warning"),
-        "result_message": "Analisis historico preparado sin persistir entidades de negocio.",
-    }
-    imported_file, _ = ImportedFile.objects.update_or_create(batch=batch, sha256=sha256, defaults=defaults)
-    return imported_file
+    existing_file = _historical_files().filter(sha256=sha256).first()
+    if existing_file:
+        raise DuplicateHistoricalImportError(existing_file)
+
+    try:
+        with transaction.atomic():
+            return ImportedFile.objects.create(
+                batch=batch,
+                original_name=path.name,
+                extension=path.suffix.lower(),
+                size_bytes=path.stat().st_size,
+                sha256=sha256,
+                file_type=ImportedFile.FileType.HISTORICAL,
+                status=ImportedFile.Status.ANALYZING,
+                order=1,
+                result_message="Analisis historico en curso.",
+            )
+    except IntegrityError as exc:
+        existing_file = _historical_files().filter(sha256=sha256).first()
+        if existing_file:
+            raise DuplicateHistoricalImportError(existing_file) from exc
+        raise
+
+
+def _historical_files():
+    return (
+        ImportedFile.objects.filter(file_type=ImportedFile.FileType.HISTORICAL)
+        .select_related("batch", "batch__initiated_by")
+        .order_by("created_at", "pk")
+    )
+
+
+def _update_imported_file_from_workbook(imported_file: ImportedFile, workbook: WorkbookData) -> None:
+    summary = _sanitized_summary(workbook)
+    imported_file.status = ImportedFile.Status.READY if not _has_blocking_issues(workbook) else ImportedFile.Status.FAILED
+    imported_file.total_rows = workbook.statistics.valid_rows + workbook.statistics.ignored_rows
+    imported_file.processed_rows = workbook.statistics.valid_rows
+    imported_file.skipped_rows = workbook.statistics.ignored_rows
+    imported_file.error_count = sum(1 for issue in workbook.issues if issue.severity in {"error", "blocking"})
+    imported_file.warning_count = sum(1 for issue in workbook.issues if issue.severity == "warning")
+    imported_file.result_message = json.dumps(summary, ensure_ascii=True)
+    imported_file.save(
+        update_fields=[
+            "status",
+            "total_rows",
+            "processed_rows",
+            "skipped_rows",
+            "error_count",
+            "warning_count",
+            "result_message",
+        ]
+    )
 
 
 def _persist_sheet_results(imported_file: ImportedFile, workbook: WorkbookData) -> None:
@@ -169,6 +225,62 @@ def _persist_parser_issues(imported_file: ImportedFile, workbook: WorkbookData) 
                 "status": ImportRowIssue.Status.OPEN,
             },
         )
+
+
+def _persist_historical_novelties(batch: ImportBatch, imported_file: ImportedFile, workbook: WorkbookData) -> None:
+    sheet_results = {sheet.sheet_name: sheet for sheet in imported_file.sheet_results.all()}
+    for sheet in workbook.sheets:
+        sheet_result = sheet_results.get(sheet.name)
+        if not sheet_result:
+            continue
+        for novelty in sheet.novelties:
+            ImportedHistoricalNovelty.objects.update_or_create(
+                imported_file=imported_file,
+                sheet_result=sheet_result,
+                row_number=novelty.row_number,
+                defaults={
+                    "batch": batch,
+                    "project_name": novelty.project,
+                    "grouping_type_name": novelty.grouping_type or "",
+                    "grouping_code": novelty.grouping_code,
+                    "grouping_name": novelty.grouping_name,
+                    "unit_code": novelty.unit_code or "",
+                    "unit_name": novelty.unit_name or "",
+                    "assignment_number": novelty.assignment.assignment_number if novelty.assignment else "",
+                    "assignment_status": novelty.assignment.status if novelty.assignment and novelty.assignment.status else "",
+                    "original_cells": [_novelty_cell_payload(cell) for cell in novelty.cells],
+                    "sanitized_summary": _novelty_summary(novelty),
+                    "status": ImportedHistoricalNovelty.Status.DETECTED,
+                },
+            )
+
+
+def _novelty_cell_payload(cell) -> dict[str, Any]:
+    return {
+        "coordinate": cell.coordinate,
+        "column_letter": cell.column_letter,
+        "column_index": cell.column_index,
+        "header": cell.header or "",
+        "value": _json_safe_value(cell.value),
+        "formula": cell.formula or "",
+        "has_formula": bool(cell.formula),
+        "has_cached_value": cell.has_cached_value,
+        "is_date": cell.is_date,
+    }
+
+
+def _json_safe_value(value):
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
+
+
+def _novelty_summary(novelty) -> str:
+    unit = novelty.unit_code or "sin unidad"
+    assignment = novelty.assignment.assignment_number if novelty.assignment else "sin encargo"
+    return f"Novedad historica detectada en hoja {novelty.sheet_name}, fila {novelty.row_number}, unidad {unit}, encargo {assignment}."
 
 
 def _build_existing_structure_index() -> ExistingStructureIndex:
@@ -279,8 +391,14 @@ def _analyze_property_units(
         group_preview = group_by_name.get(group_name)
         group_id = _single_candidate_id(group_preview)
         candidates = []
+        status_override = None
         if project_id:
-            candidates = _match_property_unit(unit_code, project_id, group_id, index.property_units)
+            if group_preview and group_preview.status == "auto_matched":
+                candidates = _match_property_unit(unit_code, project_id, group_id, index.property_units)
+            else:
+                status_override = "blocked"
+        else:
+            status_override = "blocked"
         previews.append(
             _persist_detected_item(
                 batch=batch,
@@ -290,6 +408,7 @@ def _analyze_property_units(
                 occurrence_count=count,
                 candidates=candidates,
                 context={"project_id": project_id, "structural_group_id": group_id, "grouping_name": group_name},
+                status_override=status_override,
             )
         )
     return previews
@@ -308,6 +427,10 @@ def _persist_detected_item(
 ) -> StructurePreviewItem:
     normalized_value = normalize_text(raw_value)
     status = status_override or ("auto_matched" if len(candidates) == 1 and candidates[0].confidence >= 1 else "needs_review")
+    model_status = {
+        "auto_matched": DetectedStructureElement.Status.AUTO_MATCHED,
+        "blocked": DetectedStructureElement.Status.DETECTED,
+    }.get(status, DetectedStructureElement.Status.NEEDS_REVIEW)
     detected = DetectedStructureElement.objects.create(
         batch=batch,
         imported_file=imported_file,
@@ -317,11 +440,7 @@ def _persist_detected_item(
         structural_context=context or {},
         occurrence_count=occurrence_count,
         confidence=candidates[0].confidence if len(candidates) == 1 else None,
-        status=(
-            DetectedStructureElement.Status.AUTO_MATCHED
-            if status == "auto_matched"
-            else DetectedStructureElement.Status.NEEDS_REVIEW
-        ),
+        status=model_status,
     )
     resolution = _create_resolution(detected, kind, candidates, status)
     return StructurePreviewItem(
@@ -412,13 +531,14 @@ def _candidate(obj, reason: str) -> MatchCandidate:
 
 
 def _update_batch_and_file_counts(batch: ImportBatch, imported_file: ImportedFile, workbook: WorkbookData) -> None:
+    summary = _sanitized_summary(workbook)
     batch.status = ImportBatch.Status.AWAITING_RESOLUTION
     batch.total_files = max(batch.total_files, 1)
     batch.processed_files = max(batch.processed_files, 1)
     batch.total_rows = workbook.statistics.valid_rows + workbook.statistics.ignored_rows
     batch.processed_rows = workbook.statistics.valid_rows
     batch.issue_count = len(workbook.issues)
-    batch.summary = "Analisis historico preparado para previsualizacion."
+    batch.summary = json.dumps(summary, ensure_ascii=True)
     batch.save(update_fields=["status", "total_files", "processed_files", "total_rows", "processed_rows", "issue_count", "summary"])
 
     imported_file.status = ImportedFile.Status.READY if not _has_blocking_issues(workbook) else ImportedFile.Status.FAILED
@@ -484,3 +604,16 @@ def _issue_severity(value: str) -> str:
 class _CounterView(dict):
     def most_common(self, amount: int):
         return sorted(self.items(), key=lambda item: item[1], reverse=True)[:amount]
+
+
+def _sanitized_summary(workbook: WorkbookData) -> dict[str, int]:
+    return {
+        "valid_rows": workbook.statistics.valid_rows,
+        "ignored_rows": workbook.statistics.ignored_rows,
+        "client_appearances": workbook.statistics.client_appearances_found,
+        "distinct_assignments": workbook.statistics.distinct_assignments_found,
+        "payment_entries": workbook.statistics.payment_entries_found,
+        "payment_columns": workbook.statistics.payment_columns_detected,
+        "historical_novelties": workbook.statistics.historical_novelties_found,
+        "issues": workbook.statistics.issues_found,
+    }

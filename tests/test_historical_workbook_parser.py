@@ -8,13 +8,16 @@ from django.db import models
 
 from fiduciary.imports.historical import HistoricalWorkbookParser
 from fiduciary.imports.historical.data import (
+    CellData,
     DetectedPaymentColumn,
     HistoricalClient,
     HistoricalMonthlyPayment,
+    HistoricalNovelty,
+    HistoricalNoveltyCell,
     HistoricalRow,
     WorkbookData,
 )
-from fiduciary.imports.historical.readers import WorkbookReader
+from fiduciary.imports.historical.readers import RawSheet, WorkbookReader
 
 
 HISTORICAL_DIR = Path("samples/fiduciary/historical")
@@ -117,16 +120,67 @@ def test_grouping_type_hint_is_optional_and_not_globally_coupled():
     assert hinted_result.sheets[0].rows[0].grouping_type == "Torre"
 
 
+def test_parser_extracts_universo_project_without_springfield_fallback():
+    parsed = HistoricalWorkbookParser(HISTORICAL_DIR / "LIBRO_Universo_7.xlsx", grouping_type_hint="Sector").parse()
+
+    assert parsed.statistics.valid_rows == 200
+    assert {row.project for sheet in parsed.sheets for row in sheet.rows} == {"Universo 7"}
+    assert {row.grouping_name for sheet in parsed.sheets for row in sheet.rows} == {"RES Residencial", "COM Comercial"}
+
+
+def test_parser_extracts_montecielo_style_title_and_preserves_novelty_section():
+    cells = {
+        (1, 1): CellData(1, 1, "A", "A1", "CONJUNTO CERRADO MONTECIELO T2 - 150 APARTAMENTOS VIP"),
+        (4, 1): CellData(4, 1, "A", "A4", "APTO"),
+        (4, 2): CellData(4, 2, "B", "B4", "ENCARGO FIDUCIARIO"),
+        (4, 3): CellData(4, 3, "C", "C4", "CEDULA CLIENTE"),
+        (4, 4): CellData(4, 4, "D", "D4", "NOMBRE CLIENTE"),
+        (4, 20): CellData(4, 20, "T", "T4", "RECIBO FIDUCIA MAR/2026"),
+        (5, 1): CellData(5, 1, "A", "A5", "101"),
+        (5, 2): CellData(5, 2, "B", "B5", "EF-001"),
+        (5, 3): CellData(5, 3, "C", "C5", "1"),
+        (5, 4): CellData(5, 4, "D", "D5", "Cliente Uno"),
+        (5, 20): CellData(5, 20, "T", "T5", 100),
+        (155, 1): CellData(155, 1, "A", "A155", "VENTAS"),
+        (156, 1): CellData(156, 1, "A", "A156", "POR VENDER"),
+        (157, 1): CellData(157, 1, "A", "A157", "TOTAL"),
+        (161, 1): CellData(161, 1, "A", "A161", "NOVEDADES"),
+        (162, 1): CellData(162, 1, "A", "A162", "303"),
+        (162, 2): CellData(162, 2, "B", "B162", "Cambio reportado"),
+    }
+    sheet = RawSheet("T2", 1, "visible", "A1:AW162", cells, set(), set())
+    parser = HistoricalWorkbookParser(Path("samples/fiduciary/historical/LIBRO MONTECIELO T2(5).xlsx"), grouping_type_hint="Torre")
+
+    parsed_sheet = parser._parse_sheet(sheet)
+
+    assert len(parsed_sheet.rows) == 1
+    assert parsed_sheet.rows[0].project == "Montecielo"
+    assert parsed_sheet.rows[0].grouping_name == "T2"
+    assert parsed_sheet.ignored_row_reasons["novelty_section"] == 1
+    assert parsed_sheet.ignored_row_reasons["novelty"] == 1
+    assert len(parsed_sheet.novelties) == 1
+    novelty = parsed_sheet.novelties[0]
+    assert isinstance(novelty, HistoricalNovelty)
+    assert novelty.project == "Montecielo"
+    assert novelty.grouping_name == "T2"
+    assert novelty.unit_code == "303"
+    assert novelty.assignment.assignment_number == "Cambio reportado"
+    assert all(isinstance(cell, HistoricalNoveltyCell) for cell in novelty.cells)
+    assert {cell.coordinate for cell in novelty.cells} == {"A162", "B162"}
+    assert "HISTORICAL_NOVELTY_SECTION_SKIPPED" not in {issue.code for issue in parsed_sheet.issues}
+
+
 def test_parser_statistics_from_real_workbook(parsed_workbook):
     stats = parsed_workbook.statistics
 
     assert stats.sheets_processed == 3
-    assert stats.valid_rows == 303
-    assert stats.ignored_rows == 21
+    assert stats.valid_rows == 300
+    assert stats.ignored_rows == 24
     assert stats.client_appearances_found >= 260
-    assert stats.distinct_assignments_found == 301
+    assert stats.distinct_assignments_found == 300
     assert stats.payment_entries_found >= 300
     assert stats.payment_columns_detected == 15
+    assert stats.historical_novelties_found == 3
     assert stats.issues_found == 18
     assert stats.issues_found == len(parsed_workbook.issues)
 
@@ -152,7 +206,8 @@ def test_ignored_rows_are_classified(parsed_workbook):
             "invalid": 2,
             "decorative_or_total": 1,
             "empty": 3,
-            "empty_after_extraction": 1,
+            "novelty_section": 1,
+            "novelty": 1,
         }
 
 
@@ -166,7 +221,7 @@ def test_parser_result_uses_dataclasses_not_django_models(parsed_workbook):
 
 
 def test_parser_does_not_persist_data(parsed_workbook):
-    assert parsed_workbook.statistics.valid_rows == 303
+    assert parsed_workbook.statistics.valid_rows == 300
 
 
 def test_reader_handles_real_xlsx_metadata_without_modifying_file():
@@ -181,6 +236,8 @@ def test_reader_handles_real_xlsx_metadata_without_modifying_file():
     assert workbook.sheets[0].cell(5, 35).is_date is True
     assert workbook.sheets[0].cell(5, 23).has_formula is True
     assert workbook.sheets[0].cell(5, 23).has_cached_value is True
+    assert workbook.sheets[0].cell(6, 26).has_formula is True
+    assert workbook.sheets[0].cell(6, 26).has_cached_value is True
     assert workbook.sheets[0].cell(4, 20).column in workbook.sheets[0].hidden_columns
     assert not workbook.sheets[0].hidden_rows
 

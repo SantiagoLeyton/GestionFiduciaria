@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+
+{% block title %}Resolver agrupación | Centenario Gestión Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Resolver agrupación</h1>
+          <p>Esta decisión se aplicará a todas las apariciones equivalentes del lote #{{ batch.pk }}.</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_pending' batch.pk %}">Volver</a>
+      </div>
+
+      <section class="context-panel">
+        <span><strong>Valor detectado:</strong> {{ element.raw_value }}</span>
+        <span><strong>Normalizado:</strong> {{ element.normalized_value|default:"-" }}</span>
+        {% if element.structural_context.project_id %}<span><strong>Proyecto sugerido:</strong> #{{ element.structural_context.project_id }}</span>{% endif %}
+        {% if element.structural_context.grouping_type_id %}<span><strong>Tipo sugerido:</strong> #{{ element.structural_context.grouping_type_id }}</span>{% endif %}
+      </section>
+
+      <form class="form-panel" method="post" novalidate data-group-resolution-form data-groups-url="{% url 'fiduciary:historical_import_context_groups' %}">
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+
+        <div class="alert alert-info">
+          Crear una nueva agrupación solo prepara la decisión para la importación futura. No se creará todavía una agrupación definitiva.
+        </div>
+
+        <div class="form-grid">
+          <div>
+            <label class="form-label" for="{{ form.action.id_for_label }}">{{ form.action.label }}</label>
+            {{ form.action }}
+            {{ form.action.errors }}
+          </div>
+          <div>
+            <label class="form-label" for="{{ form.project.id_for_label }}">{{ form.project.label }}</label>
+            {{ form.project }}
+            {{ form.project.errors }}
+          </div>
+          <div>
+            <label class="form-label" for="{{ form.grouping_type.id_for_label }}">{{ form.grouping_type.label }}</label>
+            {{ form.grouping_type }}
+            {{ form.grouping_type.errors }}
+          </div>
+          <div data-existing-group-field>
+            <label class="form-label" for="{{ form.existing_group.id_for_label }}">{{ form.existing_group.label }}</label>
+            {{ form.existing_group }}
+            {{ form.existing_group.errors }}
+          </div>
+          <div data-new-group-field>
+            <label class="form-label" for="{{ form.new_group_name.id_for_label }}">{{ form.new_group_name.label }}</label>
+            {{ form.new_group_name }}
+            {{ form.new_group_name.errors }}
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Aplicar resolución de agrupación</button>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_pending' batch.pk %}">Cancelar</a>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (() => {
+    const form = document.querySelector("[data-group-resolution-form]");
+    if (!form) return;
+    const action = form.querySelector("[data-structural-resolution='action']");
+    const project = form.querySelector("[data-structural-resolution='project']");
+    const groupingType = form.querySelector("[data-structural-resolution='grouping-type']");
+    const existingGroup = form.querySelector("[data-structural-resolution='existing-group']");
+    const existingField = form.querySelector("[data-existing-group-field]");
+    const newField = form.querySelector("[data-new-group-field]");
+
+    function syncMode() {
+      const relate = action.value === "associate_existing";
+      existingField.style.display = relate ? "" : "none";
+      existingGroup.disabled = !relate;
+      newField.style.display = relate ? "none" : "";
+    }
+
+    async function loadGroups() {
+      const selected = existingGroup.value;
+      existingGroup.innerHTML = '<option value="">---------</option>';
+      if (!project.value || !groupingType.value) return;
+      const params = new URLSearchParams({project: project.value, grouping_type: groupingType.value});
+      const response = await fetch(`${form.dataset.groupsUrl}?${params.toString()}`, {headers: {"X-Requested-With": "XMLHttpRequest"}});
+      if (!response.ok) return;
+      const data = await response.json();
+      data.results.forEach((item) => {
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = item.text;
+        if (String(item.id) === selected) option.selected = true;
+        existingGroup.appendChild(option);
+      });
+    }
+
+    action.addEventListener("change", syncMode);
+    project.addEventListener("change", loadGroups);
+    groupingType.addEventListener("change", loadGroups);
+    syncMode();
+  })();
+</script>
+{% endblock %}

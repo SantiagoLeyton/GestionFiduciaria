@@ -337,6 +337,11 @@ class ImportedFile(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(fields=["batch", "sha256"], name="fiduciary_imported_file_batch_sha_unique"),
+            models.UniqueConstraint(
+                fields=["sha256"],
+                condition=Q(file_type="historical"),
+                name="fiduciary_imported_file_historical_sha_unique",
+            ),
             models.CheckConstraint(
                 condition=Q(file_type__in=["historical", "report", "unknown"]),
                 name="fiduciary_imported_file_type_valid",
@@ -758,3 +763,67 @@ class ImportNovelty(models.Model):
 
     def __str__(self):
         return f"{self.get_novelty_type_display()} - {self.get_status_display()}"
+
+
+class ImportedHistoricalNovelty(models.Model):
+    class Status(models.TextChoices):
+        DETECTED = "detected", "Detectada"
+        READY = "ready", "Preparada"
+        IGNORED = "ignored", "Ignorada"
+
+    batch = models.ForeignKey(ImportBatch, on_delete=models.PROTECT, related_name="historical_novelties")
+    imported_file = models.ForeignKey(ImportedFile, on_delete=models.PROTECT, related_name="historical_novelties")
+    sheet_result = models.ForeignKey(
+        ImportedSheetResult,
+        on_delete=models.PROTECT,
+        related_name="historical_novelties",
+    )
+    row_number = models.PositiveIntegerField("fila origen")
+    project_name = models.CharField("proyecto detectado", max_length=180)
+    grouping_type_name = models.CharField("tipo de agrupacion detectado", max_length=120, blank=True)
+    grouping_code = models.CharField("codigo de agrupacion", max_length=80, blank=True)
+    grouping_name = models.CharField("agrupacion detectada", max_length=180, blank=True)
+    unit_code = models.CharField("codigo de unidad", max_length=80, blank=True)
+    unit_name = models.CharField("unidad detectada", max_length=180, blank=True)
+    assignment_number = models.CharField("encargo fiduciario detectado", max_length=80, blank=True)
+    assignment_status = models.CharField("estado del encargo detectado", max_length=80, blank=True)
+    original_cells = models.JSONField("celdas originales", default=list, blank=True)
+    sanitized_summary = models.TextField("resumen sanitizado", blank=True)
+    status = models.CharField("estado", max_length=16, choices=Status.choices, default=Status.DETECTED)
+    created_at = models.DateTimeField("fecha de creacion", auto_now_add=True)
+    updated_at = models.DateTimeField("fecha de actualizacion", auto_now=True)
+
+    class Meta:
+        ordering = ("imported_file", "sheet_result", "row_number")
+        indexes = [
+            models.Index(fields=["batch", "status"], name="fid_histnov_batch_status_idx"),
+            models.Index(fields=["imported_file", "row_number"], name="fiduciary_histnov_file_row_idx"),
+            models.Index(fields=["unit_code"], name="fiduciary_histnov_unit_idx"),
+            models.Index(fields=["assignment_number"], name="fid_histnov_assignment_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["imported_file", "sheet_result", "row_number"],
+                name="fiduciary_histnov_file_sheet_row_unique",
+            ),
+            models.CheckConstraint(
+                condition=Q(status__in=["detected", "ready", "ignored"]),
+                name="fiduciary_histnov_status_valid",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        self.project_name = self.project_name.strip()
+        self.grouping_type_name = self.grouping_type_name.strip()
+        self.grouping_code = self.grouping_code.strip()
+        self.grouping_name = self.grouping_name.strip()
+        self.unit_code = self.unit_code.strip()
+        self.unit_name = self.unit_name.strip()
+        self.assignment_number = self.assignment_number.strip()
+        self.assignment_status = self.assignment_status.strip()
+        self.sanitized_summary = self.sanitized_summary.strip()
+
+    def __str__(self):
+        reference = self.unit_code or self.assignment_number or f"fila {self.row_number}"
+        return f"Novedad historica {reference}"

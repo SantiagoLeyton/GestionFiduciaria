@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}Resolver elemento | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Resolver elemento</h1>
+          <p>{{ element.get_inferred_kind_display }} detectado en {{ element.occurrence_count }} aparicion{{ element.occurrence_count|pluralize:"es" }}.</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_pending' batch.pk %}">Volver</a>
+      </div>
+
+      <section class="context-panel">
+        <span><strong>Valor:</strong> {{ element.raw_value }}</span>
+        <span><strong>Normalizado:</strong> {{ element.normalized_value|default:"-" }}</span>
+        {% if element.structural_context.grouping_name %}<span><strong>Contexto:</strong> {{ element.structural_context.grouping_name }}</span>{% endif %}
+      </section>
+
+      <form class="form-panel" method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+        <div class="form-grid">
+          {% for field in form %}
+            <div>
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {{ field.errors }}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="alert alert-info mt-3">
+          Esta decision no crea datos definitivos. Solo prepara la resolucion para la importacion historica de una fase posterior.
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Aplicar resolucion</button>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_pending' batch.pk %}">Cancelar</a>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+{% endblock %}

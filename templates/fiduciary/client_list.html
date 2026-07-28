@@ -11,7 +11,7 @@
       {% include "includes/messages.html" %}
       <div class="page-heading">
         <div><h1>Clientes</h1><p>Consulte y administre clientes asociados a unidades y encargos fiduciarios.</p></div>
-        {% if can_manage %}<a class="btn btn-success" href="{% url 'fiduciary:client_create' %}">Nuevo cliente</a>{% endif %}
+        {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:client_create' %}">Nuevo cliente</a>{% endif %}
       </div>
       <form class="filter-panel real-estate-filter" method="get">
         <div><label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>{{ filter_form.q }}</div>
@@ -40,7 +40,7 @@
                   <td>{{ client.assignments_count }}</td>
                   <td class="actions-cell">
                     <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:client_detail' client.pk %}">Ver</a>
-                    {% if can_manage %}
+                    {% if can_update %}
                       <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:client_update' client.pk %}">Editar</a>
                       <form method="post" action="{% url 'fiduciary:client_status' client.pk 'deactivate' %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><button class="btn btn-sm btn-outline-secondary" {% if not client.is_active %}disabled{% endif %}>Inactivar</button></form>
                       <form method="post" action="{% url 'fiduciary:client_status' client.pk 'activate' %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><button class="btn btn-sm btn-outline-secondary" {% if client.is_active %}disabled{% endif %}>Activar</button></form>

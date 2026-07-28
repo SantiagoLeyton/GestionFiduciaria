@@ -17,6 +17,15 @@ from .views import (
     ClientListView,
     ClientStatusView,
     ClientUpdateView,
+    HistoricalImportBatchListView,
+    HistoricalImportCancelView,
+    HistoricalImportCreateView,
+    HistoricalImportPendingListView,
+    HistoricalImportPreviewView,
+    HistoricalImportReanalyzePendingView,
+    HistoricalImportResolutionView,
+    HistoricalImportStructuralGroupChoicesView,
+    HistoricalImportStructuralGroupResolutionView,
     UnitOwnershipCreateView,
     UnitOwnershipFinalizeView,
     UnitOwnershipListView,
@@ -26,6 +35,31 @@ from .views import (
 app_name = "fiduciary"
 
 urlpatterns = [
+    path("historical-imports/", HistoricalImportBatchListView.as_view(), name="historical_import_list"),
+    path("historical-imports/new/", HistoricalImportCreateView.as_view(), name="historical_import_create"),
+    path("historical-imports/<int:pk>/", HistoricalImportPreviewView.as_view(), name="historical_import_preview"),
+    path("historical-imports/<int:pk>/cancel/", HistoricalImportCancelView.as_view(), name="historical_import_cancel"),
+    path("historical-imports/<int:pk>/pending/", HistoricalImportPendingListView.as_view(), name="historical_import_pending"),
+    path(
+        "historical-imports/<int:pk>/pending/reanalyze/",
+        HistoricalImportReanalyzePendingView.as_view(),
+        name="historical_import_reanalyze_pending",
+    ),
+    path(
+        "historical-imports/<int:pk>/pending/<int:element_pk>/resolve/",
+        HistoricalImportResolutionView.as_view(),
+        name="historical_import_resolve",
+    ),
+    path(
+        "historical-imports/<int:pk>/pending/<int:element_pk>/resolve-group/",
+        HistoricalImportStructuralGroupResolutionView.as_view(),
+        name="historical_import_resolve_group",
+    ),
+    path(
+        "historical-imports/context/groups/",
+        HistoricalImportStructuralGroupChoicesView.as_view(),
+        name="historical_import_context_groups",
+    ),
     path("clients/", ClientListView.as_view(), name="client_list"),
     path("clients/new/", ClientCreateView.as_view(), name="client_create"),
     path("clients/<int:pk>/", ClientDetailView.as_view(), name="client_detail"),

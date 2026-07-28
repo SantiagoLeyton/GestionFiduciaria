@@ -4,7 +4,14 @@ from django.forms import formset_factory
 
 from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
 
-from .models import Client, FiduciaryAssignment, FiduciaryAssignmentHolder, UnitOwnership
+from .models import (
+    Client,
+    DetectedStructureElement,
+    FiduciaryAssignment,
+    FiduciaryAssignmentHolder,
+    ImportResolution,
+    UnitOwnership,
+)
 
 
 DIRECT_UNITS_VALUE = "__direct__"
@@ -492,3 +499,211 @@ class AssignmentHolderForm(ChangeReasonMixin, forms.ModelForm):
             instance.save()
             self.save_m2m()
         return instance
+
+
+class HistoricalImportUploadForm(forms.Form):
+    file = forms.FileField(
+        label="Archivo historico",
+        widget=forms.FileInput(attrs={"class": "form-control", "accept": ".xlsx,.xls"}),
+    )
+    grouping_type_hint = forms.CharField(
+        label="Tipo de agrupacion sugerido",
+        required=False,
+        help_text="Use este campo solo cuando el formato del archivo no indique el tipo de agrupacion.",
+        widget=forms.TextInput(attrs={"class": "form-control", "placeholder": "Ej. Sector"}),
+    )
+
+    def clean_file(self):
+        uploaded_file = self.cleaned_data["file"]
+        name = uploaded_file.name.lower()
+        if not (name.endswith(".xlsx") or name.endswith(".xls")):
+            raise ValidationError("Cargue un archivo .xlsx o .xls.")
+        return uploaded_file
+
+    def clean_grouping_type_hint(self):
+        return self.cleaned_data["grouping_type_hint"].strip()
+
+
+class ImportResolutionForm(forms.ModelForm):
+    target_kind = forms.ChoiceField(
+        label="Clasificacion",
+        choices=[
+            (DetectedStructureElement.InferredKind.PROJECT, "Proyecto"),
+            (DetectedStructureElement.InferredKind.GROUPING_TYPE, "Tipo de agrupacion"),
+            (DetectedStructureElement.InferredKind.STRUCTURAL_GROUP, "Agrupacion"),
+            (DetectedStructureElement.InferredKind.PROPERTY_UNIT, "Unidad"),
+        ],
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    action = forms.ChoiceField(
+        label="Decision",
+        choices=[
+            (ImportResolution.Action.ASSOCIATE_EXISTING, "Asociar con entidad existente"),
+            (ImportResolution.Action.CREATE_NEW, "Crear nuevo en la importacion futura"),
+            (ImportResolution.Action.IGNORE, "Ignorar"),
+        ],
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    class Meta:
+        model = ImportResolution
+        fields = (
+            "target_kind",
+            "action",
+            "target_project",
+            "target_grouping_type",
+            "target_structural_group",
+            "target_property_unit",
+            "parent_project",
+            "parent_grouping_type",
+            "parent_structural_group",
+            "create_code",
+            "create_name",
+        )
+        widgets = {
+            "target_project": forms.Select(attrs={"class": "form-select"}),
+            "target_grouping_type": forms.Select(attrs={"class": "form-select"}),
+            "target_structural_group": forms.Select(attrs={"class": "form-select"}),
+            "target_property_unit": forms.Select(attrs={"class": "form-select"}),
+            "parent_project": forms.Select(attrs={"class": "form-select"}),
+            "parent_grouping_type": forms.Select(attrs={"class": "form-select"}),
+            "parent_structural_group": forms.Select(attrs={"class": "form-select"}),
+            "create_code": forms.TextInput(attrs={"class": "form-control"}),
+            "create_name": forms.TextInput(attrs={"class": "form-control"}),
+        }
+        labels = {
+            "target_project": "Proyecto existente",
+            "target_grouping_type": "Tipo existente",
+            "target_structural_group": "Agrupacion existente",
+            "target_property_unit": "Unidad existente",
+            "parent_project": "Proyecto padre",
+            "parent_grouping_type": "Tipo padre",
+            "parent_structural_group": "Agrupacion padre",
+            "create_code": "Codigo para crear",
+            "create_name": "Nombre para crear",
+        }
+
+    def __init__(self, *args, detected_element=None, **kwargs):
+        self.detected_element = detected_element
+        super().__init__(*args, **kwargs)
+        self.fields["target_project"].queryset = Project.objects.order_by("name", "code")
+        self.fields["target_grouping_type"].queryset = GroupingType.objects.order_by("name", "code")
+        self.fields["target_structural_group"].queryset = StructuralGroup.objects.select_related(
+            "project", "grouping_type"
+        ).order_by("project__name", "name", "code")
+        self.fields["target_property_unit"].queryset = PropertyUnit.objects.select_related(
+            "project", "structural_group"
+        ).order_by("project__name", "structural_group__name", "name", "code")
+        self.fields["parent_project"].queryset = Project.objects.order_by("name", "code")
+        self.fields["parent_grouping_type"].queryset = GroupingType.objects.order_by("name", "code")
+        self.fields["parent_structural_group"].queryset = StructuralGroup.objects.select_related(
+            "project", "grouping_type"
+        ).order_by("project__name", "name", "code")
+        if detected_element and not self.is_bound:
+            self.initial.setdefault("target_kind", detected_element.inferred_kind)
+            self.initial.setdefault("create_code", detected_element.raw_value if detected_element.raw_value != "(sin valor)" else "")
+            self.initial.setdefault("create_name", detected_element.raw_value if detected_element.raw_value != "(sin valor)" else "")
+
+    def clean(self):
+        cleaned = super().clean()
+        action = cleaned.get("action")
+        kind = cleaned.get("target_kind")
+        if action == ImportResolution.Action.ASSOCIATE_EXISTING:
+            required_by_kind = {
+                DetectedStructureElement.InferredKind.PROJECT: "target_project",
+                DetectedStructureElement.InferredKind.GROUPING_TYPE: "target_grouping_type",
+                DetectedStructureElement.InferredKind.STRUCTURAL_GROUP: "target_structural_group",
+                DetectedStructureElement.InferredKind.PROPERTY_UNIT: "target_property_unit",
+            }
+            field_name = required_by_kind.get(kind)
+            if field_name and not cleaned.get(field_name):
+                self.add_error(field_name, "Seleccione la entidad existente.")
+        if action == ImportResolution.Action.CREATE_NEW and not (
+            (cleaned.get("create_code") or "").strip() or (cleaned.get("create_name") or "").strip()
+        ):
+            raise ValidationError("Registre codigo, nombre o ambos para crear el elemento en la importacion futura.")
+        if action == ImportResolution.Action.CREATE_NEW and kind == DetectedStructureElement.InferredKind.STRUCTURAL_GROUP:
+            if not cleaned.get("parent_project") or not cleaned.get("parent_grouping_type"):
+                raise ValidationError("Para crear una agrupacion debe indicar proyecto y tipo padre.")
+        if action == ImportResolution.Action.CREATE_NEW and kind == DetectedStructureElement.InferredKind.PROPERTY_UNIT:
+            if not cleaned.get("parent_project"):
+                raise ValidationError("Para crear una unidad debe indicar el proyecto padre.")
+        return cleaned
+
+
+class StructuralGroupResolutionForm(forms.Form):
+    action = forms.ChoiceField(
+        label="Decision",
+        choices=[
+            (ImportResolution.Action.CREATE_NEW, "Crear nueva agrupacion"),
+            (ImportResolution.Action.ASSOCIATE_EXISTING, "Relacionar con agrupacion existente"),
+        ],
+        widget=forms.Select(attrs={"class": "form-select", "data-structural-resolution": "action"}),
+    )
+    project = forms.ModelChoiceField(
+        label="Proyecto",
+        queryset=Project.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-structural-resolution": "project"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-structural-resolution": "grouping-type"}),
+    )
+    existing_group = forms.ModelChoiceField(
+        label="Agrupacion existente",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-structural-resolution": "existing-group"}),
+    )
+    new_group_name = forms.CharField(
+        label="Nombre de la nueva agrupacion",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "form-control"}),
+    )
+
+    def __init__(self, *args, detected_element=None, **kwargs):
+        self.detected_element = detected_element
+        super().__init__(*args, **kwargs)
+        context = detected_element.structural_context if detected_element else {}
+        project_id = self.data.get("project") if self.is_bound else context.get("project_id")
+        grouping_type_id = self.data.get("grouping_type") if self.is_bound else context.get("grouping_type_id")
+        self.fields["project"].queryset = Project.objects.filter(is_active=True).order_by("name", "code")
+        self.fields["grouping_type"].queryset = GroupingType.objects.filter(is_active=True).order_by("name", "code")
+        groups = StructuralGroup.objects.filter(is_active=True).select_related("project", "grouping_type")
+        if project_id:
+            groups = groups.filter(project_id=project_id)
+            self.initial.setdefault("project", project_id)
+        else:
+            groups = groups.none()
+        if grouping_type_id:
+            groups = groups.filter(grouping_type_id=grouping_type_id)
+            self.initial.setdefault("grouping_type", grouping_type_id)
+        else:
+            groups = groups.none()
+        self.fields["existing_group"].queryset = groups.order_by("project__name", "grouping_type__name", "name", "code")
+        if detected_element and not self.is_bound:
+            value = detected_element.raw_value if detected_element.raw_value != "(sin valor)" else ""
+            self.initial.setdefault("new_group_name", value)
+            self.initial.setdefault("action", ImportResolution.Action.CREATE_NEW)
+
+    def clean_new_group_name(self):
+        return self.cleaned_data["new_group_name"].strip()
+
+    def clean(self):
+        cleaned = super().clean()
+        action = cleaned.get("action")
+        project = cleaned.get("project")
+        grouping_type = cleaned.get("grouping_type")
+        existing_group = cleaned.get("existing_group")
+        new_group_name = cleaned.get("new_group_name")
+        if action == ImportResolution.Action.ASSOCIATE_EXISTING:
+            if not existing_group:
+                self.add_error("existing_group", "Seleccione la agrupacion existente.")
+            elif project and grouping_type and (
+                existing_group.project_id != project.pk or existing_group.grouping_type_id != grouping_type.pk
+            ):
+                self.add_error("existing_group", "La agrupacion no pertenece al proyecto y tipo seleccionados.")
+        if action == ImportResolution.Action.CREATE_NEW and not new_group_name:
+            self.add_error("new_group_name", "Registre el nombre de la agrupacion.")
+        return cleaned

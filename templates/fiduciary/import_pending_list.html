@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}Resoluciones pendientes | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Elementos pendientes</h1>
+          <p>Lote #{{ batch.pk }}. Cada decision se aplicara a las apariciones equivalentes del lote.</p>
+        </div>
+        <div class="actions-cell">
+          <form method="post" action="{% url 'fiduciary:historical_import_reanalyze_pending' batch.pk %}">
+            {% csrf_token %}
+            <button class="btn btn-outline-success" type="submit">Volver a analizar pendientes</button>
+          </form>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}">Volver</a>
+        </div>
+      </div>
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Pendientes accionables</h2>
+          <span>{{ elements|length }} visible{{ elements|length|pluralize }} · {{ blocked_count }} bloqueado{{ blocked_count|pluralize }} · {{ prepared_creation_count }} preparado{{ prepared_creation_count|pluralize }}</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead><tr><th>Tipo inferido</th><th>Valor</th><th>Ocurrencias</th><th>Contexto</th><th>Estado</th><th>Acciones</th></tr></thead>
+            <tbody>
+              {% for element in elements %}
+                <tr>
+                  <td>
+                    {% if element.inferred_kind == "project" %}
+                      <span class="badge text-bg-primary">Proyecto pendiente</span>
+                    {% elif element.inferred_kind == "grouping_type" %}
+                      <span class="badge text-bg-info">Tipo de agrupación pendiente</span>
+                    {% elif element.inferred_kind == "structural_group" %}
+                      <span class="badge text-bg-warning">Agrupación pendiente</span>
+                    {% elif element.inferred_kind == "property_unit" %}
+                      <span class="badge text-bg-secondary">Unidad pendiente</span>
+                    {% else %}
+                      <span class="badge text-bg-dark">Ambigüedad</span>
+                    {% endif %}
+                  </td>
+                  <td>{{ element.raw_value }}</td>
+                  <td>{{ element.occurrence_count }}</td>
+                  <td>
+                    {% if element.structural_context.grouping_name %}{{ element.structural_context.grouping_name }}{% else %}-{% endif %}
+                  </td>
+                  <td>
+                    {% if element.resolution.action == "create_new" %}
+                      <span class="status-pill status-active">Preparado para creación</span>
+                    {% else %}
+                      <span class="status-pill status-inactive">{{ element.get_status_display }}</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if element.inferred_kind == "structural_group" %}
+                      <a class="btn btn-sm btn-success" href="{% url 'fiduciary:historical_import_resolve_group' batch.pk element.pk %}">Resolver agrupación</a>
+                    {% else %}
+                      <a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:historical_import_resolve' batch.pk element.pk %}">Resolver</a>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="6">No hay elementos pendientes. El lote puede continuar en la siguiente fase.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% include "includes/pagination.html" %}
+      </section>
+
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Bloqueados por dependencia</h2>
+          <span>{{ blocked_count }} elemento{{ blocked_count|pluralize }}</span>
+        </div>
+        <p class="text-muted">Estos elementos se procesarán automáticamente cuando se resuelva su proyecto, tipo o agrupación padre.</p>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead><tr><th>Tipo</th><th>Valor</th><th>Contexto</th><th>Estado</th></tr></thead>
+            <tbody>
+              {% for element in blocked_elements %}
+                <tr>
+                  <td>{{ element.get_inferred_kind_display }}</td>
+                  <td>{{ element.raw_value }}</td>
+                  <td>{% if element.structural_context.grouping_name %}{{ element.structural_context.grouping_name }}{% else %}-{% endif %}</td>
+                  <td><span class="status-pill status-inactive">Bloqueado por dependencia</span></td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="4">No hay elementos bloqueados por dependencias.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

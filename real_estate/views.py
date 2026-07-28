@@ -21,7 +21,13 @@ from .forms import (
     StructuralGroupUpdateForm,
 )
 from .models import GroupingType, Project, PropertyUnit, StructuralGroup
-from .permissions import RealEstateManagementRequiredMixin, RealEstateReadRequiredMixin, can_manage_real_estate
+from .permissions import (
+    RealEstateCreateRequiredMixin,
+    RealEstateManagementRequiredMixin,
+    RealEstateReadRequiredMixin,
+    can_create_real_estate,
+    can_update_real_estate,
+)
 
 
 class EntityListView(RealEstateReadRequiredMixin, ListView):
@@ -52,7 +58,9 @@ class EntityListView(RealEstateReadRequiredMixin, ListView):
         query_params = self.request.GET.copy()
         query_params.pop("page", None)
         context["page_querystring"] = query_params.urlencode()
-        context["can_manage"] = can_manage_real_estate(self.request.user)
+        context["can_create"] = can_create_real_estate(self.request.user)
+        context["can_update"] = can_update_real_estate(self.request.user)
+        context["can_manage"] = context["can_update"]
         context["create_url_name"] = self.create_url_name
         context["update_url_name"] = self.update_url_name
         context["status_url_name"] = self.status_url_name
@@ -61,7 +69,7 @@ class EntityListView(RealEstateReadRequiredMixin, ListView):
         return context
 
 
-class EntityCreateView(RealEstateManagementRequiredMixin, CreateView):
+class EntityCreateView(RealEstateCreateRequiredMixin, CreateView):
     template_name = "real_estate/entity_form.html"
 
     def get_context_data(self, **kwargs):

@@ -73,6 +73,8 @@ El parser ignora filas vacias, separadores y totales. Cada fila valida se transf
 - titulares en orden.
 - pagos mensuales positivos.
 
+Cuando una hoja contiene una seccion posterior de `NOVEDADES`, esa seccion no se interpreta como unidades principales. El encabezado se clasifica como separador y las filas posteriores se conservan en memoria como `HistoricalNovelty`, con su contexto estructural, unidad, encargo y celdas originales. Estas filas siguen contando como omitidas del bloque principal, pero ya no generan la incidencia generica `HISTORICAL_NOVELTY_SECTION_SKIPPED`.
+
 ## Formulas
 
 El parser nunca ejecuta formulas. Si una celda relevante tiene formula:
@@ -95,4 +97,49 @@ La asociacion automatica solo ocurre cuando existe un unico candidato por codigo
 
 Para el libro real de Springfield, el parser extrae el proyecto y las agrupaciones del archivo. El tipo de agrupacion puede recibirse como pista del consumidor mediante `grouping_type_hint`; no queda acoplado globalmente a `Sector` y puede ser reemplazado por otros tipos configurados en la base de datos.
 
-Los unicos registros que esta capa puede crear o actualizar son preparatorios: `ImportBatch`, `ImportedFile`, `ImportedSheetResult`, `ImportRowIssue`, `DetectedStructureElement` e `ImportResolution`.
+Los unicos registros que esta capa puede crear o actualizar son preparatorios: `ImportBatch`, `ImportedFile`, `ImportedSheetResult`, `ImportRowIssue`, `DetectedStructureElement`, `ImportResolution` e `ImportedHistoricalNovelty`.
+
+## Novedades historicas temporales
+
+La preparacion historica persiste las novedades detectadas en `ImportedHistoricalNovelty`. Este modelo conserva:
+
+- lote, archivo y hoja.
+- fila de origen.
+- proyecto, tipo de agrupacion, agrupacion, unidad y encargo detectados.
+- celdas originales de la fila, incluyendo coordenada, encabezado, valor, formula y metadata de cache.
+- resumen sanitizado para interfaz.
+- estado temporal de preparacion.
+
+La previsualizacion muestra conteos y una muestra contextual de hoja, fila, proyecto, agrupacion, unidad y encargo. No expone nombres completos, documentos ni valores de celdas originales en masa.
+
+`ImportedHistoricalNovelty` no aplica novedades sobre clientes, encargos, unidades ni pagos. La importacion definitiva sera responsable de interpretar y aplicar esas novedades segun las reglas funcionales futuras.
+
+## Previsualizacion y resolucion asistida
+
+La interfaz de carga historica permite a Contabilidad y Comercial crear un lote, cargar un archivo `.xlsx` o `.xls`, ejecutar el analisis conservador y revisar una previsualizacion agregada. Ambos roles pueden resolver pendientes preparatorios. Comercial mantiene restriccion de no modificar registros de negocio existentes.
+
+La resolucion asistida permite clasificar cada elemento pendiente como proyecto, tipo de agrupacion, agrupacion o unidad, y decidir entre asociar una entidad existente, preparar una creacion futura o ignorar el valor. La decision se guarda en `ImportResolution` y se aplica a las apariciones equivalentes del lote sin crear entidades definitivas.
+
+Cuando una unidad nueva ya tiene proyecto y agrupacion resueltos, queda preparada automaticamente como `create_new`. El lote pasa a `ready` solo cuando no quedan elementos pendientes. El boton de importacion definitiva permanece deshabilitado hasta la siguiente fase.
+
+Las agrupaciones pendientes pueden resolverse desde el propio flujo mediante una pantalla guiada. Contabilidad puede asociar la agrupacion detectada con una agrupacion existente filtrada por proyecto y tipo, o preparar la creacion futura de una agrupacion nueva indicando proyecto, tipo y nombre. Esta accion no crea `StructuralGroup`; solo actualiza `ImportResolution`.
+
+Al resolver una agrupacion, el backend vuelve a procesar masivamente las unidades hijas del mismo contexto estructural. Si la agrupacion existe, las unidades se buscan de forma conservadora dentro de esa agrupacion padre; si no existe, las unidades quedan preparadas como `create_new` y conservan en el contexto la resolucion preparatoria de su agrupacion. La pantalla de pendientes tambien permite volver a analizar elementos pendientes contra la estructura inmobiliaria actual sin recargar el archivo ni crear otro lote.
+
+Los conteos distinguen pendientes accionables de elementos bloqueados por dependencia. Una unidad cuyo proyecto, tipo o agrupacion padre aun no esta resuelto se mantiene como `DetectedStructureElement.Status.DETECTED` con resolucion `unresolved`; no se presenta como decision individual ni cuenta como pendiente accionable. Cuando el padre queda resuelto, el servicio prepara sus unidades hijas automaticamente.
+
+Al resolver proyecto o tipo de agrupacion desde el formulario generico, el backend vuelve a analizar los pendientes y propaga el contexto resuelto a agrupaciones y unidades hijas. Esto permite que una agrupacion como `T2` pueda resolverse contra la estructura existente o quedar como creacion futura sin que sus unidades aparezcan como decisiones independientes.
+
+## Duplicados historicos
+
+La carga historica bloquea duplicados globales por SHA-256 antes de ejecutar el parser. La regla aplica solo a `ImportedFile.file_type = historical`, por lo que un archivo futuro de reportes no queda bloqueado unicamente por compartir hash.
+
+La proteccion existe en dos niveles: el servicio reserva el archivo antes de analizar y lanza `DuplicateHistoricalImportError` si ya existe, y la base de datos mantiene la restriccion condicional `fiduciary_imported_file_historical_sha_unique`. La migracion `0003` limpia duplicados preparatorios previos de forma deterministica antes de crear la restriccion: conserva el archivo con referencias de negocio si existiera, luego el lote en estado mas avanzado y finalmente el mas antiguo.
+
+## Cancelacion de intentos
+
+Los lotes historicos en estados preparatorios (`analyzing`, `awaiting_resolution`, `ready` y `failed`) pueden cancelarse antes de ejecutar una importacion definitiva. La cancelacion se realiza mediante `cancel_import_batch`, dentro de una transaccion y con bloqueo del lote.
+
+El servicio valida que no existan pagos u otras referencias definitivas asociadas al archivo antes de eliminar datos. Si el lote solo contiene informacion preparatoria, elimina resoluciones, elementos detectados, novedades historicas temporales, novedades funcionales preparatorias, incidencias, resultados de hojas, archivos importados y el propio lote. Al eliminar `ImportedFile`, el SHA-256 queda disponible para volver a cargar el archivo corregido.
+
+Por ahora no se conserva el `ImportBatch` cancelado porque mantener el archivo preparatorio bloquearia la proteccion global por SHA-256. Esta decision debe revisarse cuando exista auditoria funcional completa.

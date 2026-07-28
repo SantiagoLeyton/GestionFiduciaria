@@ -7,6 +7,7 @@ from .models import (
     FiduciaryAssignmentHolder,
     ImportBatch,
     ImportedFile,
+    ImportedHistoricalNovelty,
     ImportNovelty,
     ImportResolution,
     ImportedSheetResult,
@@ -110,3 +111,10 @@ class ImportNoveltyAdmin(NoDeleteAdmin):
     list_display = ("novelty_type", "status", "batch", "imported_file", "created_at")
     list_filter = ("novelty_type", "status")
     search_fields = ("description",)
+
+
+@admin.register(ImportedHistoricalNovelty)
+class ImportedHistoricalNoveltyAdmin(NoDeleteAdmin):
+    list_display = ("imported_file", "sheet_result", "row_number", "unit_code", "assignment_number", "status")
+    list_filter = ("status", "sheet_result")
+    search_fields = ("unit_code", "assignment_number", "project_name", "grouping_name", "sanitized_summary")

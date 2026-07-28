@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}Libros historicos | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Importar libro historico</h1>
+          <p>Consulte lotes historicos analizados y prepare resoluciones antes de la importacion definitiva.</p>
+        </div>
+        {% if can_create %}
+          <a class="btn btn-success" href="{% url 'fiduciary:historical_import_create' %}">Nuevo lote</a>
+        {% endif %}
+      </div>
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Lotes historicos</h2>
+          <span>{{ batches|length }} registro{{ batches|length|pluralize }}</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Fecha</th>
+                <th>Usuario</th>
+                <th>Estado</th>
+                <th>Archivos</th>
+                <th>Filas</th>
+                <th>Incidencias</th>
+                <th>Pendientes</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for batch in batches %}
+                <tr>
+                  <td>#{{ batch.pk }}</td>
+                  <td>{{ batch.created_at|date:"d/m/Y H:i" }}</td>
+                  <td>{{ batch.initiated_by.get_full_name|default:batch.initiated_by.email }}</td>
+                  <td><span class="status-pill status-inactive">{{ batch.get_status_display }}</span></td>
+                  <td>{{ batch.files_count }}</td>
+                  <td>{{ batch.processed_rows }} / {{ batch.total_rows }}</td>
+                  <td>{{ batch.issue_count }}</td>
+                  <td>{{ batch.pending_count }}</td>
+                  <td class="actions-cell">
+                    <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}">Previsualizar</a>
+                    {% if can_create and batch.pending_count %}
+                      <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:historical_import_pending' batch.pk %}">Resolver</a>
+                    {% endif %}
+                    {% if can_create and batch.status in cancelable_statuses %}
+                      <a class="btn btn-sm btn-outline-danger" href="{% url 'fiduciary:historical_import_cancel' batch.pk %}">Cancelar importación</a>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="9">No hay lotes historicos registrados.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% include "includes/pagination.html" %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

@@ -111,7 +111,21 @@ def test_project_activation_and_inactivation(admin_client, project):
 def test_project_permissions(client, commercial_client, admin_client, project):
     assert client.get(reverse("real_estate:project_list")).status_code == 302
     assert commercial_client.get(reverse("real_estate:project_list")).status_code == 200
-    assert commercial_client.get(reverse("real_estate:project_create")).status_code == 403
+    assert commercial_client.get(reverse("real_estate:project_create")).status_code == 200
+    create_response = commercial_client.post(
+        reverse("real_estate:project_create"),
+        {"code": "PRJ-COM", "name": "Proyecto Comercial", "description": "", "is_active": "on"},
+    )
+    assert create_response.status_code == 302
+    assert Project.objects.filter(code="PRJ-COM").exists()
+    assert commercial_client.get(reverse("real_estate:project_update", args=[project.pk])).status_code == 403
+    assert (
+        commercial_client.post(
+            reverse("real_estate:project_status", args=[project.pk, "deactivate"]),
+            {"change_reason": "Intento comercial"},
+        ).status_code
+        == 403
+    )
     assert admin_client.get(reverse("real_estate:project_create")).status_code == 200
 
 
@@ -141,7 +155,15 @@ def test_grouping_type_creation_and_edit(admin_client):
 
 @pytest.mark.django_db
 def test_grouping_type_activation_inactivation_and_permissions(admin_client, commercial_client, grouping_type):
-    assert commercial_client.get(reverse("real_estate:grouping_type_create")).status_code == 403
+    assert commercial_client.get(reverse("real_estate:grouping_type_create")).status_code == 200
+    assert commercial_client.get(reverse("real_estate:grouping_type_update", args=[grouping_type.pk])).status_code == 403
+    assert (
+        commercial_client.post(
+            reverse("real_estate:grouping_type_status", args=[grouping_type.pk, "deactivate"]),
+            {"change_reason": "Intento comercial"},
+        ).status_code
+        == 403
+    )
 
     admin_client.post(
         reverse("real_estate:grouping_type_status", args=[grouping_type.pk, "deactivate"]),
@@ -252,8 +274,18 @@ def test_structural_group_rejects_parent_from_another_project(project, second_pr
 
 
 @pytest.mark.django_db
-def test_structural_group_permissions(admin_client, commercial_client):
-    assert commercial_client.get(reverse("real_estate:structural_group_create")).status_code == 403
+def test_structural_group_permissions(admin_client, commercial_client, project, grouping_type):
+    group = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+
+    assert commercial_client.get(reverse("real_estate:structural_group_create")).status_code == 200
+    assert commercial_client.get(reverse("real_estate:structural_group_update", args=[group.pk])).status_code == 403
+    assert (
+        commercial_client.post(
+            reverse("real_estate:structural_group_status", args=[group.pk, "deactivate"]),
+            {"change_reason": "Intento comercial"},
+        ).status_code
+        == 403
+    )
     assert admin_client.get(reverse("real_estate:structural_group_create")).status_code == 200
 
 
@@ -381,7 +413,15 @@ def test_property_unit_rejects_group_from_another_project(project, second_projec
 @pytest.mark.django_db
 def test_property_unit_activation_inactivation_and_permissions(admin_client, commercial_client, project):
     unit = PropertyUnit.objects.create(project=project, code="A101", name="Apartamento 101")
-    assert commercial_client.get(reverse("real_estate:property_unit_create")).status_code == 403
+    assert commercial_client.get(reverse("real_estate:property_unit_create")).status_code == 200
+    assert commercial_client.get(reverse("real_estate:property_unit_update", args=[unit.pk])).status_code == 403
+    assert (
+        commercial_client.post(
+            reverse("real_estate:property_unit_status", args=[unit.pk, "deactivate"]),
+            {"change_reason": "Intento comercial"},
+        ).status_code
+        == 403
+    )
 
     admin_client.post(
         reverse("real_estate:property_unit_status", args=[unit.pk, "deactivate"]),

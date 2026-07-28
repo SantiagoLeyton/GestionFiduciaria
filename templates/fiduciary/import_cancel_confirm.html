@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Cancelar importación | Centenario Gestión Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>¿Cancelar este intento de importación?</h1>
+          <p>Lote #{{ batch.pk }} - {{ batch.get_status_display }}</p>
+        </div>
+      </div>
+
+      <section class="data-section">
+        <div class="alert alert-warning mb-4">
+          Se eliminarán el análisis, las incidencias y las resoluciones pendientes. Esta acción no eliminará información definitiva del sistema.
+        </div>
+        <div class="row g-3 mb-4">
+          <div class="col-md-4">
+            <strong>Archivo</strong>
+            <div>{{ imported_file.original_name|default:"Sin archivo" }}</div>
+          </div>
+          <div class="col-md-2">
+            <strong>Lote</strong>
+            <div>#{{ batch.pk }}</div>
+          </div>
+          <div class="col-md-3">
+            <strong>Estado</strong>
+            <div>{{ batch.get_status_display }}</div>
+          </div>
+          <div class="col-md-3">
+            <strong>Pendientes</strong>
+            <div>{{ pending_count }}</div>
+          </div>
+        </div>
+        <p class="text-muted">
+          Se eliminarán únicamente los resultados temporales de este intento. Luego podrá corregirse el archivo y volver a subirse.
+        </p>
+
+        {% if can_cancel %}
+          <form method="post">
+            {% csrf_token %}
+            <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}">Volver</a>
+            <button class="btn btn-danger" type="submit">Sí, cancelar importación</button>
+          </form>
+        {% else %}
+          <div class="alert alert-secondary">Este lote no se puede cancelar en su estado actual.</div>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}">Volver</a>
+        {% endif %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

@@ -8,6 +8,8 @@ from .data import (
     HistoricalAssignment,
     HistoricalClient,
     HistoricalMonthlyPayment,
+    HistoricalNovelty,
+    HistoricalNoveltyCell,
     HistoricalRow,
     ParseStatistics,
     ParserIssue,
@@ -110,7 +112,7 @@ class HistoricalWorkbookParser:
 
         columns, payment_columns, header_issues = self._detect_columns(raw_sheet, header_row)
         classification = "processable" if self._has_required_columns(columns, payment_columns) else "unknown"
-        rows, ignored_rows, ignored_row_reasons, row_issues = self._extract_rows(
+        rows, novelties, ignored_rows, ignored_row_reasons, row_issues = self._extract_rows(
             raw_sheet,
             header_row,
             columns,
@@ -127,6 +129,7 @@ class HistoricalWorkbookParser:
             columns=columns,
             payment_columns=payment_columns,
             rows=rows,
+            novelties=novelties,
             ignored_rows=ignored_rows,
             ignored_row_reasons=ignored_row_reasons,
             issues=header_issues + row_issues,
@@ -325,17 +328,41 @@ class HistoricalWorkbookParser:
         header_row: int,
         columns: dict[str, DetectedColumn],
         payment_columns: list[DetectedPaymentColumn],
-    ) -> tuple[list[HistoricalRow], int, dict[str, int], list[ParserIssue]]:
+    ) -> tuple[list[HistoricalRow], list[HistoricalNovelty], int, dict[str, int], list[ParserIssue]]:
         rows = []
+        novelties = []
         ignored_rows = 0
         ignored_reasons = Counter()
         issues = []
         formula_cached_columns = set()
         project, grouping_code, grouping_name = self._extract_sheet_structure(sheet)
+        in_novelty_section = False
+        novelty_rows = 0
         for row_number in range(header_row + 1, sheet.used_rows + 1):
             if self._is_row_empty(sheet, row_number):
                 ignored_rows += 1
                 ignored_reasons["empty"] += 1
+                continue
+            if self._is_novelty_header_row(sheet, row_number):
+                in_novelty_section = True
+                ignored_rows += 1
+                ignored_reasons["novelty_section"] += 1
+                continue
+            if in_novelty_section:
+                novelty = self._extract_novelty(
+                    sheet,
+                    row_number,
+                    project,
+                    grouping_code,
+                    grouping_name,
+                    columns,
+                    header_row,
+                )
+                if novelty:
+                    novelties.append(novelty)
+                ignored_rows += 1
+                ignored_reasons["novelty"] += 1
+                novelty_rows += 1
                 continue
             if self._is_decorative_or_total_row(sheet, row_number):
                 ignored_rows += 1
@@ -373,7 +400,7 @@ class HistoricalWorkbookParser:
                     column_letter=column_letter,
                 )
             )
-        return rows, ignored_rows, dict(ignored_reasons), issues
+        return rows, novelties, ignored_rows, dict(ignored_reasons), issues
 
     def _extract_sheet_structure(self, sheet: RawSheet) -> tuple[str, str, str]:
         title = ""
@@ -381,19 +408,37 @@ class HistoricalWorkbookParser:
             if row > 3:
                 break
             value = clean_text(cell.value)
-            if value and "proyecto" in normalize_text(value):
+            if value and ("proyecto" in normalize_text(value) or "conjunto" in normalize_text(value)):
                 title = value
                 break
-        project = "Springfield"
+        project = ""
         descriptor = sheet.name
         match = re.search(r"proyecto\s+(.+?)\s*-\s*(.+)$", title, flags=re.IGNORECASE)
         if match:
             project = match.group(1).strip().title()
             descriptor = match.group(2).strip().title()
+        elif title:
+            title_main = re.split(r"\s+-\s+", title, maxsplit=1)[0]
+            normalized_title = normalize_text(title_main)
+            sheet_name_normalized = normalize_text(sheet.name)
+            title_without_group = re.sub(rf"\b{re.escape(sheet_name_normalized)}\b", "", normalized_title, flags=re.IGNORECASE)
+            title_without_group = re.sub(r"\b(conjunto|cerrado|proyecto)\b", "", title_without_group, flags=re.IGNORECASE)
+            title_without_group = re.sub(r"\b\d+\s+(apartamentos?|locales?|unidades?)\b.*$", "", title_without_group, flags=re.IGNORECASE)
+            project = title_without_group.strip().title()
+            descriptor = sheet.name
+        if not project:
+            project = self._project_from_filename()
         grouping_code = sheet.name.strip()
         descriptor_without_code = re.sub(rf"\b{re.escape(grouping_code)}\b", "", descriptor, flags=re.IGNORECASE).strip()
         grouping_name = f"{grouping_code} {descriptor_without_code}".strip()
         return project, grouping_code, grouping_name
+
+    def _project_from_filename(self) -> str:
+        name = re.sub(r"\.(xlsx|xls)$", "", self.path.name, flags=re.IGNORECASE)
+        name = re.sub(r"^libro[_\s-]*", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\([^)]*\)", "", name)
+        name = name.replace("_", " ").strip()
+        return re.sub(r"\s+", " ", name).title() or "Proyecto sin identificar"
 
     def _extract_row(
         self,
@@ -486,6 +531,58 @@ class HistoricalWorkbookParser:
             )
         return payments
 
+    def _extract_novelty(
+        self,
+        sheet: RawSheet,
+        row_number: int,
+        project: str,
+        grouping_code: str,
+        grouping_name: str,
+        columns: dict[str, DetectedColumn],
+        header_row: int,
+    ) -> HistoricalNovelty | None:
+        cells = []
+        for column in range(1, sheet.used_columns + 1):
+            cell = sheet.cell(row_number, column)
+            if not cell or cell.value in ("", None):
+                continue
+            header_cell = sheet.cell(header_row, column)
+            header = clean_text(header_cell.value if header_cell else None)
+            cells.append(
+                HistoricalNoveltyCell(
+                    coordinate=cell.coordinate,
+                    column_letter=cell.letter,
+                    column_index=cell.column,
+                    header=header,
+                    value=cell.value,
+                    formula=cell.formula,
+                    has_cached_value=cell.has_cached_value,
+                    is_date=cell.is_date,
+                )
+            )
+        if not cells:
+            return None
+
+        unit = self._value(sheet, row_number, columns.get("unit"))
+        assignment_number = self._value(sheet, row_number, columns.get("assignment_number"))
+        return HistoricalNovelty(
+            sheet_name=sheet.name,
+            row_number=row_number,
+            project=project,
+            grouping_type=self.grouping_type_hint,
+            grouping_code=grouping_code,
+            grouping_name=grouping_name,
+            unit_code=unit,
+            unit_name=unit,
+            assignment=HistoricalAssignment(
+                assignment_number=assignment_number,
+                status=self._value(sheet, row_number, columns.get("assignment_status")),
+            )
+            if assignment_number
+            else None,
+            cells=cells,
+        )
+
     def _formula_issues_for_row(
         self,
         sheet: RawSheet,
@@ -531,11 +628,24 @@ class HistoricalWorkbookParser:
         joined = " ".join(values)
         if "total" in joined or "subtotal" in joined:
             return True
+        if joined in {"ventas", "por vender", "novedades"}:
+            return True
+        if "novedades" in joined and len(values) <= 2:
+            return True
         return False
+
+    def _is_novelty_header_row(self, sheet: RawSheet, row_number: int) -> bool:
+        values = [
+            normalize_text(cell.value)
+            for (row, _), cell in sheet.cells.items()
+            if row == row_number and normalize_text(cell.value)
+        ]
+        return len(values) <= 3 and any(value == "novedades" for value in values)
 
     def _build_statistics(self, sheets: list[SheetData], issues: list[ParserIssue]) -> ParseStatistics:
         processed_sheets = [sheet for sheet in sheets if sheet.classification == "processable"]
         rows = [row for sheet in sheets for row in sheet.rows]
+        novelties = [novelty for sheet in sheets for novelty in sheet.novelties]
         unique_clients = Counter(
             (row.sheet_name, row.row_number, client.order) for row in rows for client in row.clients
         )
@@ -549,5 +659,6 @@ class HistoricalWorkbookParser:
             distinct_assignments_found=len(unique_assignments),
             payment_entries_found=sum(len(row.payments) for row in rows),
             payment_columns_detected=sum(len(sheet.payment_columns) for sheet in sheets),
+            historical_novelties_found=len(novelties),
             issues_found=len(issues),
         )

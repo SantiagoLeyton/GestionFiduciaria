@@ -19,7 +19,7 @@
         <p>Estado: {% if assignment.is_active %}Vigente{% else %}Inactivo{% endif %}</p>
         <p>Observaciones: {{ assignment.observations|default:"-" }}</p>
         <p>No se han realizado pagos aun</p>
-        {% if can_manage and assignment.is_active %}
+        {% if can_update and assignment.is_active %}
           <form method="post" action="{% url 'fiduciary:assignment_close' assignment.pk %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><input class="form-control form-control-sm" type="date" name="end_date" required><button class="btn btn-sm btn-outline-secondary">Cerrar</button></form>
           <a class="btn btn-sm btn-outline-secondary mt-2" href="{% url 'fiduciary:holder_create' assignment.pk %}">Agregar titular</a>
         {% endif %}
@@ -28,7 +28,7 @@
         <h2>Titulares del encargo</h2>
         <div class="table-responsive"><table class="table data-table"><thead><tr><th>Cliente</th><th>Rol</th><th>Periodo</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>
           {% for holder in assignment.holders.all %}
-            <tr><td><a href="{% url 'fiduciary:client_detail' holder.client.pk %}">{{ holder.client.full_name }}</a></td><td>{% if holder.is_primary %}Principal{% else %}Secundario{% endif %}</td><td>{{ holder.start_date }} - {{ holder.end_date|default:"Vigente" }}</td><td>{% if holder.is_active %}Vigente{% else %}Finalizado{% endif %}</td><td>{% if can_manage and holder.is_active %}<form method="post" action="{% url 'fiduciary:holder_finalize' holder.pk %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><input class="form-control form-control-sm" type="date" name="end_date" required><button class="btn btn-sm btn-outline-secondary">Finalizar</button></form>{% endif %}</td></tr>
+            <tr><td><a href="{% url 'fiduciary:client_detail' holder.client.pk %}">{{ holder.client.full_name }}</a></td><td>{% if holder.is_primary %}Principal{% else %}Secundario{% endif %}</td><td>{{ holder.start_date }} - {{ holder.end_date|default:"Vigente" }}</td><td>{% if holder.is_active %}Vigente{% else %}Finalizado{% endif %}</td><td>{% if can_update and holder.is_active %}<form method="post" action="{% url 'fiduciary:holder_finalize' holder.pk %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><input class="form-control form-control-sm" type="date" name="end_date" required><button class="btn btn-sm btn-outline-secondary">Finalizar</button></form>{% endif %}</td></tr>
           {% empty %}<tr><td colspan="5">Sin titulares registrados.</td></tr>{% endfor %}
         </tbody></table></div>
       </section>

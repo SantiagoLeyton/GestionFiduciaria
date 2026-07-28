@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block title %}Previsualizacion historica | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Previsualizacion historica</h1>
+          <p>Lote #{{ batch.pk }} - {{ batch.get_status_display }}</p>
+        </div>
+        <div class="actions-cell">
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_list' %}">Volver</a>
+          {% if can_create and pending_count %}
+            <a class="btn btn-success" href="{% url 'fiduciary:historical_import_pending' batch.pk %}">Resolver pendientes</a>
+          {% endif %}
+          {% if can_cancel %}
+            <a class="btn btn-outline-danger" href="{% url 'fiduciary:historical_import_cancel' batch.pk %}">Cancelar importación</a>
+          {% endif %}
+          <button class="btn btn-secondary" type="button" disabled>La importación definitiva se habilitará en la siguiente fase.</button>
+        </div>
+      </div>
+
+      {% if is_ready %}
+        <div class="alert alert-success">El lote esta listo para la importacion definitiva en la siguiente fase.</div>
+      {% endif %}
+
+      <section class="data-section">
+        <div class="section-header"><h2>Archivo y estadisticas</h2><span>{{ imported_file.get_status_display|default:"Sin archivo" }}</span></div>
+        <div class="row g-3">
+          <div class="col-md-4"><strong>Archivo</strong><div>{{ imported_file.original_name|default:"-" }}</div></div>
+          <div class="col-md-2"><strong>Hojas procesadas</strong><div>{{ sheets|length }}</div></div>
+          <div class="col-md-2"><strong>Filas validas</strong><div>{{ batch.processed_rows }}</div></div>
+          <div class="col-md-2"><strong>Incidencias</strong><div>{{ batch.issue_count }}</div></div>
+          <div class="col-md-2"><strong>Pendientes accionables</strong><div>{{ pending_count }}</div></div>
+        </div>
+      </section>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Resumen del contenido</h2><span>Datos agregados</span></div>
+        <div class="row g-3">
+          <div class="col-md-3"><strong>Titulares detectados</strong><div>{{ summary.client_appearances|default:0 }}</div></div>
+          <div class="col-md-3"><strong>Encargos</strong><div>{{ summary.distinct_assignments|default:0 }}</div></div>
+          <div class="col-md-3"><strong>Pagos</strong><div>{{ summary.payment_entries|default:0 }}</div></div>
+          <div class="col-md-3"><strong>Novedades historicas</strong><div>{{ historical_novelties_count }}</div></div>
+          <div class="col-md-3"><strong>Coincidencias automaticas</strong><div>{{ automatic_matches_count }}</div></div>
+        </div>
+        <p class="text-muted mt-3 mb-0">La interfaz no muestra documentos, nombres completos, telefonos, correos ni pagos por fila.</p>
+      </section>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Novedades historicas detectadas</h2><span>{{ historical_novelties_count }} registro{{ historical_novelties_count|pluralize }}</span></div>
+        <div class="table-responsive">
+          <table class="table data-table">
+            <thead><tr><th>Hoja</th><th>Fila</th><th>Proyecto</th><th>Agrupacion</th><th>Unidad</th><th>Encargo</th><th>Estado</th></tr></thead>
+            <tbody>
+              {% for novelty in historical_novelty_samples %}
+                <tr>
+                  <td>{{ novelty.sheet_result.sheet_name }}</td>
+                  <td>{{ novelty.row_number }}</td>
+                  <td>{{ novelty.project_name }}</td>
+                  <td>{{ novelty.grouping_name|default:"-" }}</td>
+                  <td>{{ novelty.unit_code|default:"-" }}</td>
+                  <td>{{ novelty.assignment_number|default:"-" }}</td>
+                  <td>{{ novelty.get_status_display }}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="7">No se detectaron novedades historicas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Hojas procesadas</h2><span>{{ sheets|length }} hoja{{ sheets|length|pluralize }}</span></div>
+        <div class="table-responsive">
+          <table class="table data-table">
+            <thead><tr><th>Hoja</th><th>Visibilidad</th><th>Clasificacion</th><th>Encabezado</th><th>Filas</th><th>Omitidas</th></tr></thead>
+            <tbody>
+              {% for sheet in sheets %}
+                <tr><td>{{ sheet.sheet_name }}</td><td>{{ sheet.get_visibility_display }}</td><td>{{ sheet.get_classification_display }}</td><td>{{ sheet.header_row|default:"-" }}</td><td>{{ sheet.processed_rows }}</td><td>{{ sheet.skipped_rows }}</td></tr>
+              {% empty %}
+                <tr><td colspan="6">No hay hojas registradas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Incidencias agrupadas</h2><span>{{ issue_groups|length }} grupo{{ issue_groups|length|pluralize }}</span></div>
+        <div class="table-responsive">
+          <table class="table data-table">
+            <thead><tr><th>Codigo</th><th>Severidad</th><th>Hoja</th><th>Cantidad</th></tr></thead>
+            <tbody>
+              {% for issue in issue_groups %}
+                <tr><td>{{ issue.code }}</td><td>{{ issue.severity }}</td><td>{{ issue.sheet_result__sheet_name|default:"-" }}</td><td>{{ issue.total }}</td></tr>
+              {% empty %}
+                <tr><td colspan="4">No hay incidencias registradas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Estructura detectada</h2><span>{{ pending_count }} pendiente{{ pending_count|pluralize }}</span></div>
+        <div class="row g-3">
+          <div class="col-md-6">
+            <strong>Proyecto detectado</strong>
+            <div>{{ project_element.raw_value|default:"-" }}</div>
+            <small class="text-muted">{{ project_element.resolution.get_action_display|default:"Sin decision" }}</small>
+          </div>
+          <div class="col-md-6">
+            <strong>Tipo de agrupacion</strong>
+            <div>{{ grouping_type_element.raw_value|default:"-" }}</div>
+            <small class="text-muted">{{ grouping_type_element.resolution.get_action_display|default:"Sin decision" }}</small>
+          </div>
+          <div class="col-md-3"><strong>Agrupaciones detectadas</strong><div>{{ groups|length }}</div></div>
+          <div class="col-md-3"><strong>Unidades existentes</strong><div>{{ existing_units_count }}</div></div>
+          <div class="col-md-3"><strong>Unidades nuevas</strong><div>{{ new_units_count }}</div></div>
+          <div class="col-md-3"><strong>Pendientes accionables</strong><div>{{ pending_count }}</div></div>
+          <div class="col-md-3"><strong>Bloqueados por dependencia</strong><div>{{ blocked_dependency_count }}</div></div>
+          <div class="col-md-3"><strong>Preparados para creación</strong><div>{{ prepared_creation_count }}</div></div>
+          <div class="col-md-3"><strong>Resueltos con existente</strong><div>{{ existing_resolution_count }}</div></div>
+        </div>
+      </section>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Muestra de unidades</h2><span>Primeros registros estructurales</span></div>
+        <div class="table-responsive">
+          <table class="table data-table">
+            <thead><tr><th>Valor</th><th>Ocurrencias</th><th>Estado</th><th>Decision</th></tr></thead>
+            <tbody>
+              {% for unit in unit_samples %}
+                <tr><td>{{ unit.raw_value }}</td><td>{{ unit.occurrence_count }}</td><td>{{ unit.get_status_display }}</td><td>{{ unit.resolution.get_action_display }}</td></tr>
+              {% empty %}
+                <tr><td colspan="4">No hay unidades detectadas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

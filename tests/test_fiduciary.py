@@ -904,15 +904,36 @@ def test_assignment_creation_is_atomic_when_holder_invalid(accounting_client, ac
 
 
 @pytest.mark.django_db
-def test_permissions_for_fiduciary_views(accounting_client, commercial_client, client, active_client):
+def test_permissions_for_fiduciary_views(accounting_client, commercial_client, client, active_client, unit):
+    create_ownership(active_client, unit)
+    assignment = create_assignment(unit, active_client)
+
     assert client.get(reverse("fiduciary:client_list")).status_code == 302
     assert accounting_client.get(reverse("fiduciary:client_create")).status_code == 200
     assert commercial_client.get(reverse("fiduciary:client_list")).status_code == 200
     assert commercial_client.get(reverse("fiduciary:assignment_list")).status_code == 200
-    assert commercial_client.get(reverse("fiduciary:client_create")).status_code == 403
-    assert commercial_client.get(reverse("fiduciary:ownership_create")).status_code == 403
-    assert commercial_client.get(reverse("fiduciary:assignment_create")).status_code == 403
+    assert commercial_client.get(reverse("fiduciary:client_create")).status_code == 200
+    assert commercial_client.get(reverse("fiduciary:ownership_create")).status_code == 200
+    assert commercial_client.get(reverse("fiduciary:assignment_create")).status_code == 200
+    create_response = commercial_client.post(
+        reverse("fiduciary:client_create"),
+        {
+            "document_type": FiduciaryClient.DocumentType.CITIZENSHIP_ID,
+            "document_number": "COM-001",
+            "first_names": "Cliente",
+            "last_names_or_company": "Comercial",
+            "phone": "3000000000",
+            "email": "",
+            "address": "",
+            "is_active": "on",
+        },
+    )
+    assert create_response.status_code == 302
+    assert FiduciaryClient.objects.filter(document_number="COM-001").exists()
+    assert commercial_client.get(reverse("fiduciary:client_update", args=[active_client.pk])).status_code == 403
+    assert commercial_client.get(reverse("fiduciary:assignment_update", args=[assignment.pk])).status_code == 403
     assert commercial_client.post(reverse("fiduciary:client_status", args=[active_client.pk, "deactivate"])).status_code == 403
+    assert commercial_client.post(reverse("fiduciary:assignment_close", args=[assignment.pk])).status_code == 403
 
 
 @pytest.mark.django_db
@@ -1002,16 +1023,16 @@ def test_property_unit_view_shows_empty_messages(accounting_client, unit):
 
 
 @pytest.mark.django_db
-def test_commercial_templates_do_not_show_write_or_delete_actions(commercial_client, active_client, unit):
+def test_commercial_templates_show_create_but_not_update_or_delete_actions(commercial_client, active_client, unit):
     create_ownership(active_client, unit)
     create_assignment(unit, active_client)
 
     clients = commercial_client.get(reverse("fiduciary:client_list")).content.decode()
     assignments = commercial_client.get(reverse("fiduciary:assignment_list")).content.decode()
 
-    assert "Nuevo cliente" not in clients
+    assert "Nuevo cliente" in clients
     assert "Editar" not in clients
-    assert "Nuevo encargo" not in assignments
+    assert "Nuevo encargo" in assignments
     assert "Eliminar" not in clients + assignments
 
 

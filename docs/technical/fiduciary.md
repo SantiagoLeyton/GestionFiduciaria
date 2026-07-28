@@ -152,6 +152,28 @@ Registra incidencias tecnicas o de validacion por archivo, hoja, fila y columna,
 
 Registra novedades funcionales detectadas, como cesiones, traslados, retiros, titulares ambiguos o estructura incompatible. No sustituye incidencias tecnicas ni resoluciones temporales.
 
+### ImportedHistoricalNovelty
+
+Registra de forma temporal las filas detectadas dentro de la seccion `NOVEDADES` de los libros historicos.
+
+Campos principales:
+
+- `batch`, `imported_file`, `sheet_result`.
+- `row_number`.
+- `project_name`, `grouping_type_name`, `grouping_code`, `grouping_name`.
+- `unit_code`, `unit_name`.
+- `assignment_number`, `assignment_status`.
+- `original_cells`: celdas originales de la fila con coordenada, encabezado, valor, formula y metadata de valor cacheado.
+- `sanitized_summary`.
+- `status`.
+
+Reglas:
+
+- No crea ni modifica clientes, unidades, encargos ni pagos.
+- Preserva la informacion original necesaria para la importacion definitiva.
+- La interfaz solo muestra informacion contextual sanitizada.
+- Se elimina junto con el lote cuando se cancela un intento preparatorio.
+
 ## Pagos
 
 ### Payment
@@ -191,19 +213,17 @@ La proteccion existe en servicio y en constraints condicionales de PostgreSQL.
 
 Contabilidad y superusuarios tecnicos:
 
-- Consultar, crear, editar, activar/inactivar clientes.
-- Consultar, crear y finalizar titularidades.
-- Consultar, crear, editar y cerrar encargos.
-- Administrar titulares asociados a encargos.
+- Consultar y crear informacion de negocio.
+- Editar, activar/inactivar, cerrar o finalizar registros existentes.
+- Preparar importaciones historicas, resolver pendientes, reanalizar y cancelar intentos preparatorios.
 
 Comercial:
 
-- Consultar clientes.
-- Consultar titularidades.
-- Consultar encargos fiduciarios.
-- Consultar unidades.
+- Consultar informacion de negocio.
+- Crear informacion nueva necesaria para incorporar datos al sistema.
+- Preparar importaciones historicas, resolver pendientes, reanalizar y cancelar intentos preparatorios.
 
-Comercial no puede ejecutar operaciones manuales de escritura. Las restricciones se aplican en servidor.
+Comercial no puede modificar informacion de negocio ya existente. Las restricciones se aplican en servidor; los botones de interfaz solo reflejan esa autorizacion.
 
 ## Operaciones atomicas
 
