@@ -103,15 +103,28 @@ class ClientForm(forms.ModelForm):
     def clean(self):
         cleaned = super().clean()
         cleaned["information_status"] = Client.InformationStatus.COMPLETE
+        cleaned["source_origin"] = Client.SourceOrigin.MANUAL
+        if cleaned.get("document_type") == Client.DocumentType.UNKNOWN:
+            self.add_error("document_type", "Seleccione un tipo de documento valido.")
+        if not (cleaned.get("document_number") or "").strip():
+            self.add_error("document_number", "Registre el numero de documento.")
         phone = (cleaned.get("phone") or "").strip()
         email = (cleaned.get("email") or "").strip()
         if not phone and not email:
             raise ValidationError("Debe registrar al menos un telefono o un correo electronico.")
         return cleaned
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["document_type"].choices = [
+            choice for choice in Client.DocumentType.choices if choice[0] != Client.DocumentType.UNKNOWN
+        ]
+        self.fields["document_number"].required = True
+
     def save(self, commit=True):
         instance = super().save(commit=False)
         instance.information_status = Client.InformationStatus.COMPLETE
+        instance.source_origin = Client.SourceOrigin.MANUAL
         if commit:
             instance.save()
             self.save_m2m()
