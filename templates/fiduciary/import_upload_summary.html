@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Resumen de carga | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>{{ summary.title|default:"Resumen de carga" }}</h1>
+          <p>Resultado general de los archivos seleccionados.</p>
+          {% if summary.import_type == "daily" %}<p class="visually-hidden">Previsualizacion de reporte diario</p>{% endif %}
+        </div>
+        {% if summary.import_type == "daily" %}
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:daily_report_list' %}">Volver</a>
+        {% else %}
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_list' %}">Volver</a>
+        {% endif %}
+      </div>
+
+      <section class="data-section">
+        <div class="row g-3">
+          <div class="col"><strong>{{ summary.counts.total|default:0 }}</strong><br><span class="text-muted">Seleccionados</span></div>
+          <div class="col"><strong>{{ summary.counts.processed|default:0 }}</strong><br><span class="text-muted">Procesados</span></div>
+          <div class="col"><strong>{{ summary.counts.auto_finalized|default:0 }}</strong><br><span class="text-muted">Finalizados automaticamente</span></div>
+          <div class="col"><strong>{{ summary.counts.with_pendings|default:0 }}</strong><br><span class="text-muted">Con pendientes</span></div>
+          <div class="col"><strong>{{ summary.counts.duplicates|default:0 }}</strong><br><span class="text-muted">Duplicados</span></div>
+          <div class="col"><strong>{{ summary.counts.invalid|default:0 }}</strong><br><span class="text-muted">Invalidos</span></div>
+          <div class="col"><strong>{{ summary.counts.failed|default:0 }}</strong><br><span class="text-muted">Fallidos</span></div>
+        </div>
+      </section>
+
+      <section class="data-section">
+        <div class="table-responsive">
+          <table class="table data-table align-middle">
+            <thead><tr><th>Archivo</th><th>Tipo</th><th>Resultado</th><th>Mensaje</th><th>Lote</th><th>Accion</th></tr></thead>
+            <tbody>
+              {% for item in summary.items %}
+                <tr>
+                  <td>{{ item.name }}</td>
+                  <td>{{ item.import_type }}</td>
+                  <td>{{ item.result }}</td>
+                  <td>{{ item.message }}</td>
+                  <td>{% if item.batch_id %}#{{ item.batch_id }}{% else %}-{% endif %}</td>
+                  <td>{% if item.preview_url %}<a class="btn btn-sm btn-outline-success" href="{{ item.preview_url }}">Ver lote</a>{% else %}-{% endif %}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="6">No hay resultados de carga para mostrar.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

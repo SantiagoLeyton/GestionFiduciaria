@@ -121,7 +121,7 @@ def auto_resolve_new_units(batch: ImportBatch, user=None) -> int:
         resolution.target_kind = DetectedStructureElement.InferredKind.PROPERTY_UNIT
         resolution.parent_project_id = project_id
         resolution.parent_structural_group_id = group_id
-        resolution.create_code = element.raw_value if element.raw_value != "(sin valor)" else ""
+        resolution.create_code = ""
         resolution.create_name = element.raw_value if element.raw_value != "(sin valor)" else ""
         resolution.resolved_by = user
         resolution.resolved_at = timezone.now()
@@ -278,7 +278,7 @@ def _resolve_unit_from_parent_group(element: DetectedStructureElement, group_res
         resolution.action = ImportResolution.Action.CREATE_NEW
         resolution.target_property_unit = None
         resolution.parent_structural_group = group_resolution.target_structural_group
-        resolution.create_code = element.raw_value if element.raw_value != "(sin valor)" else ""
+        resolution.create_code = ""
         resolution.create_name = element.raw_value if element.raw_value != "(sin valor)" else ""
         context = element.structural_context or {}
         context["parent_group_resolution_id"] = group_resolution.pk

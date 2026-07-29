@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>{{ title }}</h1><p>Busque el cliente y registre la relacion fiduciaria correspondiente.</p></div>
+        <a class="btn btn-outline-secondary" href="{% url back_url %}">Volver</a>
+      </div>
+      <section class="data-section">
+        <h2>Buscar cliente</h2>
+        <div class="row g-2 align-items-end">
+          <div class="col-md-3">
+            <label class="form-label" for="client-search-criterion">Criterio</label>
+            <select class="form-select" id="client-search-criterion">
+              <option value="document">Numero de identificacion</option>
+              <option value="name">Nombre</option>
+              <option value="email">Correo</option>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="client-search-q">Valor</label>
+            <input class="form-control" id="client-search-q" type="search">
+          </div>
+          <div class="col-md-3">
+            <button class="btn btn-outline-success w-100" id="client-search-button" type="button">Buscar</button>
+          </div>
+        </div>
+        <div class="list-group mt-3" id="client-search-results"></div>
+      </section>
+      <form class="form-panel" method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+        <div class="form-grid">
+          {% for field in form %}
+            <div class="{% if field.field.widget.input_type == 'checkbox' %}form-check form-switch{% endif %}">
+              {% if field.field.widget.input_type == 'checkbox' %}
+                {{ field }}
+                <label class="form-check-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {% else %}
+                <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+              {% endif %}
+              {{ field.errors }}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Guardar</button>
+          <a class="btn btn-outline-secondary" href="{% url back_url %}">Cancelar</a>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    const url = "{{ client_search_url }}";
+    const criterion = document.getElementById("client-search-criterion");
+    const q = document.getElementById("client-search-q");
+    const button = document.getElementById("client-search-button");
+    const results = document.getElementById("client-search-results");
+    const clientSelect = document.getElementById("id_client");
+    if (!url || !criterion || !q || !button || !results || !clientSelect) return;
+    button.addEventListener("click", function () {
+      results.innerHTML = "";
+      const params = new URLSearchParams({criterion: criterion.value, q: q.value});
+      fetch(url + "?" + params.toString(), {headers: {"X-Requested-With": "XMLHttpRequest"}})
+        .then(response => response.json())
+        .then(data => {
+          (data.results || []).forEach(item => {
+            const option = document.createElement("button");
+            option.type = "button";
+            option.className = "list-group-item list-group-item-action";
+            option.textContent = item.text;
+            option.addEventListener("click", function () {
+              clientSelect.innerHTML = "";
+              const selected = document.createElement("option");
+              selected.value = item.id;
+              selected.textContent = item.text;
+              selected.selected = true;
+              clientSelect.appendChild(selected);
+            });
+            results.appendChild(option);
+          });
+          if (!results.children.length) {
+            results.innerHTML = '<div class="text-muted">No se encontraron clientes. Puede crear un cliente nuevo desde el modulo Clientes.</div>';
+          }
+        });
+    });
+  });
+</script>
+{% endblock %}

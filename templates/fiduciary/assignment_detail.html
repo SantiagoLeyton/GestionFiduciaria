@@ -18,10 +18,46 @@
         <p>Periodo: {{ assignment.start_date }} - {{ assignment.end_date|default:"Vigente" }}</p>
         <p>Estado: {% if assignment.is_active %}Vigente{% else %}Inactivo{% endif %}</p>
         <p>Observaciones: {{ assignment.observations|default:"-" }}</p>
-        <p>No se han realizado pagos aun</p>
         {% if can_update and assignment.is_active %}
           <form method="post" action="{% url 'fiduciary:assignment_close' assignment.pk %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><input class="form-control form-control-sm" type="date" name="end_date" required><button class="btn btn-sm btn-outline-secondary">Cerrar</button></form>
+        {% endif %}
+        {% if can_create and assignment.is_active %}
           <a class="btn btn-sm btn-outline-secondary mt-2" href="{% url 'fiduciary:holder_create' assignment.pk %}">Agregar titular</a>
+          <a class="btn btn-sm btn-outline-success mt-2" href="{% url 'fiduciary:assignment_change' assignment.pk %}">Registrar cambio de encargo</a>
+        {% endif %}
+      </section>
+      <section class="data-section">
+        <h2>Pagos registrados</h2>
+        {% if payment_count %}
+          <div class="row g-3 mb-3">
+            <div class="col"><strong>{{ payment_count }}</strong><br><span class="text-muted">Cantidad</span></div>
+            <div class="col"><strong>$ {{ payment_total }}</strong><br><span class="text-muted">Total recibido</span></div>
+            <div class="col"><strong>{% if first_payment.exact_date %}{{ first_payment.exact_date }}{% else %}{{ first_payment.period_month }}/{{ first_payment.period_year }}{% endif %}</strong><br><span class="text-muted">Primer pago</span></div>
+            <div class="col"><strong>{% if last_payment.exact_date %}{{ last_payment.exact_date }}{% else %}{{ last_payment.period_month }}/{{ last_payment.period_year }}{% endif %}</strong><br><span class="text-muted">Ultimo pago</span></div>
+          </div>
+          <div class="table-responsive">
+            <table class="table data-table align-middle">
+              <thead><tr><th>Fecha o periodo</th><th>Valor</th><th>Concepto</th><th>Pagador</th><th>Tipo</th><th>Origen</th></tr></thead>
+              <tbody>
+                {% for payment in payments %}
+                  <tr>
+                    <td>{% if payment.exact_date %}{{ payment.exact_date }}{% else %}{{ payment.period_month }}/{{ payment.period_year }}{% endif %}</td>
+                    <td>$ {{ payment.amount }}</td>
+                    <td>{{ payment.concept|default:"-" }}</td>
+                    <td>
+                      {% with row=payment.daily_report_rows.all|first %}
+                        {% if row and row.payer_name %}{{ row.payer_name }}{% else %}-{% endif %}
+                      {% endwith %}
+                    </td>
+                    <td>{{ payment.get_movement_type_display }}</td>
+                    <td>{{ payment.source_file.original_name }} | {{ payment.source_sheet }} fila {{ payment.source_row }}{% if payment.source_column %} col. {{ payment.source_column }}{% endif %}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p>No se han realizado pagos.</p>
         {% endif %}
       </section>
       <section class="data-section">

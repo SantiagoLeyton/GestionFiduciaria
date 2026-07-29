@@ -18,7 +18,15 @@
       </div>
 
       <section class="context-panel">
-        <span><strong>Valor:</strong> {{ element.raw_value }}</span>
+        {% if element.structural_context.missing_grouping_type %}
+          <span><strong>Tipo de pendiente:</strong> Clasificar nivel estructural</span>
+          {% if element.structural_context.project_name %}<span><strong>Proyecto:</strong> {{ element.structural_context.project_name }}</span>{% endif %}
+          {% if element.structural_context.grouping_name %}<span><strong>Agrupacion detectada:</strong> {{ element.structural_context.grouping_name }}</span>{% endif %}
+          <span><strong>Resolucion requerida:</strong> Seleccionar o preparar el tipo de agrupacion correspondiente.</span>
+          <div class="alert alert-info mt-2 mb-0">{{ element.structural_context.explanation }}</div>
+        {% else %}
+          <span><strong>Valor:</strong> {{ element.raw_value }}</span>
+        {% endif %}
         <span><strong>Normalizado:</strong> {{ element.normalized_value|default:"-" }}</span>
         {% if element.structural_context.grouping_name %}<span><strong>Contexto:</strong> {{ element.structural_context.grouping_name }}</span>{% endif %}
       </section>

@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     AssignmentCloseView,
+    AssignmentChangeView,
     AssignmentContextGroupsView,
     AssignmentContextHoldersView,
     AssignmentContextTypesView,
@@ -15,6 +16,7 @@ from .views import (
     ClientCreateView,
     ClientDetailView,
     ClientListView,
+    ClientSearchView,
     ClientStatusView,
     ClientUpdateView,
     DailyReportBatchListView,
@@ -34,15 +36,18 @@ from .views import (
     HistoricalImportResolutionView,
     HistoricalImportStructuralGroupChoicesView,
     HistoricalImportStructuralGroupResolutionView,
+    ImportUploadSummaryView,
     UnitOwnershipCreateView,
     UnitOwnershipFinalizeView,
     UnitOwnershipListView,
+    PrimaryOwnershipChangeView,
 )
 
 
 app_name = "fiduciary"
 
 urlpatterns = [
+    path("imports/upload-summary/", ImportUploadSummaryView.as_view(), name="import_upload_summary"),
     path("historical-imports/", HistoricalImportBatchListView.as_view(), name="historical_import_list"),
     path("historical-imports/new/", HistoricalImportCreateView.as_view(), name="historical_import_create"),
     path("historical-imports/<int:pk>/", HistoricalImportPreviewView.as_view(), name="historical_import_preview"),
@@ -81,9 +86,11 @@ urlpatterns = [
     path("clients/<int:pk>/", ClientDetailView.as_view(), name="client_detail"),
     path("clients/<int:pk>/edit/", ClientUpdateView.as_view(), name="client_update"),
     path("clients/<int:pk>/<str:action>/", ClientStatusView.as_view(), name="client_status"),
+    path("clients/search/", ClientSearchView.as_view(), name="client_search"),
     path("ownerships/", UnitOwnershipListView.as_view(), name="ownership_list"),
     path("ownerships/new/", UnitOwnershipCreateView.as_view(), name="ownership_create"),
     path("ownerships/<int:pk>/finalize/", UnitOwnershipFinalizeView.as_view(), name="ownership_finalize"),
+    path("ownerships/<int:pk>/change-primary/", PrimaryOwnershipChangeView.as_view(), name="ownership_change_primary"),
     path("assignments/", AssignmentListView.as_view(), name="assignment_list"),
     path("assignments/new/", AssignmentCreateView.as_view(), name="assignment_create"),
     path("assignments/context/types/", AssignmentContextTypesView.as_view(), name="assignment_context_types"),
@@ -93,6 +100,7 @@ urlpatterns = [
     path("assignments/<int:pk>/", AssignmentDetailView.as_view(), name="assignment_detail"),
     path("assignments/<int:pk>/edit/", AssignmentUpdateView.as_view(), name="assignment_update"),
     path("assignments/<int:pk>/close/", AssignmentCloseView.as_view(), name="assignment_close"),
+    path("assignments/<int:pk>/change/", AssignmentChangeView.as_view(), name="assignment_change"),
     path("assignments/<int:assignment_pk>/holders/new/", AssignmentHolderCreateView.as_view(), name="holder_create"),
     path("assignment-holders/<int:pk>/finalize/", AssignmentHolderFinalizeView.as_view(), name="holder_finalize"),
 ]

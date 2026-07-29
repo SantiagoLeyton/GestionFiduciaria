@@ -268,7 +268,7 @@ class PropertyUnitListView(EntityListView):
     search_fields = ("code", "name", "project__name", "structural_group__name")
 
     def get_queryset(self):
-        from fiduciary.models import FiduciaryAssignment, UnitOwnership
+        from fiduciary.models import FiduciaryAssignment, Payment, UnitOwnership
 
         queryset = self.model.objects.select_related(
             "project", "structural_group", "structural_group__grouping_type"
@@ -280,7 +280,15 @@ class PropertyUnitListView(EntityListView):
             ),
             Prefetch(
                 "fiduciary_assignments",
-                queryset=FiduciaryAssignment.objects.filter(is_active=True),
+                queryset=FiduciaryAssignment.objects.filter(is_active=True).prefetch_related(
+                    Prefetch(
+                        "payments",
+                        queryset=Payment.objects.select_related("source_file").order_by(
+                            "exact_date", "period_year", "period_month", "pk"
+                        ),
+                        to_attr="prefetched_payments",
+                    )
+                ),
                 to_attr="active_assignments",
             ),
         )

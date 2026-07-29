@@ -321,6 +321,8 @@ def _analyze_grouping_type(
 ) -> StructurePreviewItem | None:
     value = clean_text(grouping_type_hint) or _single_non_empty(row.grouping_type for row in _rows(workbook))
     if not value:
+        grouping_values = sorted({clean_text(row.grouping_name) for row in _rows(workbook) if clean_text(row.grouping_name)})
+        project_values = sorted({clean_text(row.project) for row in _rows(workbook) if clean_text(row.project)})
         return _persist_detected_item(
             batch=batch,
             imported_file=imported_file,
@@ -329,6 +331,16 @@ def _analyze_grouping_type(
             occurrence_count=0,
             candidates=[],
             status_override="needs_review",
+            context={
+                "missing_grouping_type": True,
+                "project_name": project_values[0] if len(project_values) == 1 else "",
+                "grouping_name": grouping_values[0] if len(grouping_values) == 1 else "",
+                "grouping_names": grouping_values[:10],
+                "explanation": (
+                    "El archivo no indica explicitamente el tipo del nivel estructural. "
+                    "Seleccione el tipo que clasifica la agrupacion detectada."
+                ),
+            },
         )
     return _persist_detected_item(
         batch=batch,

@@ -11,11 +11,14 @@
       {% include "includes/messages.html" %}
       <div class="page-heading">
         <div><h1>{{ client_obj.full_name }}</h1><p>{{ client_obj.get_document_type_display }} {{ client_obj.document_number }}</p></div>
-        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:client_list' %}">Volver</a>
+        <div class="actions-cell">
+          {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:ownership_create' %}?client={{ client_obj.pk }}">Asociar a unidad</a>{% endif %}
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:client_list' %}">Volver</a>
+        </div>
       </div>
       <section class="data-section">
         <h2>Informacion general</h2>
-        <p>Telefono: {{ client_obj.phone|default:"-" }} | Correo: {{ client_obj.email|default:"-" }} | Direccion: {{ client_obj.address|default:"-" }}</p>
+        <p>Telefono: {{ client_obj.phone|default:"-" }} | Correo: {{ client_obj.email|default:"-" }} | Contacto: {{ client_obj.address|default:"-" }}</p>
         <p>Estado: {% if client_obj.is_active %}Activo{% else %}Inactivo{% endif %} | Informacion: {{ client_obj.get_information_status_display }}</p>
       </section>
       <section class="data-section">

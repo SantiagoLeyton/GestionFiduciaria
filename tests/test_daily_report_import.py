@@ -6,6 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import PermissionDenied
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 
 from fiduciary.imports.cancellation import cancel_import_batch
@@ -67,6 +68,14 @@ def make_batch(user):
         load_mode=ImportBatch.LoadMode.SINGLE_FILE,
         status=ImportBatch.Status.ANALYZING,
         total_files=1,
+    )
+
+
+def uploaded_report_file(name="reporte.xlsx"):
+    return SimpleUploadedFile(
+        name,
+        REPORT.read_bytes(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
@@ -376,6 +385,24 @@ def test_view_uploads_real_montecielo_xls_report(client, accounting_admin_user):
 
     assert response.status_code == 200
     content = response.content.decode()
-    assert "Previsualizacion de reporte diario" in content
-    assert "002010980323" in content
-    assert DailyReportRow.objects.count() == 3
+    assert "Resumen de carga" in content
+    assert "Ver lote" in content
+
+
+def test_daily_report_multi_upload_summarizes_duplicate_selection(client, accounting_admin_user):
+    for assignment_number in {row.normalized_assignment_number for row in DailyReportParser(REPORT).parse().rows}:
+        make_assignment(assignment_number)
+    client.force_login(accounting_admin_user)
+
+    response = client.post(
+        reverse("fiduciary:daily_report_create"),
+        {"file": [uploaded_report_file("uno.xlsx"), uploaded_report_file("dos.xlsx")]},
+        follow=True,
+    )
+    content = response.content.decode()
+
+    assert response.redirect_chain[-1][0] == reverse("fiduciary:import_upload_summary")
+    assert ImportBatch.objects.count() == 1
+    assert "Duplicados" in content
+    assert "dos.xlsx" in content
+    assert DailyReportRow.objects.count() == len(DailyReportParser(REPORT).parse().rows)

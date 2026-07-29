@@ -14,12 +14,31 @@
         <form method="post" enctype="multipart/form-data">
           {% csrf_token %}
           {{ form.non_field_errors }}
-          <div class="mb-3">{{ form.file.label_tag }}{{ form.file }}{{ form.file.errors }}</div>
+          <div class="mb-3">
+            {{ form.file.label_tag }}{{ form.file }}{{ form.file.errors }}
+            <ul class="list-group mt-2 small" id="{{ file_list_target }}"></ul>
+          </div>
           <a class="btn btn-outline-secondary" href="{% url back_url %}">Volver</a>
-          <button class="btn btn-success" type="submit">Analizar reporte</button>
+          <button class="btn btn-success" type="submit">{{ submit_label|default:"Analizar reporte" }}</button>
         </form>
       </section>
     </section>
   </main>
 </div>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    const input = document.querySelector("[data-file-list='{{ file_list_target }}']");
+    const list = document.getElementById("{{ file_list_target }}");
+    if (!input || !list) return;
+    input.addEventListener("change", function () {
+      list.innerHTML = "";
+      Array.from(input.files || []).forEach(function (file) {
+        const item = document.createElement("li");
+        item.className = "list-group-item";
+        item.textContent = file.name;
+        list.appendChild(item);
+      });
+    });
+  });
+</script>
 {% endblock %}

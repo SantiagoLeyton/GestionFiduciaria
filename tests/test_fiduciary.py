@@ -5,8 +5,9 @@ from django.test import Client
 from django.urls import reverse
 
 from fiduciary.models import Client as FiduciaryClient
-from fiduciary.models import FiduciaryAssignment, FiduciaryAssignmentHolder, UnitOwnership
+from fiduciary.models import FiduciaryAssignment, FiduciaryAssignmentHolder, ImportBatch, ImportedFile, Payment, UnitOwnership
 from fiduciary.forms import DIRECT_UNITS_VALUE
+from fiduciary.services import split_imported_full_name
 from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
 
 
@@ -235,26 +236,26 @@ def test_client_can_have_only_email():
 
 
 @pytest.mark.django_db
-def test_client_can_have_phone_email_and_address():
+def test_client_can_have_phone_email_and_contact():
     client = FiduciaryClient.objects.create(
         document_type=FiduciaryClient.DocumentType.CITIZENSHIP_ID,
         document_number="779",
         last_names_or_company="Contacto Completo",
         phone="300",
         email="completo@example.com",
-        address="Calle 1",
+        address="Contacto administrativo",
     )
 
-    assert client.address == "Calle 1"
+    assert client.address == "Contacto administrativo"
 
 
 @pytest.mark.django_db
-def test_client_rejects_address_without_phone_or_email():
+def test_client_rejects_contact_without_phone_or_email():
     client = FiduciaryClient(
         document_type=FiduciaryClient.DocumentType.CITIZENSHIP_ID,
         document_number="780",
-        last_names_or_company="Solo Direccion",
-        address="Calle 1",
+        last_names_or_company="Solo Contacto",
+        address="Contacto administrativo",
     )
 
     with pytest.raises(ValidationError, match="telefono o un correo"):
@@ -269,7 +270,7 @@ def test_client_rejects_space_only_phone_and_email():
         last_names_or_company="Espacios",
         phone="   ",
         email="   ",
-        address="Calle 1",
+        address="Contacto administrativo",
     )
 
     with pytest.raises(ValidationError, match="telefono o un correo"):
@@ -277,7 +278,7 @@ def test_client_rejects_space_only_phone_and_email():
 
 
 @pytest.mark.django_db
-def test_client_form_rejects_address_only():
+def test_client_form_rejects_contact_only():
     from fiduciary.forms import ClientForm
 
     form = ClientForm(
@@ -285,10 +286,10 @@ def test_client_form_rejects_address_only():
             "document_type": FiduciaryClient.DocumentType.CITIZENSHIP_ID,
             "document_number": "782",
             "first_names": "",
-            "last_names_or_company": "Solo Direccion",
+            "last_names_or_company": "Solo Contacto",
             "phone": "",
             "email": "",
-            "address": "Calle 1",
+            "address": "Contacto administrativo",
             "is_active": "on",
         }
     )
@@ -445,18 +446,70 @@ def test_ownership_rejects_invalid_dates(active_client, unit):
 
 
 @pytest.mark.django_db
-def test_finalize_ownership_preserves_record(accounting_client, active_client, unit):
-    ownership = create_ownership(active_client, unit)
+def test_finalize_ownership_preserves_record(accounting_client, active_client, secondary_client, unit):
+    create_ownership(active_client, unit, True)
+    ownership = create_ownership(secondary_client, unit, False)
 
     response = accounting_client.post(
         reverse("fiduciary:ownership_finalize", args=[ownership.pk]),
-        {"change_reason": "Finalizacion", "end_date": "2026-02-01"},
+        {
+            "novelty_type": "exclusion",
+            "reason": "Finalizacion",
+            "end_date": "2026-02-01",
+        },
     )
 
     ownership.refresh_from_db()
     assert response.status_code == 302
     assert ownership.is_active is False
     assert UnitOwnership.objects.filter(pk=ownership.pk).exists()
+
+
+@pytest.mark.django_db
+def test_primary_ownership_change_preserves_history(accounting_client, active_client, secondary_client, unit):
+    current = create_ownership(active_client, unit, True)
+
+    response = accounting_client.post(
+        reverse("fiduciary:ownership_change_primary", args=[current.pk]),
+        {
+            "new_client": secondary_client.pk,
+            "effective_date": "2026-03-01",
+            "novelty_type": "cession",
+            "reason": "Cesion validada",
+        },
+    )
+
+    current.refresh_from_db()
+    assert response.status_code == 302
+    assert current.is_active is False
+    assert UnitOwnership.objects.filter(property_unit=unit, is_primary=True, is_active=True).get().client == secondary_client
+    assert UnitOwnership.objects.filter(property_unit=unit).count() == 2
+
+
+@pytest.mark.django_db
+def test_primary_ownership_creation_syncs_active_assignment(accounting_client, active_client, secondary_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-SYNC")
+    current = UnitOwnership.objects.get(client=active_client, property_unit=unit)
+    current.is_active = False
+    current.end_date = "2026-02-01"
+    current.save(update_fields=["is_active", "end_date"])
+    assignment.holders.filter(client=active_client).update(is_active=False, end_date="2026-02-01")
+
+    response = accounting_client.post(
+        reverse("fiduciary:ownership_create"),
+        {
+            "client": secondary_client.pk,
+            "property_unit": unit.pk,
+            "is_primary": "on",
+            "start_date": "2026-03-01",
+            "change_reason": "Nuevo titular",
+        },
+    )
+
+    assert response.status_code == 302
+    assert assignment.holders.filter(client=secondary_client, is_primary=True, is_active=True).exists()
+    assert not assignment.holders.filter(client=active_client, is_active=True).exists()
 
 
 @pytest.mark.django_db
@@ -979,6 +1032,164 @@ def test_client_detail_and_assignment_list_show_related_information(accounting_c
 
 
 @pytest.mark.django_db
+def test_assignment_detail_shows_real_payments(accounting_client, accounting_admin_user, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client)
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        status=ImportBatch.Status.COMPLETED,
+    )
+    imported_file = ImportedFile.objects.create(
+        batch=batch,
+        original_name="LIBRO.xlsx",
+        extension=".xlsx",
+        size_bytes=100,
+        sha256="a" * 64,
+        file_type=ImportedFile.FileType.HISTORICAL,
+        status=ImportedFile.Status.COMPLETED,
+    )
+    Payment.objects.create(
+        assignment=assignment,
+        date_precision=Payment.DatePrecision.MONTH,
+        period_year=2026,
+        period_month=7,
+        amount="1500000.00",
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T2",
+        source_row=5,
+        source_column="T",
+    )
+
+    content = accounting_client.get(reverse("fiduciary:assignment_detail", args=[assignment.pk])).content.decode()
+
+    assert "Pagos registrados" in content
+    assert "LIBRO.xlsx" in content
+    assert "T2 fila 5" in content
+    assert "No se han realizado pagos." not in content
+
+
+@pytest.mark.django_db
+def test_assignment_change_preserves_previous_payments(accounting_client, accounting_admin_user, active_client, secondary_client, unit):
+    create_ownership(active_client, unit, True)
+    create_ownership(secondary_client, unit, False)
+    assignment = create_assignment(unit, active_client, "EF-OLD")
+    FiduciaryAssignmentHolder.objects.create(
+        assignment=assignment,
+        client=secondary_client,
+        is_primary=False,
+        start_date="2026-01-01",
+        last_change_reason="Registro manual",
+    )
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        status=ImportBatch.Status.COMPLETED,
+    )
+    imported_file = ImportedFile.objects.create(
+        batch=batch,
+        original_name="LIBRO.xlsx",
+        extension=".xlsx",
+        size_bytes=100,
+        sha256="b" * 64,
+        file_type=ImportedFile.FileType.HISTORICAL,
+        status=ImportedFile.Status.COMPLETED,
+    )
+    payment = Payment.objects.create(
+        assignment=assignment,
+        date_precision=Payment.DatePrecision.MONTH,
+        period_year=2026,
+        period_month=7,
+        amount="1500000.00",
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T2",
+        source_row=5,
+        source_column="T",
+    )
+
+    response = accounting_client.post(
+        reverse("fiduciary:assignment_change", args=[assignment.pk]),
+        {
+            "new_assignment_number": "EF-NEW",
+            "effective_date": "2026-08-01",
+            "novelty_type": "substitution",
+            "reason": "Cambio contractual",
+            "primary_client": str(active_client.pk),
+            "secondary_clients": [str(secondary_client.pk)],
+        },
+    )
+
+    assignment.refresh_from_db()
+    payment.refresh_from_db()
+    new_assignment = FiduciaryAssignment.objects.get(assignment_number="EF-NEW")
+    assert response.status_code == 302
+    assert assignment.is_active is False
+    assert new_assignment.is_active is True
+    assert payment.assignment == assignment
+    assert new_assignment.holders.filter(client=active_client, is_active=True).exists()
+    assert new_assignment.holders.filter(client=secondary_client, is_active=True).exists()
+    assert FiduciaryAssignment.objects.filter(property_unit=unit, is_active=True).count() == 1
+
+
+@pytest.mark.django_db
+def test_assignment_withdrawal_leaves_unit_without_active_holders(accounting_client, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-RET")
+
+    response = accounting_client.post(
+        reverse("fiduciary:assignment_change", args=[assignment.pk]),
+        {
+            "new_assignment_number": "",
+            "effective_date": "2026-08-01",
+            "novelty_type": "withdrawal",
+            "reason": "Retiro del titular",
+            "primary_client": "",
+            "secondary_clients": [],
+        },
+    )
+
+    assignment.refresh_from_db()
+    assert response.status_code == 302
+    assert assignment.is_active is True
+    assert assignment.holders.filter(is_active=True).count() == 0
+    assert UnitOwnership.objects.filter(property_unit=unit, is_active=True).count() == 0
+
+
+@pytest.mark.django_db
+def test_assignment_other_requires_description(accounting_client, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-OTHER")
+
+    response = accounting_client.post(
+        reverse("fiduciary:assignment_change", args=[assignment.pk]),
+        {
+            "new_assignment_number": "",
+            "effective_date": "2026-08-01",
+            "novelty_type": "other",
+            "reason": "Otro",
+            "other_description": "",
+            "primary_client": active_client.pk,
+            "secondary_clients": [],
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Describa la novedad" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_commercial_cannot_change_assignment(commercial_client, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-COM")
+
+    response = commercial_client.get(reverse("fiduciary:assignment_change", args=[assignment.pk]))
+
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
 def test_assignment_filters_do_not_mix_projects(accounting_client, active_client, unit, external_unit):
     create_ownership(active_client, unit)
     assignment = create_assignment(unit, active_client, "EF-IN")
@@ -998,6 +1209,22 @@ def test_assignment_filters_do_not_mix_projects(accounting_client, active_client
     assert "EF-OUT" not in content
 
 
+@pytest.mark.parametrize(
+    ("raw_name", "expected_first", "expected_last"),
+    [
+        ("RINCON CARDONA LUZ ADRIANA", "LUZ ADRIANA", "RINCON CARDONA"),
+        ("CAMARGO TORRES DELASCAR", "DELASCAR", "CAMARGO TORRES"),
+        ("PEREZ JUAN DAVID", "DAVID", "PEREZ JUAN"),
+        ("JUAN PEREZ", "PEREZ", "JUAN"),
+        ("MARIA", "MARIA", ""),
+        ("DE LA CRUZ MARIA CAMILA SOFIA", "CRUZ MARIA CAMILA SOFIA", "DE LA"),
+        ("  RUIZ   ANA  MARIA  ", "MARIA", "RUIZ ANA"),
+    ],
+)
+def test_split_imported_full_name(raw_name, expected_first, expected_last):
+    assert split_imported_full_name(raw_name) == (expected_first, expected_last)
+
+
 @pytest.mark.django_db
 def test_property_unit_view_shows_real_holders_and_assignment(accounting_client, active_client, secondary_client, unit):
     create_ownership(active_client, unit, True)
@@ -1011,6 +1238,55 @@ def test_property_unit_view_shows_real_holders_and_assignment(accounting_client,
     assert "Principal" in content
     assert assignment.assignment_number in content
     assert "No se han realizado pagos aun" in content
+
+
+@pytest.mark.django_db
+def test_property_unit_view_shows_last_payment(accounting_client, accounting_admin_user, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client)
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        status=ImportBatch.Status.COMPLETED,
+    )
+    imported_file = ImportedFile.objects.create(
+        batch=batch,
+        original_name="LIBRO.xlsx",
+        extension=".xlsx",
+        size_bytes=100,
+        sha256="c" * 64,
+        file_type=ImportedFile.FileType.HISTORICAL,
+        status=ImportedFile.Status.COMPLETED,
+    )
+    Payment.objects.create(
+        assignment=assignment,
+        date_precision=Payment.DatePrecision.MONTH,
+        period_year=2026,
+        period_month=7,
+        amount="1500000.00",
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T2",
+        source_row=5,
+        source_column="T",
+    )
+
+    response = accounting_client.get(reverse("real_estate:property_unit_list"), {"project": unit.project_id})
+    content = response.content.decode()
+
+    assert "7/2026" in content
+    assert "1.500.000,00" in content or "1500000,00" in content or "1500000.00" in content
+    assert "No se han realizado pagos aun" not in content
+
+
+@pytest.mark.django_db
+def test_client_form_and_detail_show_contact_label(accounting_client, active_client):
+    form_response = accounting_client.get(reverse("fiduciary:client_create"))
+    detail_response = accounting_client.get(reverse("fiduciary:client_detail", args=[active_client.pk]))
+
+    assert "Contacto" in form_response.content.decode()
+    assert "Contacto" in detail_response.content.decode()
+    assert "Direccion" not in form_response.content.decode() + detail_response.content.decode()
 
 
 @pytest.mark.django_db

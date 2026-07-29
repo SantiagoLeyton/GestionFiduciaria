@@ -4,6 +4,7 @@ from django.forms import formset_factory
 
 from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
 
+from .domain_services import ASSIGNMENT_CHANGE_WITHOUT_NEW_ASSIGNMENT, NOVELTY_TYPE_CHOICES, validate_active_assignment_available, validate_unit_primary_available
 from .models import (
     Client,
     DailyReportRow,
@@ -16,6 +17,23 @@ from .models import (
 
 
 DIRECT_UNITS_VALUE = "__direct__"
+MAX_IMPORT_FILES = 25
+MAX_IMPORT_FILE_SIZE_BYTES = 25 * 1024 * 1024
+
+
+class MultipleFileInput(forms.ClearableFileInput):
+    allow_multiple_selected = True
+
+
+class MultipleExcelFileField(forms.FileField):
+    widget = MultipleFileInput
+
+    def clean(self, data, initial=None):
+        if not data:
+            return []
+        if not isinstance(data, (list, tuple)):
+            data = [data]
+        return list(data)
 
 
 class ChangeReasonMixin(forms.Form):
@@ -104,7 +122,7 @@ class ClientForm(forms.ModelForm):
             "last_names_or_company": "Apellidos o razon social",
             "phone": "Telefono",
             "email": "Correo electronico",
-            "address": "Direccion",
+            "address": "Contacto",
             "is_active": "Activo",
         }
 
@@ -158,23 +176,44 @@ class StatusReasonForm(forms.Form):
 class UnitOwnershipForm(ChangeReasonMixin, forms.ModelForm):
     class Meta:
         model = UnitOwnership
-        fields = ("client", "property_unit", "is_primary", "start_date")
+        fields = ("client", "property_unit", "start_date")
         widgets = {
             "client": forms.Select(attrs={"class": "form-select"}),
             "property_unit": forms.Select(attrs={"class": "form-select"}),
-            "is_primary": forms.CheckboxInput(attrs={"class": "form-check-input"}),
             "start_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
         }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["client"].queryset = Client.objects.filter(is_active=True).order_by("last_names_or_company")
+        client_id = self.data.get("client") if self.is_bound else self.initial.get("client")
+        if client_id:
+            self.fields["client"].queryset = Client.objects.filter(is_active=True, pk=client_id)
+        else:
+            self.fields["client"].queryset = Client.objects.none()
         self.fields["property_unit"].queryset = PropertyUnit.objects.filter(is_active=True).order_by(
             "project__name", "name", "code"
         )
 
+    def clean(self):
+        cleaned = super().clean()
+        client = cleaned.get("client")
+        unit = cleaned.get("property_unit")
+        if unit:
+            try:
+                validate_unit_primary_available(unit=unit, current_instance=self.instance if self.instance.pk else None)
+            except ValidationError as exc:
+                self.add_error("property_unit", exc.message_dict.get("is_primary", exc.messages)[0])
+        if client and unit:
+            duplicate = UnitOwnership.objects.filter(client=client, property_unit=unit, is_active=True)
+            if self.instance.pk:
+                duplicate = duplicate.exclude(pk=self.instance.pk)
+            if duplicate.exists():
+                self.add_error("client", "El cliente ya tiene una titularidad vigente sobre esta unidad.")
+        return cleaned
+
     def save(self, commit=True):
         instance = super().save(commit=False)
+        instance.is_primary = True
         self.apply_reason(instance)
         if commit:
             instance.save()
@@ -380,6 +419,11 @@ class FiduciaryAssignmentForm(ChangeReasonMixin, forms.ModelForm):
             raise ValidationError("La unidad seleccionada no tiene titulares vigentes. Registre primero la titularidad de los clientes.")
         if unit and primary and not has_active_unit_ownership(primary, unit):
             raise ValidationError("El titular principal debe tener titularidad vigente sobre la unidad seleccionada.")
+        if unit:
+            try:
+                validate_active_assignment_available(unit=unit, current_instance=self.instance if self.instance.pk else None)
+            except ValidationError as exc:
+                self.add_error("property_unit", exc.message_dict.get("property_unit", exc.messages)[0])
         return cleaned
 
 
@@ -468,6 +512,16 @@ class FiduciaryAssignmentUpdateForm(ChangeReasonMixin, forms.ModelForm):
             "is_active": forms.CheckboxInput(attrs={"class": "form-check-input"}),
         }
 
+    def clean(self):
+        cleaned = super().clean()
+        unit = cleaned.get("property_unit")
+        if unit and cleaned.get("is_active"):
+            try:
+                validate_active_assignment_available(unit=unit, current_instance=self.instance)
+            except ValidationError as exc:
+                self.add_error("property_unit", exc.message_dict.get("property_unit", exc.messages)[0])
+        return cleaned
+
     def save(self, commit=True):
         instance = super().save(commit=False)
         self.apply_reason(instance)
@@ -475,6 +529,92 @@ class FiduciaryAssignmentUpdateForm(ChangeReasonMixin, forms.ModelForm):
             instance.save()
             self.save_m2m()
         return instance
+
+
+class OwnershipFinalizeForm(forms.Form):
+    novelty_type = forms.ChoiceField(label="Tipo de novedad", choices=NOVELTY_TYPE_CHOICES, widget=forms.Select(attrs={"class": "form-select"}))
+    end_date = forms.DateField(label="Fecha efectiva", widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}))
+    reason = forms.CharField(label="Motivo u observacion", widget=forms.Textarea(attrs={"class": "form-control", "rows": 3}))
+
+    def clean_reason(self):
+        return self.cleaned_data["reason"].strip()
+
+
+class PrimaryOwnershipChangeForm(forms.Form):
+    new_client = forms.ModelChoiceField(label="Nuevo titular principal", queryset=Client.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
+    effective_date = forms.DateField(label="Fecha efectiva", widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}))
+    novelty_type = forms.ChoiceField(label="Tipo de novedad", choices=NOVELTY_TYPE_CHOICES, widget=forms.Select(attrs={"class": "form-select"}))
+    reason = forms.CharField(label="Motivo u observacion", widget=forms.Textarea(attrs={"class": "form-control", "rows": 3}))
+
+    def __init__(self, *args, unit=None, **kwargs):
+        self.unit = unit
+        super().__init__(*args, **kwargs)
+        self.fields["new_client"].queryset = Client.objects.filter(is_active=True).order_by("last_names_or_company", "first_names")
+
+    def clean_reason(self):
+        return self.cleaned_data["reason"].strip()
+
+
+class AssignmentChangeForm(forms.Form):
+    new_assignment_number = forms.CharField(label="Nuevo numero de encargo", required=False, widget=forms.TextInput(attrs={"class": "form-control"}))
+    effective_date = forms.DateField(label="Fecha efectiva", widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}))
+    novelty_type = forms.ChoiceField(label="Tipo de novedad", choices=NOVELTY_TYPE_CHOICES, widget=forms.Select(attrs={"class": "form-select"}))
+    reason = forms.CharField(label="Motivo u observacion", widget=forms.Textarea(attrs={"class": "form-control", "rows": 3}))
+    other_description = forms.CharField(label="Descripcion de la novedad", required=False, widget=forms.Textarea(attrs={"class": "form-control", "rows": 2}))
+    primary_client = forms.ModelChoiceField(
+        label="Titular principal del nuevo encargo",
+        queryset=Client.objects.none(),
+        required=False,
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    secondary_clients = forms.ModelMultipleChoiceField(
+        label="Clientes secundarios asociados",
+        queryset=Client.objects.none(),
+        required=False,
+        widget=forms.CheckboxSelectMultiple,
+    )
+
+    def __init__(self, *args, assignment=None, **kwargs):
+        self.assignment = assignment
+        super().__init__(*args, **kwargs)
+        if assignment:
+            clients = Client.objects.filter(
+                is_active=True,
+                unit_ownerships__property_unit=assignment.property_unit,
+                unit_ownerships__is_active=True,
+            ).distinct().order_by("last_names_or_company", "first_names")
+            self.fields["primary_client"].queryset = clients
+            self.fields["secondary_clients"].queryset = clients
+            if not self.is_bound:
+                primary = assignment.holders.filter(is_active=True, is_primary=True).first()
+                if primary:
+                    self.initial["primary_client"] = primary.client_id
+                self.initial["secondary_clients"] = list(
+                    assignment.holders.filter(is_active=True, is_primary=False).order_by("pk").values_list("client_id", flat=True)
+                )
+
+    def clean_new_assignment_number(self):
+        return (self.cleaned_data.get("new_assignment_number") or "").strip()
+
+    def clean_reason(self):
+        return self.cleaned_data["reason"].strip()
+
+    def clean_other_description(self):
+        return (self.cleaned_data.get("other_description") or "").strip()
+
+    def clean(self):
+        cleaned = super().clean()
+        novelty_type = cleaned.get("novelty_type")
+        if novelty_type == "other" and not cleaned.get("other_description"):
+            self.add_error("other_description", "Describa la novedad.")
+        if novelty_type not in ASSIGNMENT_CHANGE_WITHOUT_NEW_ASSIGNMENT:
+            if not cleaned.get("primary_client"):
+                self.add_error("primary_client", "Seleccione un titular principal.")
+        secondary_clients = list(cleaned.get("secondary_clients") or [])
+        primary_client = cleaned.get("primary_client")
+        if primary_client and primary_client in secondary_clients:
+            self.add_error("secondary_clients", "El titular principal no debe repetirse como secundario.")
+        return cleaned
 
 
 class AssignmentHolderForm(ChangeReasonMixin, forms.ModelForm):
@@ -490,7 +630,29 @@ class AssignmentHolderForm(ChangeReasonMixin, forms.ModelForm):
     def __init__(self, *args, assignment=None, **kwargs):
         self.assignment = assignment
         super().__init__(*args, **kwargs)
-        self.fields["client"].queryset = Client.objects.filter(is_active=True).order_by("last_names_or_company")
+        client_id = self.data.get("client") if self.is_bound else self.initial.get("client")
+        if client_id:
+            self.fields["client"].queryset = Client.objects.filter(is_active=True, pk=client_id)
+        else:
+            self.fields["client"].queryset = Client.objects.none()
+
+    def clean(self):
+        cleaned = super().clean()
+        client = cleaned.get("client")
+        is_primary = cleaned.get("is_primary")
+        if self.assignment and client:
+            duplicate = self.assignment.holders.filter(client=client, is_active=True)
+            if self.instance.pk:
+                duplicate = duplicate.exclude(pk=self.instance.pk)
+            if duplicate.exists():
+                self.add_error("client", "El cliente ya es titular activo de este encargo.")
+            if is_primary:
+                primary = self.assignment.holders.filter(is_primary=True, is_active=True)
+                if self.instance.pk:
+                    primary = primary.exclude(pk=self.instance.pk)
+                if primary.exists():
+                    self.add_error("is_primary", "El encargo ya tiene un titular principal activo.")
+        return cleaned
 
     def save(self, commit=True):
         instance = super().save(commit=False)
@@ -503,9 +665,10 @@ class AssignmentHolderForm(ChangeReasonMixin, forms.ModelForm):
 
 
 class HistoricalImportUploadForm(forms.Form):
-    file = forms.FileField(
-        label="Archivo historico",
-        widget=forms.FileInput(attrs={"class": "form-control", "accept": ".xlsx,.xls"}),
+    file = MultipleExcelFileField(
+        label="Archivos historicos",
+        required=False,
+        widget=MultipleFileInput(attrs={"class": "form-control", "accept": ".xlsx,.xls", "multiple": True, "data-file-list": "historical-files"}),
     )
     grouping_type_hint = forms.CharField(
         label="Tipo de agrupacion sugerido",
@@ -515,11 +678,12 @@ class HistoricalImportUploadForm(forms.Form):
     )
 
     def clean_file(self):
-        uploaded_file = self.cleaned_data["file"]
-        name = uploaded_file.name.lower()
-        if not (name.endswith(".xlsx") or name.endswith(".xls")):
-            raise ValidationError("Cargue un archivo .xlsx o .xls.")
-        return uploaded_file
+        files = self.cleaned_data["file"]
+        if not files:
+            raise ValidationError("Seleccione al menos un archivo .xlsx o .xls.")
+        if len(files) > MAX_IMPORT_FILES:
+            raise ValidationError("Seleccione maximo 25 archivos por carga.")
+        return files
 
     def clean_grouping_type_hint(self):
         return self.cleaned_data["grouping_type_hint"].strip()
@@ -602,8 +766,13 @@ class ImportResolutionForm(forms.ModelForm):
         ).order_by("project__name", "name", "code")
         if detected_element and not self.is_bound:
             self.initial.setdefault("target_kind", detected_element.inferred_kind)
-            self.initial.setdefault("create_code", detected_element.raw_value if detected_element.raw_value != "(sin valor)" else "")
-            self.initial.setdefault("create_name", detected_element.raw_value if detected_element.raw_value != "(sin valor)" else "")
+            value = detected_element.raw_value if detected_element.raw_value != "(sin valor)" else ""
+            if detected_element.inferred_kind == DetectedStructureElement.InferredKind.PROPERTY_UNIT:
+                self.initial.setdefault("create_code", "")
+                self.initial.setdefault("create_name", value)
+            else:
+                self.initial.setdefault("create_code", value)
+                self.initial.setdefault("create_name", value)
 
     def clean(self):
         cleaned = super().clean()
@@ -711,17 +880,19 @@ class StructuralGroupResolutionForm(forms.Form):
 
 
 class DailyReportUploadForm(forms.Form):
-    file = forms.FileField(
-        label="Reporte diario",
-        widget=forms.ClearableFileInput(attrs={"class": "form-control", "accept": ".xlsx,.xls"}),
+    file = MultipleExcelFileField(
+        label="Reportes diarios",
+        required=False,
+        widget=MultipleFileInput(attrs={"class": "form-control", "accept": ".xlsx,.xls", "multiple": True, "data-file-list": "daily-files"}),
     )
 
     def clean_file(self):
-        uploaded = self.cleaned_data["file"]
-        extension = uploaded.name.rsplit(".", 1)[-1].lower() if "." in uploaded.name else ""
-        if extension not in {"xlsx", "xls"}:
-            raise ValidationError("Cargue un archivo Excel .xlsx o .xls.")
-        return uploaded
+        files = self.cleaned_data["file"]
+        if not files:
+            raise ValidationError("Seleccione al menos un archivo Excel .xlsx o .xls.")
+        if len(files) > MAX_IMPORT_FILES:
+            raise ValidationError("Seleccione maximo 25 archivos por carga.")
+        return files
 
 
 class DailyReportAssignmentResolutionForm(forms.ModelForm):

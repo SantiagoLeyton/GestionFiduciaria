@@ -309,6 +309,8 @@ class _FinalizationContext:
         parent = resolution.parent_structural_group or self._parent_group_from_context(resolution)
         code = _non_placeholder(resolution.create_code)
         name = _non_placeholder(resolution.create_name) or _non_placeholder(resolution.detected_element.raw_value)
+        if code and name and normalize_text(code) == normalize_text(name):
+            code = ""
         unit = _find_unit(project, parent, code, name)
         created = False
         if not unit:
@@ -340,6 +342,9 @@ class _FinalizationContext:
             document_type=document_type,
             document_number=historical_client.document_number,
             source_origin=Client.SourceOrigin.HISTORICAL_IMPORT,
+            phone=historical_client.phone or "",
+            email=historical_client.email or "",
+            contact_name=historical_client.contact_name or "",
         )
         if result.status == "invalid" or not result.client:
             raise HistoricalImportFinalizationError("; ".join(result.errors) or "No fue posible crear el cliente importado.")

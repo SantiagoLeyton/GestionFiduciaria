@@ -60,7 +60,18 @@
                       Sin encargo fiduciario
                     {% endfor %}
                   </td>
-                  <td>No se han realizado pagos aun</td>
+                  <td>
+                    {% with assignment=entity.active_assignments|first %}
+                      {% if assignment and assignment.prefetched_payments %}
+                        {% with payment=assignment.prefetched_payments|last %}
+                          {% if payment.exact_date %}{{ payment.exact_date }}{% else %}{{ payment.period_month }}/{{ payment.period_year }}{% endif %}
+                          - $ {{ payment.amount }}
+                        {% endwith %}
+                      {% else %}
+                        No se han realizado pagos aun
+                      {% endif %}
+                    {% endwith %}
+                  </td>
                   <td>{% if entity.is_active %}<span class="status-pill status-active">Activo</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
                   <td class="actions-cell">{% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a>{% endif %}{% include "real_estate/includes/status_action.html" %}</td>
                 </tr>

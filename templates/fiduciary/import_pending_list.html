@@ -46,10 +46,20 @@
                       <span class="badge text-bg-dark">Ambigüedad</span>
                     {% endif %}
                   </td>
-                  <td>{{ element.raw_value }}</td>
+                  <td>
+                    {% if element.structural_context.missing_grouping_type %}
+                      Tipo de agrupacion no indicado por el archivo
+                      <div class="text-muted small">No falta una fila del Excel; debe clasificar el nivel estructural detectado.</div>
+                    {% else %}
+                      {{ element.raw_value }}
+                    {% endif %}
+                  </td>
                   <td>{{ element.occurrence_count }}</td>
                   <td>
-                    {% if element.structural_context.grouping_name %}{{ element.structural_context.grouping_name }}{% else %}-{% endif %}
+                    {% if element.structural_context.project_name %}<div>Proyecto: {{ element.structural_context.project_name }}</div>{% endif %}
+                    {% if element.structural_context.grouping_name %}<div>Agrupacion detectada: {{ element.structural_context.grouping_name }}</div>{% endif %}
+                    {% if element.structural_context.explanation %}<div class="text-muted small">{{ element.structural_context.explanation }}</div>{% endif %}
+                    {% if not element.structural_context.project_name and not element.structural_context.grouping_name and not element.structural_context.explanation %}-{% endif %}
                   </td>
                   <td>
                     {% if element.resolution.action == "create_new" %}

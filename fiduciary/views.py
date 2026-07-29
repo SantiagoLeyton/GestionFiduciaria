@@ -4,18 +4,19 @@ from pathlib import Path
 
 from django.contrib import messages
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import transaction
-from django.db.models import Count, Prefetch, Q
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Min, Prefetch, Q, Sum
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
-from django.urls import reverse_lazy
-from django.views.generic import CreateView, DetailView, FormView, ListView, UpdateView, View
+from django.urls import reverse, reverse_lazy
+from django.views.generic import CreateView, DetailView, FormView, ListView, TemplateView, UpdateView, View
 
 from real_estate.models import GroupingType, PropertyUnit, StructuralGroup
 
 from .forms import (
     AssignmentFilterForm,
     AssignmentHolderForm,
+    AssignmentChangeForm,
     ClientFilterForm,
     ClientForm,
     ClientUpdateForm,
@@ -26,6 +27,9 @@ from .forms import (
     FiduciaryAssignmentUpdateForm,
     HistoricalImportUploadForm,
     ImportResolutionForm,
+    MAX_IMPORT_FILE_SIZE_BYTES,
+    OwnershipFinalizeForm,
+    PrimaryOwnershipChangeForm,
     StructuralGroupResolutionForm,
     SecondaryAssignmentHolderFormSet,
     StatusReasonForm,
@@ -33,6 +37,8 @@ from .forms import (
     eligible_assignment_clients,
     validate_assignment_holder_formset,
 )
+from .domain_services import change_assignment, change_primary_ownership, finalize_ownership, save_form_object_safely, sync_active_assignment_primary_holder
+from .utils import calculate_sha256
 from .imports.historical import (
     DuplicateHistoricalImportError,
     analyze_historical_import,
@@ -62,8 +68,10 @@ from .models import (
     FiduciaryAssignment,
     FiduciaryAssignmentHolder,
     ImportBatch,
+    ImportedFile,
     ImportRowIssue,
     ImportResolution,
+    Payment,
     UnitOwnership,
 )
 from .permissions import (
@@ -96,6 +104,12 @@ def daily_report_batches():
     return ImportBatch.objects.filter(import_type=ImportBatch.ImportType.REPORTS).select_related("initiated_by").order_by("-created_at", "-pk")
 
 
+def _historical_batch_can_auto_finalize(batch: ImportBatch) -> bool:
+    return batch.files.filter(
+        file_type=ImportedFile.FileType.HISTORICAL,
+    ).exclude(stored_path="").exists()
+
+
 class HistoricalImportBatchListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
     model = ImportBatch
     template_name = "fiduciary/import_batch_list.html"
@@ -123,50 +137,172 @@ class HistoricalImportCreateView(FiduciaryImportRequiredMixin, FormView):
     template_name = "fiduciary/import_batch_form.html"
 
     def form_valid(self, form):
-        uploaded_file = form.cleaned_data["file"]
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / uploaded_file.name
-            with path.open("wb") as target:
-                for chunk in uploaded_file.chunks():
-                    target.write(chunk)
-            existing_file = find_existing_historical_import(path)
-            if existing_file:
-                _add_duplicate_historical_import_message(self.request, existing_file)
-                return redirect("fiduciary:historical_import_preview", pk=existing_file.batch_id)
-            batch = ImportBatch.objects.create(
-                initiated_by=self.request.user,
-                import_type=ImportBatch.ImportType.HISTORICAL,
-                load_mode=ImportBatch.LoadMode.SINGLE_FILE,
-                status=ImportBatch.Status.ANALYZING,
-                total_files=1,
-            )
-            try:
-                analysis_result = analyze_historical_import(
-                    batch=batch,
-                    file_path=path,
-                    grouping_type_hint=form.cleaned_data.get("grouping_type_hint"),
-                )
-                store_historical_import_file(imported_file=analysis_result.imported_file, source_path=path)
-                auto_resolve_new_units(batch, user=self.request.user)
-                update_batch_resolution_state(batch)
-                messages.success(self.request, "Archivo historico analizado correctamente.")
-            except DuplicateHistoricalImportError as exc:
-                batch.delete()
-                _add_duplicate_historical_import_message(self.request, exc.imported_file)
-                return redirect("fiduciary:historical_import_preview", pk=exc.imported_file.batch_id)
-            except Exception:
-                batch.status = ImportBatch.Status.FAILED
-                batch.summary = "No fue posible analizar el archivo historico cargado."
-                batch.save(update_fields=["status", "summary"])
-                messages.error(self.request, "No fue posible analizar el archivo historico. Revise el archivo e intente nuevamente.")
-        return redirect("fiduciary:historical_import_preview", pk=batch.pk)
+        uploaded_files = self.request.FILES.getlist("file") or form.cleaned_data["file"]
+        summary = _process_historical_uploads(
+            request=self.request,
+            uploaded_files=uploaded_files,
+            grouping_type_hint=form.cleaned_data.get("grouping_type_hint"),
+        )
+        self.request.session["fiduciary_upload_summary"] = summary
+        return redirect("fiduciary:import_upload_summary")
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["title"] = "Importar libro historico"
         context["back_url"] = "fiduciary:historical_import_list"
+        context["file_list_target"] = "historical-files"
+        context["submit_label"] = "Crear lotes y analizar"
         return context
 
+
+class ImportUploadSummaryView(FiduciaryReadRequiredMixin, TemplateView):
+    template_name = "fiduciary/import_upload_summary.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        summary = self.request.session.get("fiduciary_upload_summary") or {}
+        context["summary"] = summary
+        return context
+
+
+def _process_historical_uploads(*, request, uploaded_files, grouping_type_hint=None) -> dict:
+    items = []
+    seen_hashes = {}
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for order, uploaded_file in enumerate(uploaded_files, start=1):
+            item = _base_upload_item(uploaded_file, "Historico")
+            validation_error = _validate_excel_upload(uploaded_file)
+            if validation_error:
+                item.update(result="invalid", message=validation_error)
+                items.append(item)
+                continue
+            path = _copy_upload_to_temp(uploaded_file, temp_dir, order)
+            sha256 = calculate_sha256(path)
+            item["sha256"] = sha256
+            if sha256 in seen_hashes:
+                item.update(result="duplicate", message=f"Archivo repetido en la seleccion. Coincide con {seen_hashes[sha256]}.")
+                items.append(item)
+                continue
+            seen_hashes[sha256] = uploaded_file.name
+            existing_file = find_existing_historical_import(path)
+            if existing_file:
+                item.update(
+                    result="duplicate",
+                    message=(
+                        "Este archivo ya fue cargado anteriormente y no se volvio a procesar. "
+                        f"Archivo original: {existing_file.original_name}. Lote #{existing_file.batch_id}. "
+                        f"Lote asociado: #{existing_file.batch_id}. Estado del lote: {existing_file.batch.get_status_display()}."
+                    ),
+                    batch_id=existing_file.batch_id,
+                    preview_url=reverse("fiduciary:historical_import_preview", args=[existing_file.batch_id]),
+                )
+                items.append(item)
+                continue
+            batch = ImportBatch.objects.create(
+                initiated_by=request.user,
+                import_type=ImportBatch.ImportType.HISTORICAL,
+                load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+                status=ImportBatch.Status.ANALYZING,
+                total_files=1,
+            )
+            item["batch_id"] = batch.pk
+            try:
+                analysis_result = analyze_historical_import(
+                    batch=batch,
+                    file_path=path,
+                    grouping_type_hint=grouping_type_hint,
+                )
+                store_historical_import_file(imported_file=analysis_result.imported_file, source_path=path)
+                auto_resolve_new_units(batch, user=request.user)
+                update_batch_resolution_state(batch)
+                batch.refresh_from_db()
+                if batch.status == ImportBatch.Status.READY:
+                    finalization = finalize_historical_import(batch_id=batch.pk, user=request.user)
+                    batch.refresh_from_db()
+                    item.update(
+                        result="auto_finalized",
+                        message=(
+                            "Finalizado automaticamente. "
+                            f"Clientes creados: {finalization.created_clients}. "
+                            f"Pagos creados: {finalization.created_payments}."
+                        ),
+                        preview_url=reverse("fiduciary:historical_import_preview", args=[batch.pk]),
+                    )
+                    items.append(item)
+                    continue
+                item.update(
+                    result="with_pendings" if batch.status == ImportBatch.Status.AWAITING_RESOLUTION else "processed",
+                    message=batch.get_status_display(),
+                    preview_url=reverse("fiduciary:historical_import_preview", args=[batch.pk]),
+                )
+            except DuplicateHistoricalImportError as exc:
+                batch.delete()
+                item.update(
+                    result="duplicate",
+                    message=(
+                        "Este archivo ya fue cargado anteriormente y no se volvio a procesar. "
+                        f"Archivo original: {exc.imported_file.original_name}. Lote #{exc.imported_file.batch_id}. "
+                        f"Lote asociado: #{exc.imported_file.batch_id}. Estado del lote: {exc.imported_file.batch.get_status_display()}."
+                    ),
+                    batch_id=exc.imported_file.batch_id,
+                    preview_url=reverse("fiduciary:historical_import_preview", args=[exc.imported_file.batch_id]),
+                )
+            except Exception:
+                batch.status = ImportBatch.Status.FAILED
+                batch.summary = "No fue posible analizar el archivo historico cargado."
+                batch.save(update_fields=["status", "summary"])
+                item.update(
+                    result="failed",
+                    message="No fue posible analizar el archivo historico.",
+                    preview_url=reverse("fiduciary:historical_import_preview", args=[batch.pk]),
+                )
+            items.append(item)
+    return _build_upload_summary("Carga historica", "historical", items)
+
+
+def _base_upload_item(uploaded_file, import_type: str) -> dict:
+    return {
+        "name": uploaded_file.name,
+        "import_type": import_type,
+        "result": "",
+        "message": "",
+        "batch_id": None,
+        "preview_url": "",
+    }
+
+
+def _validate_excel_upload(uploaded_file) -> str:
+    extension = Path(uploaded_file.name).suffix.lower()
+    if extension not in {".xlsx", ".xls"}:
+        return "Extension no permitida. Use .xlsx o .xls."
+    if uploaded_file.size <= 0:
+        return "El archivo esta vacio."
+    if uploaded_file.size > MAX_IMPORT_FILE_SIZE_BYTES:
+        return "El archivo supera el tamano maximo permitido de 25 MB."
+    return ""
+
+
+def _copy_upload_to_temp(uploaded_file, temp_dir, order: int) -> Path:
+    target_dir = Path(temp_dir) / str(order)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / Path(uploaded_file.name).name
+    with path.open("wb") as target:
+        for chunk in uploaded_file.chunks():
+            target.write(chunk)
+    return path
+
+
+def _build_upload_summary(title: str, import_type: str, items: list[dict]) -> dict:
+    counts = {
+        "total": len(items),
+        "processed": sum(1 for item in items if item["result"] == "processed"),
+        "auto_finalized": sum(1 for item in items if item["result"] == "auto_finalized"),
+        "with_pendings": sum(1 for item in items if item["result"] == "with_pendings"),
+        "duplicates": sum(1 for item in items if item["result"] == "duplicate"),
+        "invalid": sum(1 for item in items if item["result"] == "invalid"),
+        "failed": sum(1 for item in items if item["result"] == "failed"),
+    }
+    return {"title": title, "import_type": import_type, "counts": counts, "items": items}
 
 def _add_duplicate_historical_import_message(request, imported_file) -> None:
     uploaded_at = imported_file.created_at.strftime("%Y-%m-%d %H:%M")
@@ -392,8 +528,15 @@ class HistoricalImportResolutionView(FiduciaryImportRequiredMixin, FormView):
         apply_resolution_to_equivalent_elements(resolution, self.request.user)
         reanalyze_pending_resolutions(self.batch, user=self.request.user)
         self.batch.refresh_from_db()
-        if self.batch.status == ImportBatch.Status.READY:
-            messages.success(self.request, "Todas las resoluciones estan completas. El lote queda listo para la siguiente fase.")
+        if self.batch.status == ImportBatch.Status.READY and _historical_batch_can_auto_finalize(self.batch):
+            try:
+                result = finalize_historical_import(batch_id=self.batch.pk, user=self.request.user)
+                messages.success(
+                    self.request,
+                    f"Todas las resoluciones estan completas. Importacion finalizada automaticamente. Pagos creados: {result.created_payments}.",
+                )
+            except Exception as exc:
+                messages.error(self.request, str(exc))
             return redirect("fiduciary:historical_import_preview", pk=self.batch.pk)
         messages.success(self.request, "Resolucion aplicada a las apariciones equivalentes.")
         return redirect("fiduciary:historical_import_pending", pk=self.batch.pk)
@@ -441,6 +584,16 @@ class HistoricalImportStructuralGroupResolutionView(FiduciaryImportRequiredMixin
             self.request,
             f"La agrupación fue resuelta y se actualizaron automáticamente {updated_units} unidades relacionadas.",
         )
+        self.batch.refresh_from_db()
+        if self.batch.status == ImportBatch.Status.READY and _historical_batch_can_auto_finalize(self.batch):
+            try:
+                result = finalize_historical_import(batch_id=self.batch.pk, user=self.request.user)
+                messages.success(
+                    self.request,
+                    f"Importacion finalizada automaticamente. Pagos creados: {result.created_payments}.",
+                )
+            except Exception as exc:
+                messages.error(self.request, str(exc))
         return redirect("fiduciary:historical_import_preview", pk=self.batch.pk)
 
     def get_context_data(self, **kwargs):
@@ -538,39 +691,97 @@ class DailyReportCreateView(FiduciaryImportRequiredMixin, FormView):
     template_name = "fiduciary/daily_report_form.html"
 
     def form_valid(self, form):
-        uploaded_file = form.cleaned_data["file"]
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / uploaded_file.name
-            with path.open("wb") as target:
-                for chunk in uploaded_file.chunks():
-                    target.write(chunk)
-            batch = ImportBatch.objects.create(
-                initiated_by=self.request.user,
-                import_type=ImportBatch.ImportType.REPORTS,
-                load_mode=ImportBatch.LoadMode.SINGLE_FILE,
-                status=ImportBatch.Status.ANALYZING,
-                total_files=1,
-            )
-            try:
-                analyze_daily_report_import(batch=batch, file_path=path)
-                messages.success(self.request, "Reporte diario analizado correctamente.")
-            except DailyReportDuplicateError as exc:
-                batch.delete()
-                messages.warning(self.request, "Este reporte diario ya fue cargado anteriormente.")
-                return redirect("fiduciary:daily_report_preview", pk=exc.imported_file.batch_id)
-            except Exception:
-                batch.status = ImportBatch.Status.FAILED
-                batch.summary = "No fue posible analizar el reporte diario cargado."
-                batch.save(update_fields=["status", "summary"])
-                messages.error(self.request, "No fue posible analizar el reporte diario. Revise el archivo e intente nuevamente.")
-        return redirect("fiduciary:daily_report_preview", pk=batch.pk)
+        uploaded_files = self.request.FILES.getlist("file") or form.cleaned_data["file"]
+        summary = _process_daily_report_uploads(request=self.request, uploaded_files=uploaded_files)
+        self.request.session["fiduciary_upload_summary"] = summary
+        return redirect("fiduciary:import_upload_summary")
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["title"] = "Importar reporte diario"
         context["back_url"] = "fiduciary:daily_report_list"
+        context["file_list_target"] = "daily-files"
+        context["submit_label"] = "Crear lotes y analizar"
         return context
 
+
+def _process_daily_report_uploads(*, request, uploaded_files) -> dict:
+    items = []
+    seen_hashes = {}
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for order, uploaded_file in enumerate(uploaded_files, start=1):
+            item = _base_upload_item(uploaded_file, "Reporte diario")
+            validation_error = _validate_excel_upload(uploaded_file)
+            if validation_error:
+                item.update(result="invalid", message=validation_error)
+                items.append(item)
+                continue
+            path = _copy_upload_to_temp(uploaded_file, temp_dir, order)
+            sha256 = calculate_sha256(path)
+            item["sha256"] = sha256
+            if sha256 in seen_hashes:
+                item.update(result="duplicate", message=f"Archivo repetido en la seleccion. Coincide con {seen_hashes[sha256]}.")
+                items.append(item)
+                continue
+            seen_hashes[sha256] = uploaded_file.name
+            existing_file = ImportedFile.objects.filter(file_type=ImportedFile.FileType.REPORT, sha256=sha256).first()
+            if existing_file:
+                item.update(
+                    result="duplicate",
+                    message=f"Ya fue cargado como lote #{existing_file.batch_id}.",
+                    batch_id=existing_file.batch_id,
+                    preview_url=reverse("fiduciary:daily_report_preview", args=[existing_file.batch_id]),
+                )
+                items.append(item)
+                continue
+            batch = ImportBatch.objects.create(
+                initiated_by=request.user,
+                import_type=ImportBatch.ImportType.REPORTS,
+                load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+                status=ImportBatch.Status.ANALYZING,
+                total_files=1,
+            )
+            item["batch_id"] = batch.pk
+            try:
+                analyze_daily_report_import(batch=batch, file_path=path)
+                batch.refresh_from_db()
+                if batch.status == ImportBatch.Status.READY:
+                    finalization = finalize_daily_report_import(batch_id=batch.pk, user=request.user)
+                    batch.refresh_from_db()
+                    item.update(
+                        result="auto_finalized",
+                        message=(
+                            "Finalizado automaticamente. "
+                            f"Pagos creados: {finalization.imported_rows}. Duplicados omitidos: {finalization.duplicate_rows}."
+                        ),
+                        preview_url=reverse("fiduciary:daily_report_preview", args=[batch.pk]),
+                    )
+                    items.append(item)
+                    continue
+                item.update(
+                    result="with_pendings" if batch.status == ImportBatch.Status.AWAITING_RESOLUTION else "processed",
+                    message=batch.get_status_display(),
+                    preview_url=reverse("fiduciary:daily_report_preview", args=[batch.pk]),
+                )
+            except DailyReportDuplicateError as exc:
+                batch.delete()
+                item.update(
+                    result="duplicate",
+                    message=f"Ya fue cargado como lote #{exc.imported_file.batch_id}.",
+                    batch_id=exc.imported_file.batch_id,
+                    preview_url=reverse("fiduciary:daily_report_preview", args=[exc.imported_file.batch_id]),
+                )
+            except Exception:
+                batch.status = ImportBatch.Status.FAILED
+                batch.summary = "No fue posible analizar el reporte diario cargado."
+                batch.save(update_fields=["status", "summary"])
+                item.update(
+                    result="failed",
+                    message="No fue posible analizar el reporte diario.",
+                    preview_url=reverse("fiduciary:daily_report_preview", args=[batch.pk]),
+                )
+            items.append(item)
+    return _build_upload_summary("Carga de reportes diarios", "daily", items)
 
 class DailyReportPreviewView(FiduciaryReadRequiredMixin, DetailView):
     model = ImportBatch
@@ -621,6 +832,14 @@ class DailyReportReanalyzeView(FiduciaryImportRequiredMixin, View):
     def post(self, request, pk):
         batch = get_object_or_404(daily_report_batches(), pk=pk)
         updated = reanalyze_daily_report_import(batch=batch, user=request.user)
+        batch.refresh_from_db()
+        if batch.status == ImportBatch.Status.READY:
+            try:
+                result = finalize_daily_report_import(batch_id=batch.pk, user=request.user)
+                messages.success(request, f"Reporte reanalizado y finalizado automaticamente. Pagos creados: {result.imported_rows}.")
+                return redirect("fiduciary:daily_report_preview", pk=batch.pk)
+            except Exception as exc:
+                messages.error(request, str(exc))
         messages.success(request, f"Reporte reanalizado. Filas actualizadas: {updated}.")
         return redirect("fiduciary:daily_report_preview", pk=batch.pk)
 
@@ -646,6 +865,14 @@ class DailyReportResolveAssignmentView(FiduciaryImportRequiredMixin, FormView):
             user=self.request.user,
             note=form.cleaned_data.get("resolution_note", ""),
         )
+        self.batch.refresh_from_db()
+        if self.batch.status == ImportBatch.Status.READY:
+            try:
+                result = finalize_daily_report_import(batch_id=self.batch.pk, user=self.request.user)
+                messages.success(self.request, f"Resolucion aplicada. Reporte finalizado automaticamente. Pagos creados: {result.imported_rows}.")
+                return redirect("fiduciary:daily_report_preview", pk=self.batch.pk)
+            except Exception as exc:
+                messages.error(self.request, str(exc))
         messages.success(self.request, "Resolucion del encargo aplicada.")
         return redirect("fiduciary:daily_report_preview", pk=self.batch.pk)
 
@@ -857,18 +1084,37 @@ class UnitOwnershipListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListVi
 class UnitOwnershipCreateView(FiduciaryCreateRequiredMixin, CreateView):
     model = UnitOwnership
     form_class = UnitOwnershipForm
-    template_name = "fiduciary/form.html"
+    template_name = "fiduciary/ownership_form.html"
     success_url = reverse_lazy("fiduciary:ownership_list")
+
+    def get_initial(self):
+        initial = super().get_initial()
+        if self.request.GET.get("client"):
+            initial["client"] = self.request.GET["client"]
+        if self.request.GET.get("property_unit"):
+            initial["property_unit"] = self.request.GET["property_unit"]
+        return initial
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["title"] = "Nueva titularidad"
         context["back_url"] = "fiduciary:ownership_list"
+        context["client_search_url"] = reverse("fiduciary:client_search")
         return context
 
     def form_valid(self, form):
-        with transaction.atomic():
-            self.object = form.save()
+        try:
+            self.object = save_form_object_safely(form)
+            if self.object.is_primary and self.object.is_active:
+                sync_active_assignment_primary_holder(
+                    unit=self.object.property_unit,
+                    client=self.object.client,
+                    effective_date=self.object.start_date,
+                    reason=self.object.last_change_reason or "Registro de titular principal",
+                )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
         messages.success(self.request, "Titularidad creada correctamente.")
         return redirect(self.success_url)
 
@@ -876,17 +1122,62 @@ class UnitOwnershipCreateView(FiduciaryCreateRequiredMixin, CreateView):
 class UnitOwnershipFinalizeView(FiduciaryManagementRequiredMixin, View):
     def post(self, request, pk):
         ownership = get_object_or_404(UnitOwnership, pk=pk)
-        form = StatusReasonForm(request.POST)
-        if not form.is_valid() or not form.cleaned_data.get("end_date"):
-            messages.error(request, "Debe registrar motivo y fecha de finalizacion.")
+        form = OwnershipFinalizeForm(request.POST)
+        if not form.is_valid():
+            messages.error(request, "Debe registrar tipo, motivo y fecha de finalizacion.")
             return redirect("fiduciary:ownership_list")
-        with transaction.atomic():
-            ownership.is_active = False
-            ownership.end_date = form.cleaned_data["end_date"]
-            ownership.last_change_reason = form.cleaned_data["change_reason"]
-            ownership.save()
+        try:
+            finalize_ownership(
+                ownership=ownership,
+                end_date=form.cleaned_data["end_date"],
+                reason=form.cleaned_data["reason"],
+                novelty_type=form.cleaned_data["novelty_type"],
+            )
+        except ValidationError as exc:
+            messages.error(request, " ".join(exc.messages))
+            return redirect("fiduciary:ownership_list")
         messages.success(request, "Titularidad finalizada correctamente.")
         return redirect("fiduciary:ownership_list")
+
+
+class PrimaryOwnershipChangeView(FiduciaryManagementRequiredMixin, FormView):
+    form_class = PrimaryOwnershipChangeForm
+    template_name = "fiduciary/form.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.ownership = get_object_or_404(
+            UnitOwnership.objects.select_related("property_unit", "client"),
+            pk=kwargs["pk"],
+            is_active=True,
+            is_primary=True,
+        )
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["unit"] = self.ownership.property_unit
+        return kwargs
+
+    def form_valid(self, form):
+        try:
+            change_primary_ownership(
+                unit=self.ownership.property_unit,
+                new_client=form.cleaned_data["new_client"],
+                effective_date=form.cleaned_data["effective_date"],
+                novelty_type=form.cleaned_data["novelty_type"],
+                reason=form.cleaned_data["reason"],
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Cambio de titular principal registrado correctamente.")
+        return redirect("fiduciary:ownership_list")
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = "Cambiar titular principal"
+        context["back_url"] = "fiduciary:ownership_list"
+        return context
 
 
 class AssignmentListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
@@ -952,13 +1243,28 @@ class AssignmentDetailView(FiduciaryReadRequiredMixin, DetailView):
     def get_queryset(self):
         return FiduciaryAssignment.objects.select_related(
             "property_unit", "property_unit__project", "property_unit__structural_group"
-        ).prefetch_related(Prefetch("holders", queryset=FiduciaryAssignmentHolder.objects.select_related("client")))
+        ).prefetch_related(
+            Prefetch("holders", queryset=FiduciaryAssignmentHolder.objects.select_related("client")),
+            Prefetch(
+                "payments",
+                queryset=Payment.objects.select_related("source_file", "source_file__batch").prefetch_related("daily_report_rows").order_by(
+                    "exact_date", "period_year", "period_month", "source_row", "pk"
+                ),
+            ),
+        )
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
+        payments = list(self.object.payments.all())
+        stats = self.object.payments.aggregate(count=Count("id"), total=Sum("amount"))
         context["can_create"] = can_create_fiduciary(self.request.user)
         context["can_update"] = can_update_fiduciary(self.request.user)
         context["can_manage"] = context["can_update"]
+        context["payments"] = payments
+        context["payment_count"] = stats["count"] or 0
+        context["payment_total"] = stats["total"] or 0
+        context["first_payment"] = payments[0] if payments else None
+        context["last_payment"] = payments[-1] if payments else None
         return context
 
 
@@ -1008,25 +1314,30 @@ class AssignmentCreateView(FiduciaryCreateRequiredMixin, CreateView):
             holder_formset.non_form_errors_value = str(exc)
             form.add_error(None, exc)
             return self.form_invalid(form, holder_formset)
-        with transaction.atomic():
-            self.object = form.save(commit=False)
-            form.apply_reason(self.object)
-            self.object.save()
-            FiduciaryAssignmentHolder.objects.create(
-                assignment=self.object,
-                client=form.cleaned_data["primary_client"],
-                is_primary=True,
-                start_date=self.object.start_date,
-                last_change_reason=self.object.last_change_reason,
-            )
-            for client in secondary_clients:
+        try:
+            with transaction.atomic():
+                self.object = form.save(commit=False)
+                form.apply_reason(self.object)
+                self.object.full_clean()
+                self.object.save()
                 FiduciaryAssignmentHolder.objects.create(
                     assignment=self.object,
-                    client=client,
-                    is_primary=False,
+                    client=form.cleaned_data["primary_client"],
+                    is_primary=True,
                     start_date=self.object.start_date,
                     last_change_reason=self.object.last_change_reason,
                 )
+                for client in secondary_clients:
+                    FiduciaryAssignmentHolder.objects.create(
+                        assignment=self.object,
+                        client=client,
+                        is_primary=False,
+                        start_date=self.object.start_date,
+                        last_change_reason=self.object.last_change_reason,
+                    )
+        except (ValidationError, IntegrityError) as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form, holder_formset)
         messages.success(self.request, "Encargo fiduciario creado correctamente.")
         return redirect(self.success_url)
 
@@ -1097,6 +1408,29 @@ class AssignmentContextHoldersView(FiduciaryCreateRequiredMixin, View):
         return JsonResponse({"results": [{"id": item.pk, "text": item.full_name, "label": item.full_name} for item in holders]})
 
 
+class ClientSearchView(FiduciaryCreateRequiredMixin, View):
+    def get(self, request):
+        criterion = request.GET.get("criterion")
+        query = (request.GET.get("q") or "").strip()
+        clients = Client.objects.none()
+        if query:
+            base = Client.objects.filter(is_active=True)
+            if criterion == "document":
+                clients = base.filter(document_number=query)
+            elif criterion == "email":
+                clients = base.filter(email__icontains=query)
+            else:
+                clients = base.filter(Q(first_names__icontains=query) | Q(last_names_or_company__icontains=query))
+        results = [
+            {
+                "id": client.pk,
+                "text": f"{client.full_name} | {client.document_number or 'Sin documento'} | {client.email or 'Sin correo'}",
+            }
+            for client in clients.order_by("last_names_or_company", "first_names")[:10]
+        ]
+        return JsonResponse({"results": results})
+
+
 class AssignmentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
     model = FiduciaryAssignment
     form_class = FiduciaryAssignmentUpdateForm
@@ -1110,8 +1444,11 @@ class AssignmentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
         return context
 
     def form_valid(self, form):
-        with transaction.atomic():
-            self.object = form.save()
+        try:
+            self.object = save_form_object_safely(form)
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
         messages.success(self.request, "Encargo fiduciario actualizado correctamente.")
         return redirect(self.success_url)
 
@@ -1137,10 +1474,52 @@ class AssignmentCloseView(FiduciaryManagementRequiredMixin, View):
         return redirect("fiduciary:assignment_detail", pk=assignment.pk)
 
 
-class AssignmentHolderCreateView(FiduciaryManagementRequiredMixin, CreateView):
+class AssignmentChangeView(FiduciaryManagementRequiredMixin, FormView):
+    form_class = AssignmentChangeForm
+    template_name = "fiduciary/form.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.assignment = get_object_or_404(
+            FiduciaryAssignment.objects.select_related("property_unit"),
+            pk=kwargs["pk"],
+            is_active=True,
+        )
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["assignment"] = self.assignment
+        return kwargs
+
+    def form_valid(self, form):
+        try:
+            result = change_assignment(
+                current_assignment=self.assignment,
+                new_assignment_number=form.cleaned_data["new_assignment_number"],
+                effective_date=form.cleaned_data["effective_date"],
+                novelty_type=form.cleaned_data["novelty_type"],
+                reason=form.cleaned_data["reason"],
+                primary_client=form.cleaned_data.get("primary_client"),
+                secondary_clients=form.cleaned_data.get("secondary_clients"),
+                other_description=form.cleaned_data.get("other_description", ""),
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Cambio de encargo registrado correctamente.")
+        return redirect("fiduciary:assignment_detail", pk=result.new_assignment.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = "Registrar cambio de encargo"
+        context["back_url"] = "fiduciary:assignment_list"
+        return context
+
+
+class AssignmentHolderCreateView(FiduciaryCreateRequiredMixin, CreateView):
     model = FiduciaryAssignmentHolder
     form_class = AssignmentHolderForm
-    template_name = "fiduciary/form.html"
+    template_name = "fiduciary/ownership_form.html"
 
     def dispatch(self, request, *args, **kwargs):
         self.assignment = get_object_or_404(FiduciaryAssignment, pk=kwargs["assignment_pk"])
@@ -1155,6 +1534,7 @@ class AssignmentHolderCreateView(FiduciaryManagementRequiredMixin, CreateView):
         context = super().get_context_data(**kwargs)
         context["title"] = "Agregar titular al encargo"
         context["back_url"] = "fiduciary:assignment_list"
+        context["client_search_url"] = reverse("fiduciary:client_search")
         return context
 
     def form_valid(self, form):

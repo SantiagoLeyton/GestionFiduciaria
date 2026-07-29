@@ -45,7 +45,7 @@ class Client(TimestampedModel):
     )
     document_number = models.CharField("numero de documento", max_length=50, blank=True, null=True)
     first_names = models.CharField("nombres", max_length=150, blank=True)
-    last_names_or_company = models.CharField("apellidos o razon social", max_length=180)
+    last_names_or_company = models.CharField("apellidos o razon social", max_length=180, blank=True)
     phone = models.CharField("telefono", max_length=50, blank=True)
     email = models.EmailField("correo electronico", blank=True)
     address = models.CharField("direccion", max_length=250, blank=True)
@@ -97,8 +97,8 @@ class Client(TimestampedModel):
         self.email = self.email.strip().lower()
         self.address = self.address.strip()
         self.incomplete_reason = self.incomplete_reason.strip()
-        if not self.last_names_or_company:
-            raise ValidationError({"last_names_or_company": "Registre apellidos o razon social."})
+        if not (self.first_names or self.last_names_or_company):
+            raise ValidationError({"last_names_or_company": "Registre nombres, apellidos o razon social."})
         if self.source_origin == self.SourceOrigin.MANUAL:
             if not self.document_type or self.document_type == self.DocumentType.UNKNOWN or not self.document_number:
                 raise ValidationError("Debe registrar tipo y numero de documento.")
@@ -188,8 +188,6 @@ class FiduciaryAssignment(DatedActiveRelation):
             raise ValidationError({"assignment_number": "Registre el numero de encargo fiduciario."})
         if self.is_active and self.property_unit_id and not self.property_unit.is_active:
             raise ValidationError({"property_unit": "No puede crear un encargo vigente sobre una unidad inactiva."})
-        if self.pk and self.is_active and not self.holders.filter(is_active=True, is_primary=True).exists():
-            raise ValidationError("Un encargo vigente debe tener un titular principal vigente.")
 
     @property
     def active_primary_holder(self):
@@ -237,6 +235,69 @@ class FiduciaryAssignmentHolder(DatedActiveRelation):
     def __str__(self):
         role = "Principal" if self.is_primary else "Secundario"
         return f"{self.assignment.assignment_number} - {self.client.full_name} ({role})"
+
+
+class FiduciaryNovelty(models.Model):
+    class NoveltyType(models.TextChoices):
+        CESSION = "cession", "Cesion"
+        WITHDRAWAL = "withdrawal", "Retiro"
+        EXCLUSION = "exclusion", "Exclusion"
+        ADMINISTRATIVE_CORRECTION = "administrative_correction", "Correccion administrativa"
+        SUBSTITUTION = "substitution", "Sustitucion"
+        OTHER = "other", "Otro"
+
+    class Status(models.TextChoices):
+        APPLIED = "applied", "Aplicada"
+        FAILED = "failed", "Fallida"
+
+    project = models.ForeignKey("real_estate.Project", on_delete=models.PROTECT, related_name="fiduciary_novelties")
+    property_unit = models.ForeignKey(PropertyUnit, on_delete=models.PROTECT, related_name="fiduciary_novelties")
+    novelty_type = models.CharField("tipo de novedad", max_length=32, choices=NoveltyType.choices)
+    status = models.CharField("estado", max_length=16, choices=Status.choices, default=Status.APPLIED)
+    effective_date = models.DateField("fecha efectiva")
+    reason = models.TextField("motivo")
+    other_description = models.TextField("descripcion de la novedad", blank=True)
+    previous_primary_client = models.ForeignKey(
+        Client, on_delete=models.PROTECT, related_name="novelties_as_previous_primary", blank=True, null=True
+    )
+    new_primary_client = models.ForeignKey(
+        Client, on_delete=models.PROTECT, related_name="novelties_as_new_primary", blank=True, null=True
+    )
+    previous_assignment = models.ForeignKey(
+        FiduciaryAssignment, on_delete=models.PROTECT, related_name="novelties_as_previous_assignment", blank=True, null=True
+    )
+    new_assignment = models.ForeignKey(
+        FiduciaryAssignment, on_delete=models.PROTECT, related_name="novelties_as_new_assignment", blank=True, null=True
+    )
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="fiduciary_novelties")
+    ip_address = models.GenericIPAddressField("direccion IP", blank=True, null=True)
+    affected_payments_count = models.PositiveIntegerField("pagos afectados", default=0)
+    before_data = models.JSONField("datos anteriores", default=dict, blank=True)
+    after_data = models.JSONField("datos nuevos", default=dict, blank=True)
+    result_message = models.TextField("resultado", blank=True)
+    created_at = models.DateTimeField("fecha de registro", auto_now_add=True)
+    updated_at = models.DateTimeField("fecha de actualizacion", auto_now=True)
+
+    class Meta:
+        ordering = ("-effective_date", "-created_at", "-pk")
+        indexes = [
+            models.Index(fields=["project", "property_unit"], name="fiduciary_novelty_unit_idx"),
+            models.Index(fields=["novelty_type", "status"], name="fiduciary_novelty_type_idx"),
+            models.Index(fields=["effective_date"], name="fiduciary_novelty_date_idx"),
+        ]
+
+    def clean(self):
+        super().clean()
+        self.reason = self.reason.strip()
+        self.other_description = self.other_description.strip()
+        self.result_message = self.result_message.strip()
+        if self.property_unit_id and self.project_id and self.property_unit.project_id != self.project_id:
+            raise ValidationError({"property_unit": "La unidad no pertenece al proyecto seleccionado."})
+        if self.novelty_type == self.NoveltyType.OTHER and not self.other_description:
+            raise ValidationError({"other_description": "Describa la novedad."})
+
+    def __str__(self):
+        return f"{self.get_novelty_type_display()} - {self.property_unit}"
 
 
 class ImportBatch(models.Model):

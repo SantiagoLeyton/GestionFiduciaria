@@ -52,6 +52,9 @@ class HistoricalClient:
     document_number: str | None = None
     document_type: str | None = None
     is_primary: bool = False
+    email: str | None = None
+    phone: str | None = None
+    contact_name: str | None = None
 
 
 @dataclass(frozen=True)

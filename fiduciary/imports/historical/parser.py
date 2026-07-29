@@ -53,10 +53,6 @@ IGNORED_HEADER_KEYS = {
     "fe",
     "intereses",
     "valor",
-    "telefono",
-    "email",
-    "e mail",
-    "contacto",
 }
 
 
@@ -276,6 +272,12 @@ class HistoricalWorkbookParser:
             return "document_number"
         if compact_header == "nombrecliente":
             return "client_name"
+        if compact_header in {"telefono", "tel", "celular"}:
+            return "phone"
+        if compact_header in {"email", "correo", "correoelectronico"}:
+            return "email"
+        if compact_header == "contacto":
+            return "contact_name"
         if compact_header in {"observaciones", "observacion"}:
             return "observations"
         if compact_header == "cesionestraslados":
@@ -490,6 +492,10 @@ class HistoricalWorkbookParser:
             column for key, column in columns.items() if key.startswith("client_name_")
         ]
         name_columns.sort(key=lambda column: column.index)
+        document_parts = _split_document_values(document_number)
+        phone_parts = _split_contact_values(self._value(sheet, row_number, columns.get("phone")))
+        email_parts = _split_contact_values(self._value(sheet, row_number, columns.get("email")), separators=(";", ","))
+        contact_parts = _split_contact_values(self._value(sheet, row_number, columns.get("contact_name")), separators=(";", ","))
         for index, column in enumerate(name_columns, start=1):
             name = self._value(sheet, row_number, column)
             if not name:
@@ -498,9 +504,12 @@ class HistoricalWorkbookParser:
                 HistoricalClient(
                     order=index,
                     name=name,
-                    document_number=document_number if index == 1 else None,
+                    document_number=document_parts[index - 1] if index <= len(document_parts) else None,
                     document_type=parse_document_type(columns.get("document_number").header if columns.get("document_number") else None),
                     is_primary=index == 1,
+                    phone=phone_parts[index - 1] if index <= len(phone_parts) else None,
+                    email=email_parts[index - 1] if index <= len(email_parts) else None,
+                    contact_name=contact_parts[index - 1] if index <= len(contact_parts) else None,
                 )
             )
         return clients
@@ -662,3 +671,20 @@ class HistoricalWorkbookParser:
             historical_novelties_found=len(novelties),
             issues_found=len(issues),
         )
+
+
+def _split_document_values(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    parts = [part.strip() for part in str(value).split("/")]
+    return [part for part in parts if part]
+
+
+def _split_contact_values(value: str | None, *, separators=("/",)) -> list[str]:
+    if value is None:
+        return []
+    text = clean_text(value)
+    if not text:
+        return []
+    pattern = "|".join(re.escape(separator) for separator in separators)
+    return [part.strip() for part in re.split(pattern, text) if part.strip()]

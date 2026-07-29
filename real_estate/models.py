@@ -27,7 +27,7 @@ class ActiveEntity(models.Model):
             self.name = self.name.strip()
 
     def __str__(self):
-        if self.code and self.name:
+        if self.code and self.name and self.code != self.name:
             return f"{self.code} - {self.name}"
         return self.code or self.name
 

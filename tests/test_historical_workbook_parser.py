@@ -23,6 +23,9 @@ from fiduciary.imports.historical.readers import RawSheet, WorkbookReader
 HISTORICAL_DIR = Path("samples/fiduciary/historical")
 REAL_XLSX_FILES = sorted(HISTORICAL_DIR.glob("*.xlsx"))
 REAL_XLS_FILES = sorted(HISTORICAL_DIR.glob("*.xls"))
+MONTECIELO_FILE = Path(
+    r"C:\Users\ASUS\OneDrive\Escritorio\Practices\ConstructoraCentenarioSAS\Documents\Company\ProyectoFinal\LIBRO MONTECIELO T2.xlsx"
+)
 
 
 @pytest.fixture(scope="module")
@@ -94,7 +97,18 @@ def test_parser_preserves_secondary_client_order_when_present(parsed_workbook):
     assert [client.order for client in row.clients] == [1, 2, 3]
     assert row.clients[0].is_primary is True
     assert all(not client.is_primary for client in row.clients[1:])
-    assert all(client.document_number is None for client in row.clients[1:])
+    assert all("/" not in (client.document_number or "") for client in row.clients)
+
+
+@pytest.mark.skipif(not MONTECIELO_FILE.exists(), reason="Libro real de Montecielo no disponible")
+def test_parser_extracts_montecielo_contacts_and_split_documents():
+    workbook = HistoricalWorkbookParser(MONTECIELO_FILE).parse()
+    row = next(row for sheet in workbook.sheets for row in sheet.rows if row.row_number == 20)
+
+    assert [client.document_number for client in row.clients[:2]] == ["1128450396", "1214723055"]
+    assert all("/" not in (client.document_number or "") for client in row.clients)
+    assert row.clients[0].email
+    assert row.clients[0].phone
 
 
 def test_parser_extracts_monthly_payments_and_formula_metadata(parsed_workbook):

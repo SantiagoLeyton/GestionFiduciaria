@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.db import IntegrityError
 
 from .models import Client, Payment
@@ -30,29 +31,61 @@ def create_imported_client(
     incomplete_reason: str = "Registro creado automaticamente desde importacion con informacion incompleta.",
     phone: str = "",
     email: str = "",
+    contact_name: str = "",
 ) -> ImportedClientResult:
     name = (full_name or "").strip()
     doc_type = document_type or Client.DocumentType.UNKNOWN
     doc_number = (document_number or "").strip() or None
     phone = (phone or "").strip()
     email = (email or "").strip()
+    contact_name = (contact_name or "").strip()
+    if email:
+        try:
+            validate_email(email)
+        except ValidationError:
+            email = ""
 
     if not name:
         return ImportedClientResult(status="invalid", errors=["Registre el nombre del cliente importado."])
+    first_names, last_names = split_imported_full_name(name)
 
     if doc_number:
         existing = Client.objects.filter(document_type=doc_type, document_number=doc_number).first()
         if existing:
+            update_fields = []
+            if phone and not existing.phone:
+                existing.phone = phone
+                update_fields.append("phone")
+            if email and not existing.email:
+                existing.email = email
+                update_fields.append("email")
+            if contact_name and not existing.address:
+                existing.address = contact_name
+                update_fields.append("address")
+            if update_fields:
+                if existing.information_status == Client.InformationStatus.INCOMPLETE and existing.document_number and (
+                    existing.phone or existing.email
+                ):
+                    existing.information_status = Client.InformationStatus.COMPLETE
+                    existing.incomplete_reason = ""
+                    update_fields.extend(["information_status", "incomplete_reason"])
+                try:
+                    existing.full_clean()
+                    existing.save(update_fields=update_fields + ["updated_at"])
+                except ValidationError as exc:
+                    return ImportedClientResult(status="invalid", errors=[str(exc)])
+                return ImportedClientResult(status="updated", client=existing)
             return ImportedClientResult(status="existing", client=existing)
 
     is_incomplete = not doc_number or doc_type == Client.DocumentType.UNKNOWN or not (phone or email)
     client = Client(
         document_type=doc_type,
         document_number=doc_number,
-        first_names="",
-        last_names_or_company=name,
+        first_names=first_names,
+        last_names_or_company=last_names,
         phone=phone,
         email=email,
+        address=contact_name,
         information_status=(
             Client.InformationStatus.INCOMPLETE if is_incomplete else Client.InformationStatus.COMPLETE
         ),
@@ -66,6 +99,20 @@ def create_imported_client(
     except (ValidationError, IntegrityError) as exc:
         return ImportedClientResult(status="invalid", errors=[str(exc)])
     return ImportedClientResult(status="created", client=client)
+
+
+def split_imported_full_name(full_name: str) -> tuple[str, str]:
+    normalized = " ".join((full_name or "").strip().split())
+    if not normalized:
+        return "", ""
+    parts = normalized.split(" ")
+    if len(parts) == 1:
+        return parts[0], ""
+    if len(parts) == 2:
+        return parts[1], parts[0]
+    if len(parts) == 3:
+        return parts[2], " ".join(parts[:2])
+    return " ".join(parts[2:]), " ".join(parts[:2])
 
 
 def create_payment(

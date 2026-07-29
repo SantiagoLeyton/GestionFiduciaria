@@ -214,16 +214,17 @@ def test_accounting_can_create_batch_upload_file_and_run_analysis(accounting_cli
 
     assert response.status_code == 200
     assert imported_file.original_name == HISTORICAL_FILE.name
-    assert batch.status == ImportBatch.Status.READY
+    assert batch.status == ImportBatch.Status.COMPLETED
     assert batch.processed_rows == 300
     assert batch.issue_count == 18
     assert ImportedHistoricalNovelty.objects.filter(batch=batch).count() == 3
     assert Project.objects.count() == before["projects"]
     assert StructuralGroup.objects.count() == before["groups"]
-    assert PropertyUnit.objects.count() == before["units"]
-    assert Client.objects.count() == before["clients"]
-    assert FiduciaryAssignment.objects.count() == before["assignments"]
-    assert Payment.objects.count() == before["payments"]
+    assert PropertyUnit.objects.count() > before["units"]
+    assert Client.objects.count() > before["clients"]
+    assert FiduciaryAssignment.objects.count() > before["assignments"]
+    assert Payment.objects.count() > before["payments"]
+    assert "Finalizado automaticamente" in response.content.decode()
 
 
 @pytest.mark.django_db
@@ -254,7 +255,8 @@ def test_duplicate_upload_redirects_to_existing_preview_without_reprocessing(mon
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
-    assert second_response.redirect_chain[-1][0] == reverse("fiduciary:historical_import_preview", args=[batch.pk])
+    assert second_response.redirect_chain[-1][0] == reverse("fiduciary:import_upload_summary")
+    assert f"lote #{batch.pk}" in content.lower()
     assert "Este archivo ya fue cargado anteriormente y no se volvio a procesar." in content
     assert HISTORICAL_FILE.name in content
     assert f"Lote asociado: #{batch.pk}" in content
@@ -289,7 +291,42 @@ def test_duplicate_detected_after_batch_creation_removes_empty_batch(monkeypatch
     assert response.status_code == 200
     assert ImportBatch.objects.count() == 1
     assert ImportedFile.objects.count() == 1
-    assert response.redirect_chain[-1][0] == reverse("fiduciary:historical_import_preview", args=[existing_file.batch_id])
+    assert response.redirect_chain[-1][0] == reverse("fiduciary:import_upload_summary")
+    assert f"lote #{existing_file.batch_id}" in response.content.decode().lower()
+
+
+@pytest.mark.django_db
+def test_historical_multi_upload_processes_valid_invalid_and_duplicate_files(accounting_client, springfield_structure):
+    invalid = SimpleUploadedFile("notas.txt", b"contenido", content_type="text/plain")
+    response = accounting_client.post(
+        reverse("fiduciary:historical_import_create"),
+        {
+            "grouping_type_hint": "Sector",
+            "file": [
+                uploaded_historical_file(),
+                uploaded_historical_file_named("duplicado.xlsx"),
+                invalid,
+            ],
+        },
+        follow=True,
+    )
+    content = response.content.decode()
+
+    assert response.redirect_chain[-1][0] == reverse("fiduciary:import_upload_summary")
+    assert ImportBatch.objects.count() == 1
+    assert "Duplicados" in content
+    assert "Invalidos" in content
+    assert "notas.txt" in content
+
+
+@pytest.mark.django_db
+def test_historical_upload_rejects_more_than_25_files(accounting_client):
+    files = [SimpleUploadedFile(f"archivo-{index}.txt", b"x") for index in range(26)]
+    response = accounting_client.post(reverse("fiduciary:historical_import_create"), {"file": files})
+
+    assert response.status_code == 200
+    assert ImportBatch.objects.count() == 0
+    assert "Seleccione maximo 25 archivos" in response.content.decode()
 
 
 @pytest.mark.django_db
@@ -411,7 +448,6 @@ def test_pending_list_and_resolution_apply_to_equivalent_elements(accounting_cli
     assert first.resolution.target_project == project
     assert second.resolution.target_project == project
     assert batch.status == ImportBatch.Status.READY
-    assert "El lote esta listo" in response.content.decode()
 
 
 @pytest.mark.django_db
@@ -428,7 +464,7 @@ def test_lot_awaiting_resolution_when_context_is_missing(accounting_client, spri
 
 
 @pytest.mark.django_db
-def test_auto_new_units_are_prepared_without_creating_real_units(accounting_client, springfield_structure):
+def test_ready_historical_upload_finalizes_and_creates_real_units(accounting_client, springfield_structure):
     before_units = PropertyUnit.objects.count()
     response = accounting_client.post(
         reverse("fiduciary:historical_import_create"),
@@ -443,7 +479,8 @@ def test_auto_new_units_are_prepared_without_creating_real_units(accounting_clie
     )
     assert response.status_code == 200
     assert new_unit_resolutions.exists()
-    assert PropertyUnit.objects.count() == before_units
+    assert batch.status == ImportBatch.Status.COMPLETED
+    assert PropertyUnit.objects.count() > before_units
 
 
 @pytest.mark.django_db
