@@ -19,6 +19,8 @@ from .forms import (
     ClientFilterForm,
     ClientForm,
     ClientUpdateForm,
+    DailyReportAssignmentResolutionForm,
+    DailyReportUploadForm,
     DIRECT_UNITS_VALUE,
     FiduciaryAssignmentForm,
     FiduciaryAssignmentUpdateForm,
@@ -39,6 +41,13 @@ from .imports.historical import (
     store_historical_import_file,
 )
 from .imports.cancellation import CANCELABLE_BATCH_STATUSES, cancel_import_batch
+from .imports.daily import (
+    DailyReportDuplicateError,
+    analyze_daily_report_import,
+    finalize_daily_report_import,
+    reanalyze_daily_report_import,
+    resolve_daily_report_assignment,
+)
 from .imports.historical.resolutions import (
     apply_resolution_to_equivalent_elements,
     auto_resolve_new_units,
@@ -48,10 +57,12 @@ from .imports.historical.resolutions import (
 )
 from .models import (
     Client,
+    DailyReportRow,
     DetectedStructureElement,
     FiduciaryAssignment,
     FiduciaryAssignmentHolder,
     ImportBatch,
+    ImportRowIssue,
     ImportResolution,
     UnitOwnership,
 )
@@ -79,6 +90,10 @@ class QueryStringMixin:
 
 def historical_batches():
     return ImportBatch.objects.filter(import_type=ImportBatch.ImportType.HISTORICAL).select_related("initiated_by").order_by("-created_at", "-pk")
+
+
+def daily_report_batches():
+    return ImportBatch.objects.filter(import_type=ImportBatch.ImportType.REPORTS).select_related("initiated_by").order_by("-created_at", "-pk")
 
 
 class HistoricalImportBatchListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
@@ -485,6 +500,216 @@ def _load_import_summary(value: str) -> dict:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+class DailyReportBatchListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
+    model = ImportBatch
+    template_name = "fiduciary/daily_report_batch_list.html"
+    context_object_name = "batches"
+    paginate_by = 10
+
+    def get_queryset(self):
+        return daily_report_batches().annotate(
+            files_count=Count("files", distinct=True),
+            pending_count=Count(
+                "daily_report_rows",
+                filter=Q(
+                    daily_report_rows__status__in=[
+                        DailyReportRow.Status.ASSIGNMENT_NOT_FOUND,
+                        DailyReportRow.Status.INVALID_ASSIGNMENT,
+                        DailyReportRow.Status.INVALID_DATE,
+                        DailyReportRow.Status.INVALID_AMOUNT,
+                        DailyReportRow.Status.NEEDS_REVIEW,
+                        DailyReportRow.Status.FAILED,
+                    ]
+                ),
+                distinct=True,
+            ),
+        )
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        context["cancelable_statuses"] = CANCELABLE_BATCH_STATUSES
+        return context
+
+
+class DailyReportCreateView(FiduciaryImportRequiredMixin, FormView):
+    form_class = DailyReportUploadForm
+    template_name = "fiduciary/daily_report_form.html"
+
+    def form_valid(self, form):
+        uploaded_file = form.cleaned_data["file"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / uploaded_file.name
+            with path.open("wb") as target:
+                for chunk in uploaded_file.chunks():
+                    target.write(chunk)
+            batch = ImportBatch.objects.create(
+                initiated_by=self.request.user,
+                import_type=ImportBatch.ImportType.REPORTS,
+                load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+                status=ImportBatch.Status.ANALYZING,
+                total_files=1,
+            )
+            try:
+                analyze_daily_report_import(batch=batch, file_path=path)
+                messages.success(self.request, "Reporte diario analizado correctamente.")
+            except DailyReportDuplicateError as exc:
+                batch.delete()
+                messages.warning(self.request, "Este reporte diario ya fue cargado anteriormente.")
+                return redirect("fiduciary:daily_report_preview", pk=exc.imported_file.batch_id)
+            except Exception:
+                batch.status = ImportBatch.Status.FAILED
+                batch.summary = "No fue posible analizar el reporte diario cargado."
+                batch.save(update_fields=["status", "summary"])
+                messages.error(self.request, "No fue posible analizar el reporte diario. Revise el archivo e intente nuevamente.")
+        return redirect("fiduciary:daily_report_preview", pk=batch.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = "Importar reporte diario"
+        context["back_url"] = "fiduciary:daily_report_list"
+        return context
+
+
+class DailyReportPreviewView(FiduciaryReadRequiredMixin, DetailView):
+    model = ImportBatch
+    template_name = "fiduciary/daily_report_preview.html"
+    context_object_name = "batch"
+
+    def get_queryset(self):
+        return daily_report_batches().prefetch_related("files", "daily_report_rows")
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        batch = self.object
+        imported_file = batch.files.order_by("order", "original_name").first()
+        rows = batch.daily_report_rows.select_related("assignment", "payment").order_by("sheet_name", "row_number")
+        blocking_statuses = [
+            DailyReportRow.Status.ASSIGNMENT_NOT_FOUND,
+            DailyReportRow.Status.INVALID_ASSIGNMENT,
+            DailyReportRow.Status.INVALID_DATE,
+            DailyReportRow.Status.INVALID_AMOUNT,
+            DailyReportRow.Status.NEEDS_REVIEW,
+            DailyReportRow.Status.FAILED,
+        ]
+        context["can_create"] = can_create_fiduciary(self.request.user)
+        context["can_import"] = can_import_fiduciary(self.request.user)
+        context["imported_file"] = imported_file
+        context["rows"] = rows[:50]
+        context["summary"] = _load_import_summary(batch.summary)
+        context["valid_count"] = rows.filter(status=DailyReportRow.Status.VALID).count()
+        context["duplicate_count"] = rows.filter(status=DailyReportRow.Status.DUPLICATE).count()
+        context["assignment_not_found_count"] = rows.filter(status=DailyReportRow.Status.ASSIGNMENT_NOT_FOUND).count()
+        context["invalid_date_count"] = rows.filter(status=DailyReportRow.Status.INVALID_DATE).count()
+        context["invalid_amount_count"] = rows.filter(status=DailyReportRow.Status.INVALID_AMOUNT).count()
+        context["blocking_count"] = rows.filter(status__in=blocking_statuses).count()
+        context["issue_groups"] = (
+            ImportRowIssue.objects.filter(imported_file=imported_file)
+            .values("code", "severity", "sheet_result__sheet_name")
+            .annotate(total=Count("id"))
+            .order_by("severity", "code", "sheet_result__sheet_name")
+            if imported_file
+            else []
+        )
+        context["can_finalize"] = can_import_fiduciary(self.request.user) and batch.status == ImportBatch.Status.READY
+        context["can_cancel"] = can_import_fiduciary(self.request.user) and batch.status in CANCELABLE_BATCH_STATUSES
+        return context
+
+
+class DailyReportReanalyzeView(FiduciaryImportRequiredMixin, View):
+    def post(self, request, pk):
+        batch = get_object_or_404(daily_report_batches(), pk=pk)
+        updated = reanalyze_daily_report_import(batch=batch, user=request.user)
+        messages.success(request, f"Reporte reanalizado. Filas actualizadas: {updated}.")
+        return redirect("fiduciary:daily_report_preview", pk=batch.pk)
+
+
+class DailyReportResolveAssignmentView(FiduciaryImportRequiredMixin, FormView):
+    form_class = DailyReportAssignmentResolutionForm
+    template_name = "fiduciary/daily_report_resolve.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.batch = get_object_or_404(daily_report_batches(), pk=kwargs["pk"])
+        self.row = get_object_or_404(self.batch.daily_report_rows, pk=kwargs["row_pk"])
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["instance"] = self.row
+        return kwargs
+
+    def form_valid(self, form):
+        resolve_daily_report_assignment(
+            row=self.row,
+            assignment=form.cleaned_data.get("assignment"),
+            user=self.request.user,
+            note=form.cleaned_data.get("resolution_note", ""),
+        )
+        messages.success(self.request, "Resolucion del encargo aplicada.")
+        return redirect("fiduciary:daily_report_preview", pk=self.batch.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["batch"] = self.batch
+        context["row"] = self.row
+        return context
+
+
+class DailyReportCancelView(FiduciaryImportRequiredMixin, DetailView):
+    model = ImportBatch
+    template_name = "fiduciary/daily_report_cancel_confirm.html"
+    context_object_name = "batch"
+
+    def get_queryset(self):
+        return daily_report_batches().prefetch_related("files", "daily_report_rows")
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        try:
+            cancel_import_batch(batch=self.object, cancelled_by=request.user)
+        except ValidationError as exc:
+            messages.error(request, " ".join(exc.messages))
+            return redirect("fiduciary:daily_report_preview", pk=self.object.pk)
+        messages.success(request, "El intento de importacion del reporte fue cancelado.")
+        return redirect("fiduciary:daily_report_list")
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["imported_file"] = self.object.files.order_by("order", "original_name").first()
+        context["row_count"] = self.object.daily_report_rows.count()
+        context["can_cancel"] = self.object.status in CANCELABLE_BATCH_STATUSES
+        return context
+
+
+class DailyReportFinalizeView(FiduciaryImportRequiredMixin, DetailView):
+    model = ImportBatch
+    template_name = "fiduciary/daily_report_finalize_confirm.html"
+    context_object_name = "batch"
+
+    def get_queryset(self):
+        return daily_report_batches().prefetch_related("files", "daily_report_rows")
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        try:
+            result = finalize_daily_report_import(batch_id=self.object.pk, user=request.user)
+        except PermissionDenied:
+            raise
+        except Exception as exc:
+            messages.error(request, str(exc))
+            return redirect("fiduciary:daily_report_preview", pk=self.object.pk)
+        messages.success(
+            request,
+            f"Reporte diario aplicado. Pagos creados: {result.imported_rows}. Duplicados omitidos: {result.duplicate_rows}.",
+        )
+        return redirect("fiduciary:daily_report_preview", pk=self.object.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["imported_file"] = self.object.files.order_by("order", "original_name").first()
+        context["can_finalize"] = self.object.status == ImportBatch.Status.READY
+        return context
 
 
 class ClientListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):

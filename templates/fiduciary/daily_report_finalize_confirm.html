@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Aplicar reporte diario | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <section class="data-section">
+        <h1>Aplicar pagos del reporte diario</h1>
+        <p>La aplicacion se ejecutara en una unica transaccion sobre el archivo {{ imported_file.original_name|default:"-" }}.</p>
+        {% if can_finalize %}
+          <form method="post">{% csrf_token %}<a class="btn btn-outline-secondary" href="{% url 'fiduciary:daily_report_preview' batch.pk %}">Volver</a> <button class="btn btn-primary" type="submit">Si, aplicar pagos</button></form>
+        {% else %}
+          <div class="alert alert-warning">Este lote no esta listo para aplicarse.</div>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:daily_report_preview' batch.pk %}">Volver</a>
+        {% endif %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

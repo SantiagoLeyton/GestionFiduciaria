@@ -9,7 +9,7 @@
   <nav class="nav flex-column gap-1">
     <a class="nav-link active" href="{% url 'home' %}">Inicio</a>
     <a class="nav-link" href="{% url 'fiduciary:historical_import_list' %}">Importar libro historico</a>
-    <span class="nav-link disabled">Importar reportes fiduciarios</span>
+    <a class="nav-link" href="{% url 'fiduciary:daily_report_list' %}">Importar reportes fiduciarios</a>
     <a class="nav-link" href="{% url 'real_estate:project_list' %}">Proyectos</a>
     <a class="nav-link" href="{% url 'real_estate:grouping_type_list' %}">Tipos de agrupacion</a>
     <a class="nav-link" href="{% url 'real_estate:structural_group_list' %}">Agrupaciones</a>

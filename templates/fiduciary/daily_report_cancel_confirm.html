@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Cancelar reporte diario | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <section class="data-section">
+        <h1>Cancelar intento de reporte diario</h1>
+        <p>Se eliminaran las filas temporales del analisis. Esta accion no elimina pagos definitivos.</p>
+        <p><strong>Archivo:</strong> {{ imported_file.original_name|default:"-" }}. <strong>Filas:</strong> {{ row_count }}</p>
+        {% if can_cancel %}
+          <form method="post">{% csrf_token %}<a class="btn btn-outline-secondary" href="{% url 'fiduciary:daily_report_preview' batch.pk %}">Volver</a> <button class="btn btn-outline-danger" type="submit">Si, cancelar</button></form>
+        {% else %}
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:daily_report_preview' batch.pk %}">Volver</a>
+        {% endif %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

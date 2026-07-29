@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from .models import (
     Client,
+    DailyReportRow,
     DetectedStructureElement,
     FiduciaryAssignment,
     FiduciaryAssignmentHolder,
@@ -126,3 +127,10 @@ class ImportedHistoricalNoveltyAdmin(NoDeleteAdmin):
     list_display = ("imported_file", "sheet_result", "row_number", "unit_code", "assignment_number", "status")
     list_filter = ("status", "sheet_result")
     search_fields = ("unit_code", "assignment_number", "project_name", "grouping_name", "sanitized_summary")
+
+
+@admin.register(DailyReportRow)
+class DailyReportRowAdmin(NoDeleteAdmin):
+    list_display = ("imported_file", "sheet_name", "row_number", "normalized_assignment_number", "payment_date", "amount", "status")
+    list_filter = ("status", "payment_date")
+    search_fields = ("normalized_assignment_number", "payer_name", "concept", "message")

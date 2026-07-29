@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Resolver encargo | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading"><div><h1>Resolver encargo</h1><p>Fila {{ row.row_number }} - {{ row.original_assignment_number }}</p></div></div>
+      <section class="data-section">
+        <form method="post">
+          {% csrf_token %}
+          {{ form.non_field_errors }}
+          <div class="mb-3">{{ form.assignment.label_tag }}{{ form.assignment }}{{ form.assignment.errors }}</div>
+          <div class="mb-3">{{ form.resolution_note.label_tag }}{{ form.resolution_note }}{{ form.resolution_note.errors }}</div>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:daily_report_preview' batch.pk %}">Volver</a>
+          <button class="btn btn-success" type="submit">Guardar resolucion</button>
+        </form>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

@@ -6,6 +6,7 @@ from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGr
 
 from .models import (
     Client,
+    DailyReportRow,
     DetectedStructureElement,
     FiduciaryAssignment,
     FiduciaryAssignmentHolder,
@@ -707,3 +708,41 @@ class StructuralGroupResolutionForm(forms.Form):
         if action == ImportResolution.Action.CREATE_NEW and not new_group_name:
             self.add_error("new_group_name", "Registre el nombre de la agrupacion.")
         return cleaned
+
+
+class DailyReportUploadForm(forms.Form):
+    file = forms.FileField(
+        label="Reporte diario",
+        widget=forms.ClearableFileInput(attrs={"class": "form-control", "accept": ".xlsx,.xls"}),
+    )
+
+    def clean_file(self):
+        uploaded = self.cleaned_data["file"]
+        extension = uploaded.name.rsplit(".", 1)[-1].lower() if "." in uploaded.name else ""
+        if extension not in {"xlsx", "xls"}:
+            raise ValidationError("Cargue un archivo Excel .xlsx o .xls.")
+        return uploaded
+
+
+class DailyReportAssignmentResolutionForm(forms.ModelForm):
+    class Meta:
+        model = DailyReportRow
+        fields = ("assignment", "resolution_note")
+        widgets = {
+            "assignment": forms.Select(attrs={"class": "form-select"}),
+            "resolution_note": forms.Textarea(attrs={"class": "form-control", "rows": 3}),
+        }
+        labels = {
+            "assignment": "Encargo fiduciario",
+            "resolution_note": "Nota",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["assignment"].queryset = FiduciaryAssignment.objects.select_related(
+            "property_unit", "property_unit__project"
+        ).order_by("assignment_number")
+        self.fields["assignment"].required = False
+
+    def clean_resolution_note(self):
+        return self.cleaned_data["resolution_note"].strip()

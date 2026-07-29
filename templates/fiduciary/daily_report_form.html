@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Importar reporte diario | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading"><div><h1>{{ title }}</h1><p>Cargue un archivo Excel de reporte fiduciario diario.</p></div></div>
+      <section class="data-section">
+        <form method="post" enctype="multipart/form-data">
+          {% csrf_token %}
+          {{ form.non_field_errors }}
+          <div class="mb-3">{{ form.file.label_tag }}{{ form.file }}{{ form.file.errors }}</div>
+          <a class="btn btn-outline-secondary" href="{% url back_url %}">Volver</a>
+          <button class="btn btn-success" type="submit">Analizar reporte</button>
+        </form>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}Previsualizacion reporte diario | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>Previsualizacion de reporte diario</h1><p>Lote #{{ batch.pk }} - {{ batch.get_status_display }}</p></div>
+        <div class="actions-cell">
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:daily_report_list' %}">Volver</a>
+          {% if can_import %}
+            <form method="post" action="{% url 'fiduciary:daily_report_reanalyze' batch.pk %}">{% csrf_token %}<button class="btn btn-outline-secondary" type="submit">Reanalizar</button></form>
+          {% endif %}
+          {% if can_cancel %}<a class="btn btn-outline-danger" href="{% url 'fiduciary:daily_report_cancel' batch.pk %}">Cancelar</a>{% endif %}
+          {% if can_finalize %}<a class="btn btn-primary" href="{% url 'fiduciary:daily_report_finalize' batch.pk %}">Aplicar pagos</a>{% endif %}
+        </div>
+      </div>
+      <section class="data-section">
+        <div class="section-header"><h2>Resumen</h2><span>{{ imported_file.original_name|default:"Sin archivo" }}</span></div>
+        <div class="row g-3">
+          <div class="col-md-2"><strong>Total</strong><div>{{ summary.total|default:0 }}</div></div>
+          <div class="col-md-2"><strong>Validos</strong><div>{{ valid_count }}</div></div>
+          <div class="col-md-2"><strong>Duplicados</strong><div>{{ duplicate_count }}</div></div>
+          <div class="col-md-2"><strong>Encargo no encontrado</strong><div>{{ assignment_not_found_count }}</div></div>
+          <div class="col-md-2"><strong>Fechas invalidas</strong><div>{{ invalid_date_count }}</div></div>
+          <div class="col-md-2"><strong>Valores invalidos</strong><div>{{ invalid_amount_count }}</div></div>
+          <div class="col-md-3"><strong>Total monetario valido</strong><div>{{ summary.valid_amount|default:"0" }}</div></div>
+        </div>
+        {% if blocking_count %}<div class="alert alert-warning mt-3">El lote tiene errores bloqueantes. Resuelva los encargos pendientes o corrija el archivo.</div>{% endif %}
+      </section>
+      <section class="data-section">
+        <div class="section-header"><h2>Incidencias agrupadas</h2><span>{{ issue_groups|length }} grupos</span></div>
+        <div class="table-responsive">
+          <table class="table data-table">
+            <thead><tr><th>Codigo</th><th>Severidad</th><th>Hoja</th><th>Cantidad</th></tr></thead>
+            <tbody>
+              {% for issue in issue_groups %}
+                <tr>
+                  <td>{{ issue.code }}</td>
+                  <td>{{ issue.severity }}</td>
+                  <td>{{ issue.sheet_result__sheet_name|default:"-" }}</td>
+                  <td>{{ issue.total }}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="4">No hay incidencias estructurales registradas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="data-section">
+        <div class="section-header"><h2>Filas analizadas</h2><span>Primeras 50</span></div>
+        <div class="table-responsive">
+          <table class="table data-table">
+            <thead><tr><th>Hoja</th><th>Fila</th><th>Encargo</th><th>Fecha</th><th>Valor</th><th>Concepto</th><th>Estado</th><th>Acciones</th></tr></thead>
+            <tbody>
+              {% for row in rows %}
+                <tr>
+                  <td>{{ row.sheet_name }}</td><td>{{ row.row_number }}</td><td>{{ row.original_assignment_number }}</td>
+                  <td>{{ row.payment_date|date:"d/m/Y"|default:"-" }}</td><td>{{ row.amount|default:"-" }}</td><td>{{ row.concept|default:"-" }}</td>
+                  <td>{{ row.get_status_display }}</td>
+                  <td>{% if row.status == "assignment_not_found" and can_import %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:daily_report_resolve' batch.pk row.pk %}">Resolver</a>{% endif %}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="8">No hay filas analizadas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

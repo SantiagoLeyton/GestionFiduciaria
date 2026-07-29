@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Reportes diarios | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Importar reportes fiduciarios</h1>
+          <p>Analice reportes diarios y aplique pagos a encargos existentes.</p>
+        </div>
+        {% if can_create %}
+          <a class="btn btn-success" href="{% url 'fiduciary:daily_report_create' %}">Nuevo reporte</a>
+        {% endif %}
+      </div>
+      <section class="data-section">
+        <div class="section-header"><h2>Lotes de reportes</h2><span>{{ batches|length }} registro{{ batches|length|pluralize }}</span></div>
+        <div class="table-responsive">
+          <table class="table data-table align-middle">
+            <thead><tr><th>ID</th><th>Fecha</th><th>Usuario</th><th>Estado</th><th>Filas</th><th>Pendientes</th><th>Acciones</th></tr></thead>
+            <tbody>
+              {% for batch in batches %}
+                <tr>
+                  <td>#{{ batch.pk }}</td>
+                  <td>{{ batch.created_at|date:"d/m/Y H:i" }}</td>
+                  <td>{{ batch.initiated_by.get_full_name|default:batch.initiated_by.email }}</td>
+                  <td>{{ batch.get_status_display }}</td>
+                  <td>{{ batch.processed_rows }} / {{ batch.total_rows }}</td>
+                  <td>{{ batch.pending_count }}</td>
+                  <td class="actions-cell">
+                    <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:daily_report_preview' batch.pk %}">Previsualizar</a>
+                    {% if can_create and batch.status in cancelable_statuses %}
+                      <a class="btn btn-sm btn-outline-danger" href="{% url 'fiduciary:daily_report_cancel' batch.pk %}">Cancelar</a>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="7">No hay reportes diarios registrados.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% include "includes/pagination.html" %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

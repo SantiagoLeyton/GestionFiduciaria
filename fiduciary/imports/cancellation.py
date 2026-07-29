@@ -5,6 +5,7 @@ from django.db import transaction
 
 from fiduciary.models import (
     DetectedStructureElement,
+    DailyReportRow,
     ImportBatch,
     ImportAppliedRecord,
     ImportedHistoricalNovelty,
@@ -35,6 +36,7 @@ class ImportCancellationResult:
     resolutions_deleted: int
     novelties_deleted: int
     historical_novelties_deleted: int
+    daily_rows_deleted: int = 0
 
 
 def cancel_import_batch(*, batch: ImportBatch, cancelled_by) -> ImportCancellationResult:
@@ -59,6 +61,7 @@ def cancel_import_batch(*, batch: ImportBatch, cancelled_by) -> ImportCancellati
         ).delete()[0]
         detected_elements_deleted = duplicate_elements.delete()[0]
         historical_novelties_deleted = ImportedHistoricalNovelty.objects.filter(batch=locked_batch).delete()[0]
+        daily_rows_deleted = DailyReportRow.objects.filter(batch=locked_batch).delete()[0]
         novelties_deleted = ImportNovelty.objects.filter(batch=locked_batch).delete()[0]
         row_issues_deleted = ImportRowIssue.objects.filter(imported_file_id__in=file_ids).delete()[0]
         sheet_results_deleted = ImportedSheetResult.objects.filter(imported_file_id__in=file_ids).delete()[0]
@@ -75,6 +78,7 @@ def cancel_import_batch(*, batch: ImportBatch, cancelled_by) -> ImportCancellati
         resolutions_deleted=resolutions_deleted,
         novelties_deleted=novelties_deleted,
         historical_novelties_deleted=historical_novelties_deleted,
+        daily_rows_deleted=daily_rows_deleted,
     )
 
 

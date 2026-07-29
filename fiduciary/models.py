@@ -351,6 +351,11 @@ class ImportedFile(models.Model):
                 condition=Q(file_type="historical"),
                 name="fiduciary_imported_file_historical_sha_unique",
             ),
+            models.UniqueConstraint(
+                fields=["sha256"],
+                condition=Q(file_type="report"),
+                name="fiduciary_imported_file_report_sha_unique",
+            ),
             models.CheckConstraint(
                 condition=Q(file_type__in=["historical", "report", "unknown"]),
                 name="fiduciary_imported_file_type_valid",
@@ -787,6 +792,7 @@ class ImportAppliedRecord(models.Model):
         ASSIGNMENT_HOLDER = "assignment_holder", "Titular de encargo"
         PAYMENT = "payment", "Pago"
         HISTORICAL_NOVELTY = "historical_novelty", "Novedad historica"
+        DAILY_REPORT_ROW = "daily_report_row", "Fila de reporte diario"
 
     class Action(models.TextChoices):
         CREATED = "created", "Creado"
@@ -831,6 +837,120 @@ class ImportAppliedRecord(models.Model):
 
     def __str__(self):
         return f"{self.get_entity_kind_display()} - {self.get_action_display()}"
+
+
+class DailyReportRow(models.Model):
+    class Status(models.TextChoices):
+        VALID = "valid", "Valida"
+        DUPLICATE = "duplicate", "Duplicada"
+        ASSIGNMENT_NOT_FOUND = "assignment_not_found", "Encargo no encontrado"
+        INVALID_ASSIGNMENT = "invalid_assignment", "Encargo invalido"
+        INVALID_DATE = "invalid_date", "Fecha invalida"
+        INVALID_AMOUNT = "invalid_amount", "Valor invalido"
+        NEEDS_REVIEW = "needs_review", "Requiere revision"
+        IMPORTED = "imported", "Importada"
+        FAILED = "failed", "Fallida"
+
+    batch = models.ForeignKey(ImportBatch, on_delete=models.PROTECT, related_name="daily_report_rows")
+    imported_file = models.ForeignKey(ImportedFile, on_delete=models.PROTECT, related_name="daily_report_rows")
+    sheet_result = models.ForeignKey(
+        ImportedSheetResult,
+        on_delete=models.PROTECT,
+        related_name="daily_report_rows",
+        blank=True,
+        null=True,
+    )
+    sheet_name = models.CharField("hoja", max_length=150)
+    row_number = models.PositiveIntegerField("fila origen")
+    original_assignment_number = models.CharField("encargo original", max_length=120, blank=True)
+    normalized_assignment_number = models.CharField("encargo normalizado", max_length=120, blank=True)
+    payment_date = models.DateField("fecha de pago", blank=True, null=True)
+    amount = models.DecimalField("valor", max_digits=18, decimal_places=2, blank=True, null=True)
+    movement_type = models.CharField(
+        "tipo de movimiento",
+        max_length=24,
+        choices=Payment.MovementType.choices,
+        default=Payment.MovementType.ADDITION,
+    )
+    payer_name = models.CharField("pagador", max_length=180, blank=True)
+    payer_document = models.CharField("identificacion del pagador", max_length=80, blank=True)
+    concept = models.CharField("concepto", max_length=180, blank=True)
+    original_data = models.JSONField("datos originales sanitizados", default=dict, blank=True)
+    status = models.CharField("estado", max_length=32, choices=Status.choices)
+    message = models.TextField("mensaje", blank=True)
+    assignment = models.ForeignKey(
+        FiduciaryAssignment,
+        on_delete=models.PROTECT,
+        related_name="daily_report_rows",
+        blank=True,
+        null=True,
+    )
+    payment = models.ForeignKey(
+        Payment,
+        on_delete=models.PROTECT,
+        related_name="daily_report_rows",
+        blank=True,
+        null=True,
+    )
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="resolved_daily_report_rows",
+        blank=True,
+        null=True,
+    )
+    resolved_at = models.DateTimeField("fecha de resolucion", blank=True, null=True)
+    resolution_note = models.TextField("nota de resolucion", blank=True)
+    created_at = models.DateTimeField("fecha de creacion", auto_now_add=True)
+    updated_at = models.DateTimeField("fecha de actualizacion", auto_now=True)
+
+    class Meta:
+        ordering = ("imported_file", "sheet_name", "row_number")
+        indexes = [
+            models.Index(fields=["batch", "status"], name="fid_daily_row_batch_status_idx"),
+            models.Index(fields=["normalized_assignment_number"], name="fid_daily_row_assignment_idx"),
+            models.Index(fields=["assignment", "payment_date", "amount"], name="fid_daily_row_payment_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["imported_file", "sheet_name", "row_number"],
+                name="fid_daily_row_file_sheet_row_unique",
+            ),
+            models.CheckConstraint(
+                condition=Q(
+                    status__in=[
+                        "valid",
+                        "duplicate",
+                        "assignment_not_found",
+                        "invalid_assignment",
+                        "invalid_date",
+                        "invalid_amount",
+                        "needs_review",
+                        "imported",
+                        "failed",
+                    ]
+                ),
+                name="fid_daily_row_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=Q(movement_type__in=["historical_payment", "addition", "withdrawal"]),
+                name="fid_daily_row_movement_type_valid",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        self.sheet_name = self.sheet_name.strip()
+        self.original_assignment_number = self.original_assignment_number.strip()
+        self.normalized_assignment_number = self.normalized_assignment_number.strip()
+        self.payer_name = self.payer_name.strip()
+        self.payer_document = self.payer_document.strip()
+        self.concept = self.concept.strip()
+        self.message = self.message.strip()
+        self.resolution_note = self.resolution_note.strip()
+
+    def __str__(self):
+        return f"{self.sheet_name}:{self.row_number} - {self.normalized_assignment_number or 'sin encargo'}"
 
 
 class ImportedHistoricalNovelty(models.Model):
