@@ -2,15 +2,15 @@
 {% with url_name=request.resolver_match.url_name namespace=request.resolver_match.namespace %}
 <aside class="sidebar">
   <a class="sidebar-logo" href="{% url 'home' %}" aria-label="Ir al inicio">
-    <img src="{% static 'assets/logo.png' %}" alt="Constructora Centenario" onerror="this.classList.add('is-missing'); this.nextElementSibling.hidden=false;">
+    <img class="sidebar-logo-img" src="{% static 'assets/logo.png' %}" alt="Constructora Centenario" onerror="this.classList.add('is-missing'); this.nextElementSibling.hidden=false;">
     <span hidden>Centenario<br><small>Gestión Fiduciaria</small></span>
   </a>
   <nav class="nav flex-column gap-1">
     <a class="nav-link {% if url_name == 'home' %}active{% endif %}" href="{% url 'home' %}">Inicio</a>
-    <a class="nav-link {% if url_name == 'historical_import_list' or url_name == 'historical_import_create' or url_name == 'historical_import_preview' or url_name == 'historical_import_finalize' or url_name == 'historical_import_cancel' or url_name == 'historical_import_pending' or url_name == 'historical_import_reanalyze_pending' or url_name == 'historical_import_resolve' or url_name == 'historical_import_resolve_group' %}active{% endif %}" href="{% url 'fiduciary:historical_import_list' %}">Importar libro historico</a>
+    <a class="nav-link {% if url_name == 'historical_import_list' or url_name == 'historical_import_create' or url_name == 'historical_import_preview' or url_name == 'historical_import_finalize' or url_name == 'historical_import_cancel' or url_name == 'historical_import_pending' or url_name == 'historical_import_reanalyze_pending' or url_name == 'historical_import_resolve' or url_name == 'historical_import_resolve_group' %}active{% endif %}" href="{% url 'fiduciary:historical_import_list' %}">Importar libro histórico</a>
     <a class="nav-link {% if url_name == 'daily_report_list' or url_name == 'daily_report_create' or url_name == 'daily_report_preview' or url_name == 'daily_report_reanalyze' or url_name == 'daily_report_cancel' or url_name == 'daily_report_finalize' or url_name == 'daily_report_resolve' %}active{% endif %}" href="{% url 'fiduciary:daily_report_list' %}">Importar reportes fiduciarios</a>
     <a class="nav-link {% if url_name == 'project_list' or url_name == 'project_create' or url_name == 'project_update' or url_name == 'project_status' %}active{% endif %}" href="{% url 'real_estate:project_list' %}">Proyectos</a>
-    <a class="nav-link {% if url_name == 'grouping_type_list' or url_name == 'grouping_type_create' or url_name == 'grouping_type_update' or url_name == 'grouping_type_status' %}active{% endif %}" href="{% url 'real_estate:grouping_type_list' %}">Tipos de agrupacion</a>
+    <a class="nav-link {% if url_name == 'grouping_type_list' or url_name == 'grouping_type_create' or url_name == 'grouping_type_update' or url_name == 'grouping_type_status' %}active{% endif %}" href="{% url 'real_estate:grouping_type_list' %}">Tipos de agrupación</a>
     <a class="nav-link {% if url_name == 'structural_group_list' or url_name == 'structural_group_create' or url_name == 'structural_group_update' or url_name == 'structural_group_status' %}active{% endif %}" href="{% url 'real_estate:structural_group_list' %}">Agrupaciones</a>
     <a class="nav-link {% if url_name == 'property_unit_list' or url_name == 'property_unit_create' or url_name == 'property_unit_update' or url_name == 'property_unit_status' or url_name == 'property_unit_history' %}active{% endif %}" href="{% url 'real_estate:property_unit_list' %}">Unidades</a>
     <a class="nav-link {% if url_name == 'client_list' or url_name == 'client_create' or url_name == 'client_detail' or url_name == 'client_update' or url_name == 'client_status' or url_name == 'client_search' %}active{% endif %}" href="{% url 'fiduciary:client_list' %}">Clientes</a>
@@ -20,7 +20,7 @@
     <a class="nav-link {% if url_name == 'novelty_list' or url_name == 'novelty_create' or url_name == 'novelty_detail' %}active{% endif %}" href="{% url 'fiduciary:novelty_list' %}">Novedades</a>
     <a class="nav-link {% if url_name == 'payment_list' %}active{% endif %}" href="{% url 'fiduciary:payment_list' %}">Pagos</a>
     {% if request.user.is_accounting_admin or request.user.is_superuser %}
-      <a class="nav-link {% if url_name == 'audit_list' or url_name == 'audit_detail' %}active{% endif %}" href="{% url 'fiduciary:audit_list' %}">Auditoria</a>
+      <a class="nav-link {% if url_name == 'audit_list' or url_name == 'audit_detail' %}active{% endif %}" href="{% url 'fiduciary:audit_list' %}">Auditoría</a>
     {% endif %}
   </nav>
   <div class="sidebar-footer">v1.0.0 - 2026</div>

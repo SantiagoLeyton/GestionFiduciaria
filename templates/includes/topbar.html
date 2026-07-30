@@ -1,12 +1,15 @@
 <header class="topbar">
-  <button class="theme-toggle" type="button" data-theme-toggle aria-label="Cambiar tema">
-    <span class="theme-toggle-icon" data-theme-icon aria-hidden="true">☀</span>
-  </button>
-  <div class="user-menu">
+  <div class="topbar-context" aria-hidden="true"></div>
+  <div class="topbar-actions">
     <div class="user-name">
       <strong>{{ request.user.full_name }}</strong>
       <span>{{ request.user.role_label }}</span>
     </div>
+    <button class="theme-toggle" type="button" data-theme-toggle aria-label="Cambiar a modo oscuro">
+      <span class="theme-toggle-icon" data-theme-icon aria-hidden="true">☀</span>
+      <span data-theme-label>Modo oscuro</span>
+    </button>
+    <span class="topbar-divider" aria-hidden="true"></span>
     <form method="post" action="{% url 'logout' %}">
       {% csrf_token %}
       <button class="btn btn-outline-secondary btn-sm" type="submit">Cerrar sesión</button>

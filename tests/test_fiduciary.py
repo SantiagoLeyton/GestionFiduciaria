@@ -1328,7 +1328,7 @@ def test_property_unit_view_shows_last_payment(accounting_client, accounting_adm
     content = response.content.decode()
 
     assert "7/2026" in content
-    assert "1.500.000,00" in content or "1500000,00" in content or "1500000.00" in content
+    assert "1.500.000" in content
     assert "No se han realizado pagos aun" not in content
 
 

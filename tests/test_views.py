@@ -1,8 +1,8 @@
+from pathlib import Path
+
 import pytest
 from django.test import Client
 from django.urls import reverse
-
-from users.models import User
 
 
 @pytest.mark.django_db
@@ -181,7 +181,7 @@ def test_navigation_for_commercial_does_not_show_admin_future_items(client, comm
     content = response.content.decode()
 
     assert reverse("fiduciary:historical_import_list") in content
-    assert "Auditoria" not in content
+    assert "Auditoría" not in content
     assert "Usuarios" not in content
 
 
@@ -220,6 +220,7 @@ def test_login_uses_static_visual_asset_and_footer_text(client):
     content = response.content.decode()
 
     assert response.status_code == 200
+    assert "login-visual-media" in content
     assert "assets/login.gif" in content
     assert "Contraseña" in content
     assert "Mantener sesión iniciada" in content
@@ -238,4 +239,59 @@ def test_theme_script_and_persistence_hook_are_present(client, commercial_user):
     assert "js/theme.js" in content
     assert "pagosfiducia-theme" in content
     assert "data-theme-toggle" in content
-    assert "aria-label=\"Cambiar tema\"" in content
+    assert "data-theme-label" in content
+    assert "aria-label=\"Cambiar a modo" in content
+
+
+def test_local_bootstrap_css_is_not_empty_and_contains_rules():
+    path = Path("static/vendor/bootstrap/bootstrap.min.css")
+    content = path.read_text(encoding="utf-8")
+
+    assert path.exists()
+    assert path.stat().st_size > 100_000
+    assert ".container" in content
+    assert ".btn" in content
+    assert ".row" in content
+
+
+def test_base_loads_bootstrap_before_app_css():
+    content = Path("templates/base.html").read_text(encoding="utf-8")
+
+    bootstrap_index = content.index("vendor/bootstrap/bootstrap.min.css")
+    app_index = content.index("css/app.css")
+    assert bootstrap_index < app_index
+
+
+@pytest.mark.django_db
+def test_home_cards_are_independent_blocks_with_logo(client, accounting_admin_user):
+    client.force_login(accounting_admin_user)
+
+    content = client.get(reverse("home")).content.decode()
+
+    assert "home-brand" in content
+    assert "assets/logo.png" in content
+    assert content.count('class="module-card"') == 13
+    assert content.count('class="module-icon"') == 13
+    assert "module-grid" in content
+
+
+@pytest.mark.django_db
+def test_topbar_theme_button_is_next_to_logout(client, accounting_admin_user):
+    client.force_login(accounting_admin_user)
+
+    content = client.get(reverse("fiduciary:audit_list")).content.decode()
+
+    theme_index = content.index("data-theme-toggle")
+    divider_index = content.index("topbar-divider")
+    logout_index = content.index("Cerrar sesión")
+    assert theme_index < divider_index < logout_index
+
+
+@pytest.mark.django_db
+def test_sidebar_logo_uses_controlled_size_class(client, accounting_admin_user):
+    client.force_login(accounting_admin_user)
+
+    content = client.get(reverse("fiduciary:audit_list")).content.decode()
+
+    assert "sidebar-logo-img" in content
+    assert "assets/logo.png" in content

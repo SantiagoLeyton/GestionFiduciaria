@@ -14,7 +14,7 @@
       </div>
     </div>
     <h1>Bienvenido</h1>
-    <p>Ingrese sus credenciales para acceder a la plataforma de gestión fiduciaria.</p>
+    <p>Ingrese sus credenciales.</p>
     {% include "includes/messages.html" %}
     <form method="post" novalidate>
       {% csrf_token %}
@@ -38,10 +38,10 @@
       {{ form.non_field_errors }}
       <button class="btn btn-success w-100" type="submit">Iniciar sesión</button>
     </form>
-    <p class="access-note">© 2026 Constructora Centenario. Todos los derechos reservados.</p>
+    <p class="access-note" aria-label="© 2026 Constructora Centenario. Todos los derechos reservados.">© 2026 Constructora Centenario.<br class="mobile-break"> Todos los derechos reservados.</p>
   </section>
   <section class="login-visual" aria-hidden="true">
-    <img src="{% static 'assets/login.gif' %}" alt="" onerror="this.hidden=true;">
+    <img class="login-visual-media" src="{% static 'assets/login.gif' %}" alt="" onerror="this.hidden=true;">
   </section>
 </main>
 {% endblock %}

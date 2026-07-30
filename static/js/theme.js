@@ -3,17 +3,21 @@
   const root = document.documentElement;
 
   function preferredTheme() {
-    return localStorage.getItem(storageKey)
-      || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const stored = localStorage.getItem(storageKey);
+    if (stored === "light" || stored === "dark") return stored;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
 
   function applyTheme(theme) {
     root.dataset.theme = theme;
     document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
       const isDark = theme === "dark";
-      button.setAttribute("aria-label", isDark ? "Activar modo claro" : "Activar modo oscuro");
+      const nextLabel = isDark ? "Modo claro" : "Modo oscuro";
+      button.setAttribute("aria-label", `Cambiar a ${nextLabel.toLowerCase()}`);
       const icon = button.querySelector("[data-theme-icon]");
+      const label = button.querySelector("[data-theme-label]");
       if (icon) icon.textContent = isDark ? "☾" : "☀";
+      if (label) label.textContent = nextLabel;
     });
   }
 

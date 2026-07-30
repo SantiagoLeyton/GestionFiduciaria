@@ -1,0 +1,313 @@
+
+<!doctype html>
+<html lang="es" data-theme="light">
+<head><base href="http://127.0.0.1:8000/">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    (function () {
+      var stored = localStorage.getItem("pagosfiducia-theme");
+      var theme = stored || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
+  <title>Auditoria | Centenario Gestion Fiduciaria</title>
+  <link rel="stylesheet" href="/static/vendor/bootstrap/bootstrap.min.css?v=5.3.3">
+  <link rel="stylesheet" href="/static/css/app.css?v=20260730">
+</head>
+<body>
+  
+<div class="app-shell">
+  
+
+<aside class="sidebar">
+  <a class="sidebar-logo" href="/" aria-label="Ir al inicio">
+    <img class="sidebar-logo-img" src="/static/assets/logo.png" alt="Constructora Centenario" onerror="this.classList.add('is-missing'); this.nextElementSibling.hidden=false;">
+    <span hidden>Centenario<br><small>Gestión Fiduciaria</small></span>
+  </a>
+  <nav class="nav flex-column gap-1">
+    <a class="nav-link " href="/">Inicio</a>
+    <a class="nav-link " href="/fiduciary/historical-imports/">Importar libro histórico</a>
+    <a class="nav-link " href="/fiduciary/daily-reports/">Importar reportes fiduciarios</a>
+    <a class="nav-link " href="/real-estate/projects/">Proyectos</a>
+    <a class="nav-link " href="/real-estate/grouping-types/">Tipos de agrupación</a>
+    <a class="nav-link " href="/real-estate/structural-groups/">Agrupaciones</a>
+    <a class="nav-link " href="/real-estate/property-units/">Unidades</a>
+    <a class="nav-link " href="/fiduciary/clients/">Clientes</a>
+    <a class="nav-link " href="/fiduciary/ownerships/">Titularidades</a>
+    <a class="nav-link " href="/fiduciary/assignments/">Encargos fiduciarios</a>
+    <a class="nav-link " href="/fiduciary/observations/">Observaciones</a>
+    <a class="nav-link " href="/fiduciary/novelties/">Novedades</a>
+    <a class="nav-link " href="/fiduciary/payments/">Pagos</a>
+    
+      <a class="nav-link active" href="/fiduciary/audit/">Auditoría</a>
+    
+  </nav>
+  <div class="sidebar-footer">v1.0.0 - 2026</div>
+</aside>
+
+
+  <main class="main-content">
+    <header class="topbar">
+  <div class="topbar-context" aria-hidden="true"></div>
+  <div class="topbar-actions">
+    <div class="user-name">
+      <strong>admin</strong>
+      <span>Contabilidad</span>
+    </div>
+    <button class="theme-toggle" type="button" data-theme-toggle aria-label="Activar modo oscuro">
+      <span class="theme-toggle-icon" data-theme-icon aria-hidden="true">☀</span>
+      <span data-theme-label>Modo oscuro</span>
+    </button>
+    <span class="topbar-divider" aria-hidden="true"></span>
+    <form method="post" action="/accounts/logout/">
+      <input type="hidden" name="csrfmiddlewaretoken" value="0nq2zmN8sfYGNxoK1RAb3c47Bi5qMqDXePxWLv7jRvZVRawgUgqYwv5rVuPHLG9p">
+      <button class="btn btn-outline-secondary btn-sm" type="submit">Cerrar sesión</button>
+    </form>
+  </div>
+</header>
+
+    <section class="content">
+      
+
+      <div class="page-heading">
+        <div>
+          <h1>Auditoria</h1>
+          <p>Consulte la trazabilidad registrada durante las operaciones de importacion.</p>
+        </div>
+      </div>
+
+      <form class="filter-panel" method="get">
+        <div class="form-grid">
+          
+            <div>
+              <label class="form-label" for="id_responsible">Responsable</label>
+              <select name="responsible" class="form-select" id="id_responsible">
+  <option value="" selected>---------</option>
+
+  <option value="1">admin</option>
+
+  <option value="2">comercial</option>
+
+  <option value="3">contabilidad</option>
+
+  <option value="5">debugacct</option>
+
+</select>
+            </div>
+          
+            <div>
+              <label class="form-label" for="id_date_from">Fecha inicial</label>
+              <input type="date" name="date_from" class="form-control" id="id_date_from">
+            </div>
+          
+            <div>
+              <label class="form-label" for="id_date_to">Fecha final</label>
+              <input type="date" name="date_to" class="form-control" id="id_date_to">
+            </div>
+          
+            <div>
+              <label class="form-label" for="id_action">Accion</label>
+              <select name="action" class="form-select" id="id_action">
+  <option value="" selected>Todas</option>
+
+  <option value="created">Creado</option>
+
+  <option value="reused">Reutilizado</option>
+
+  <option value="skipped">Omitido</option>
+
+  <option value="preserved">Conservado</option>
+
+</select>
+            </div>
+          
+            <div>
+              <label class="form-label" for="id_entity_kind">Modulo o entidad</label>
+              <select name="entity_kind" class="form-select" id="id_entity_kind">
+  <option value="" selected>Todos</option>
+
+  <option value="project">Proyecto</option>
+
+  <option value="grouping_type">Tipo de agrupacion</option>
+
+  <option value="structural_group">Agrupacion</option>
+
+  <option value="property_unit">Unidad</option>
+
+  <option value="client">Cliente</option>
+
+  <option value="unit_ownership">Titularidad</option>
+
+  <option value="fiduciary_assignment">Encargo fiduciario</option>
+
+  <option value="assignment_holder">Titular de encargo</option>
+
+  <option value="payment">Pago</option>
+
+  <option value="historical_novelty">Novedad historica</option>
+
+  <option value="daily_report_row">Fila de reporte diario</option>
+
+</select>
+            </div>
+          
+            <div>
+              <label class="form-label" for="id_reason">Motivo</label>
+              <input type="text" name="reason" class="form-control" id="id_reason">
+            </div>
+          
+            <div>
+              <label class="form-label" for="id_batch">Lote</label>
+              <select name="batch" class="form-select" id="id_batch">
+  <option value="" selected>---------</option>
+
+  <option value="1">Historico - 2026-07-30 12:26</option>
+
+</select>
+            </div>
+          
+            <div>
+              <label class="form-label" for="id_imported_file">Archivo</label>
+              <select name="imported_file" class="form-select" id="id_imported_file">
+  <option value="" selected>---------</option>
+
+  <option value="1">LIBRO MONTECIELO T2.xlsx</option>
+
+</select>
+            </div>
+          
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Buscar</button>
+          <a class="btn btn-outline-secondary" href="/fiduciary/audit/">Limpiar</a>
+        </div>
+      </form>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Registros de auditoria</h2><span>703 registros</span></div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr><th>Fecha y hora</th><th>Responsable</th><th>Accion</th><th>Entidad</th><th>Descripcion</th><th></th></tr>
+            </thead>
+            <tbody>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Conservado</td>
+                  <td>Novedad historica</td>
+                  <td>Novedad historica preservada para fases posteriores.</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/703/">Ver detalle</a></td>
+                </tr>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Creado</td>
+                  <td>Encargo fiduciario</td>
+                  <td>Importacion historica definitiva completada. Proyectos creados: 0; tipos creados: 0; agrupaciones c…</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/702/">Ver detalle</a></td>
+                </tr>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Creado</td>
+                  <td>Encargo fiduciario</td>
+                  <td>Importacion historica definitiva completada. Proyectos creados: 0; tipos creados: 0; agrupaciones c…</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/701/">Ver detalle</a></td>
+                </tr>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Creado</td>
+                  <td>Pago</td>
+                  <td>Importacion historica definitiva completada. Proyectos creados: 0; tipos creados: 0; agrupaciones c…</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/700/">Ver detalle</a></td>
+                </tr>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Creado</td>
+                  <td>Titular de encargo</td>
+                  <td>Importacion historica definitiva completada. Proyectos creados: 0; tipos creados: 0; agrupaciones c…</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/699/">Ver detalle</a></td>
+                </tr>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Creado</td>
+                  <td>Titularidad</td>
+                  <td>Importacion historica definitiva completada. Proyectos creados: 0; tipos creados: 0; agrupaciones c…</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/698/">Ver detalle</a></td>
+                </tr>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Creado</td>
+                  <td>Titular de encargo</td>
+                  <td>Importacion historica definitiva completada. Proyectos creados: 0; tipos creados: 0; agrupaciones c…</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/697/">Ver detalle</a></td>
+                </tr>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Creado</td>
+                  <td>Titularidad</td>
+                  <td>Importacion historica definitiva completada. Proyectos creados: 0; tipos creados: 0; agrupaciones c…</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/696/">Ver detalle</a></td>
+                </tr>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Creado</td>
+                  <td>Encargo fiduciario</td>
+                  <td>Importacion historica definitiva completada. Proyectos creados: 0; tipos creados: 0; agrupaciones c…</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/695/">Ver detalle</a></td>
+                </tr>
+              
+                <tr>
+                  <td>30/07/2026 07:26</td>
+                  <td>admin</td>
+                  <td>Creado</td>
+                  <td>Cliente</td>
+                  <td>Importacion historica definitiva completada. Proyectos creados: 0; tipos creados: 0; agrupaciones c…</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="/fiduciary/audit/694/">Ver detalle</a></td>
+                </tr>
+              
+            </tbody>
+          </table>
+        </div>
+        
+  <nav class="pagination-bar" aria-label="Paginacion">
+    
+      <span class="btn btn-outline-secondary btn-sm disabled">Anterior</span>
+    
+    <span>Pagina 1 de 71</span>
+    
+      <a class="btn btn-outline-secondary btn-sm" href="?page=2">Siguiente</a>
+    
+  </nav>
+
+
+      </section>
+    </section>
+  </main>
+</div>
+
+  
+    <footer class="app-footer">© 2026 Constructora Centenario. Todos los derechos reservados.</footer>
+
+  
+  <script src="/static/js/theme.js?v=20260730"></script>
+  
+</body>
+</html>

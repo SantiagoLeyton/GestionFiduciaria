@@ -12,15 +12,15 @@
     })();
   </script>
   <title>{% block title %}Centenario Gestion Fiduciaria{% endblock %}</title>
-  <link rel="stylesheet" href="{% static 'vendor/bootstrap/bootstrap.min.css' %}">
-  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <link rel="stylesheet" href="{% static 'vendor/bootstrap/bootstrap.min.css' %}?v=5.3.3">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}?v=20260730">
 </head>
 <body>
   {% block body %}{% endblock %}
   {% if request.resolver_match.url_name != "home" and request.resolver_match.url_name != "login" %}
     {% include "includes/footer.html" %}
   {% endif %}
-  <script src="{% static 'js/theme.js' %}"></script>
+  <script src="{% static 'js/theme.js' %}?v=20260730"></script>
   {% block extra_js %}{% endblock %}
 </body>
 </html>

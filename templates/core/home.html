@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}Inicio | Centenario Gestión Fiduciaria{% endblock %}
 
@@ -8,28 +9,32 @@
   <main class="home-content">
     {% include "includes/messages.html" %}
     <section class="home-heading">
-      <div>
+      <a class="home-brand" href="{% url 'home' %}" aria-label="Inicio">
+        <img src="{% static 'assets/logo.png' %}" alt="Constructora Centenario" onerror="this.classList.add('is-missing'); this.nextElementSibling.hidden=false;">
+        <span hidden>Constructora Centenario</span>
+      </a>
+      <div class="home-heading-copy">
         <span class="eyebrow">Centenario Gestión Fiduciaria</span>
         <h1>Panel de módulos</h1>
+        <p>Acceda a las operaciones fiduciarias disponibles.</p>
       </div>
-      <p>Acceda rápidamente a las operaciones fiduciarias disponibles.</p>
     </section>
 
     <section class="module-grid" aria-label="Módulos disponibles">
-      <a class="module-card" href="{% url 'fiduciary:historical_import_list' %}"><span>⇧</span><strong>Importar libro histórico</strong><small>Carga inicial fiduciaria.</small></a>
-      <a class="module-card" href="{% url 'fiduciary:daily_report_list' %}"><span>⇪</span><strong>Importar reportes fiduciarios</strong><small>Reportes diarios consolidados.</small></a>
-      <a class="module-card" href="{% url 'real_estate:project_list' %}"><span>▣</span><strong>Proyectos</strong><small>Consulta y configuración.</small></a>
-      <a class="module-card" href="{% url 'real_estate:grouping_type_list' %}"><span>◇</span><strong>Tipos de agrupación</strong><small>Catálogo estructural.</small></a>
-      <a class="module-card" href="{% url 'real_estate:structural_group_list' %}"><span>▦</span><strong>Agrupaciones</strong><small>Estructura por proyecto.</small></a>
-      <a class="module-card" href="{% url 'real_estate:property_unit_list' %}"><span>▤</span><strong>Unidades</strong><small>Unidades inmobiliarias.</small></a>
-      <a class="module-card" href="{% url 'fiduciary:client_list' %}"><span>☻</span><strong>Clientes</strong><small>Información de titulares.</small></a>
-      <a class="module-card" href="{% url 'fiduciary:ownership_list' %}"><span>◉</span><strong>Titularidades</strong><small>Relación cliente-unidad.</small></a>
-      <a class="module-card" href="{% url 'fiduciary:assignment_list' %}"><span>□</span><strong>Encargos fiduciarios</strong><small>Vínculos contractuales.</small></a>
-      <a class="module-card" href="{% url 'fiduciary:observation_list' %}"><span>✎</span><strong>Observaciones</strong><small>Notas operativas.</small></a>
-      <a class="module-card" href="{% url 'fiduciary:novelty_list' %}"><span>✦</span><strong>Novedades</strong><small>Cambios e historial.</small></a>
-      <a class="module-card" href="{% url 'fiduciary:payment_list' %}"><span>▰</span><strong>Pagos</strong><small>Consulta de pagos.</small></a>
+      <a class="module-card" href="{% url 'fiduciary:historical_import_list' %}"><span class="module-icon">LH</span><strong>Importar libro histórico</strong><small>Carga inicial fiduciaria.</small></a>
+      <a class="module-card" href="{% url 'fiduciary:daily_report_list' %}"><span class="module-icon">RF</span><strong>Importar reportes fiduciarios</strong><small>Reportes diarios consolidados.</small></a>
+      <a class="module-card" href="{% url 'real_estate:project_list' %}"><span class="module-icon">PR</span><strong>Proyectos</strong><small>Consulta y configuración.</small></a>
+      <a class="module-card" href="{% url 'real_estate:grouping_type_list' %}"><span class="module-icon">TA</span><strong>Tipos de agrupación</strong><small>Catálogo estructural.</small></a>
+      <a class="module-card" href="{% url 'real_estate:structural_group_list' %}"><span class="module-icon">AG</span><strong>Agrupaciones</strong><small>Estructura por proyecto.</small></a>
+      <a class="module-card" href="{% url 'real_estate:property_unit_list' %}"><span class="module-icon">UN</span><strong>Unidades</strong><small>Unidades inmobiliarias.</small></a>
+      <a class="module-card" href="{% url 'fiduciary:client_list' %}"><span class="module-icon">CL</span><strong>Clientes</strong><small>Información de titulares.</small></a>
+      <a class="module-card" href="{% url 'fiduciary:ownership_list' %}"><span class="module-icon">TI</span><strong>Titularidades</strong><small>Relación cliente-unidad.</small></a>
+      <a class="module-card" href="{% url 'fiduciary:assignment_list' %}"><span class="module-icon">EF</span><strong>Encargos fiduciarios</strong><small>Vínculos contractuales.</small></a>
+      <a class="module-card" href="{% url 'fiduciary:observation_list' %}"><span class="module-icon">OB</span><strong>Observaciones</strong><small>Notas operativas.</small></a>
+      <a class="module-card" href="{% url 'fiduciary:novelty_list' %}"><span class="module-icon">NV</span><strong>Novedades</strong><small>Cambios e historial.</small></a>
+      <a class="module-card" href="{% url 'fiduciary:payment_list' %}"><span class="module-icon">PG</span><strong>Pagos</strong><small>Consulta de pagos.</small></a>
       {% if request.user.is_accounting_admin or request.user.is_superuser %}
-        <a class="module-card" href="{% url 'fiduciary:audit_list' %}"><span>◎</span><strong>Auditoría</strong><small>Trazabilidad registrada.</small></a>
+        <a class="module-card" href="{% url 'fiduciary:audit_list' %}"><span class="module-icon">AU</span><strong>Auditoría</strong><small>Trazabilidad registrada.</small></a>
       {% endif %}
     </section>
   </main>
