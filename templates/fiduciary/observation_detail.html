@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}Detalle de observacion | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Detalle de observacion</h1>
+          <p>{{ observation.property_unit.project.name }} - {{ observation.property_unit.name|default:observation.property_unit.code }}</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:observation_list' %}">Volver</a>
+      </div>
+
+      <section class="data-section">
+        <div class="row g-3">
+          <div class="col-md-4"><strong>Fecha</strong><br>{{ observation.created_at|date:"d/m/Y H:i" }}</div>
+          <div class="col-md-4"><strong>Origen</strong><br>{{ observation.get_origin_display }}</div>
+          <div class="col-md-4"><strong>Usuario</strong><br>{{ observation.imported_by.get_full_name|default:observation.imported_by.username }}</div>
+          <div class="col-md-4"><strong>Unidad</strong><br><a href="{% url 'real_estate:property_unit_history' observation.property_unit.pk %}">{{ observation.property_unit.name|default:observation.property_unit.code }}</a></div>
+          <div class="col-md-4"><strong>Cliente</strong><br>{% if observation.client %}<a href="{% url 'fiduciary:client_detail' observation.client.pk %}">{{ observation.client.full_name }}</a>{% else %}-{% endif %}</div>
+          <div class="col-md-4"><strong>Encargo</strong><br>{% if observation.assignment %}<a href="{% url 'fiduciary:assignment_detail' observation.assignment.pk %}">{{ observation.assignment.assignment_number }}</a>{% else %}-{% endif %}</div>
+          {% if observation.imported_file %}
+            <div class="col-12 text-muted">Archivo: {{ observation.imported_file.original_name }} - {{ observation.source_sheet }} fila {{ observation.source_row }}</div>
+          {% endif %}
+          <div class="col-12"><strong>Resumen</strong><br>{% if observation.summary %}{{ observation.summary|linebreaksbr }}{% else %}&mdash;{% endif %}</div>
+          <div class="col-12"><strong>Detalle</strong><br>{% if observation.detail %}{{ observation.detail|linebreaksbr }}{% else %}&mdash;{% endif %}</div>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

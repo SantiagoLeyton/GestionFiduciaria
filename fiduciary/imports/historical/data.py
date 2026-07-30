@@ -98,6 +98,9 @@ class HistoricalNovelty:
     unit_code: str | None = None
     unit_name: str | None = None
     assignment: HistoricalAssignment | None = None
+    historical_section: str = ""
+    section_month: int | None = None
+    section_year: int | None = None
     cells: list[HistoricalNoveltyCell] = field(default_factory=list)
 
 
@@ -112,6 +115,7 @@ class HistoricalRow:
     unit_code: str | None
     unit_name: str | None
     assignment: HistoricalAssignment | None
+    observation: str = ""
     clients: list[HistoricalClient] = field(default_factory=list)
     payments: list[HistoricalMonthlyPayment] = field(default_factory=list)
 

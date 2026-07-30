@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}Detalle de novedad | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>{{ novelty.display_type }}</h1>
+          <p>{{ novelty.property_unit.project.name }} - {{ novelty.property_unit.name|default:novelty.property_unit.code }}</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:novelty_list' %}">Volver</a>
+      </div>
+
+      <section class="data-section">
+        <div class="row g-3">
+          <div class="col-md-4"><strong>Tipo</strong><br>{{ novelty.display_type }}</div>
+          <div class="col-md-4"><strong>Unidad</strong><br><a href="{% url 'real_estate:property_unit_history' novelty.property_unit.pk %}">{{ novelty.property_unit.name|default:novelty.property_unit.code }}</a></div>
+          <div class="col-md-4"><strong>Origen</strong><br>{{ novelty.get_origin_display }}</div>
+          <div class="col-md-4"><strong>Fecha efectiva</strong><br>{{ novelty.effective_date|default:"-" }}</div>
+          <div class="col-md-4"><strong>Fecha de registro</strong><br>{{ novelty.created_at|date:"d/m/Y H:i" }}</div>
+          <div class="col-md-4"><strong>Usuario</strong><br>{{ novelty.created_by.get_full_name|default:novelty.created_by.username }}</div>
+          <div class="col-md-6"><strong>Cliente anterior</strong><br>{% if novelty.previous_client %}<a href="{% url 'fiduciary:client_detail' novelty.previous_client.pk %}">{{ novelty.previous_client.full_name }}</a>{% elif novelty.historical_client %}<a href="{% url 'fiduciary:client_detail' novelty.historical_client.pk %}">{{ novelty.historical_client.full_name }}</a>{% else %}-{% endif %}</div>
+          <div class="col-md-6"><strong>Cliente nuevo</strong><br>{% if novelty.new_client %}<a href="{% url 'fiduciary:client_detail' novelty.new_client.pk %}">{{ novelty.new_client.full_name }}</a>{% else %}-{% endif %}</div>
+          <div class="col-md-6"><strong>Encargo anterior</strong><br>{% if novelty.previous_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.previous_assignment.pk %}">{{ novelty.previous_assignment.assignment_number }}</a>{% elif novelty.historical_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.historical_assignment.pk %}">{{ novelty.historical_assignment.assignment_number }}</a>{% else %}-{% endif %}</div>
+          <div class="col-md-6"><strong>Encargo nuevo</strong><br>{% if novelty.new_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.new_assignment.pk %}">{{ novelty.new_assignment.assignment_number }}</a>{% else %}-{% endif %}</div>
+          <div class="col-md-4"><strong>Estado</strong><br>{{ novelty.get_status_display }}</div>
+          {% if novelty.imported_file %}
+            <div class="col-md-8"><strong>Archivo de origen</strong><br>{{ novelty.imported_file.original_name }} - {{ novelty.source_sheet }} fila {{ novelty.source_row }}</div>
+          {% endif %}
+          <div class="col-12"><strong>Resumen</strong><br>{{ novelty.summary|default:"-"|linebreaksbr }}</div>
+          <div class="col-12"><strong>Detalle</strong><br>{{ novelty.detail|default:"-"|linebreaksbr }}</div>
+        </div>
+      </section>
+
+      <section class="data-section mt-4">
+        <div class="section-header">
+          <h2>Observaciones relacionadas</h2>
+          <span>{{ related_observations|length }} registro{{ related_observations|length|pluralize }}</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr><th>Fecha</th><th>Cliente</th><th>Encargo</th><th>Resumen</th><th>Detalle</th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for observation in related_observations %}
+                <tr>
+                  <td>{{ observation.created_at|date:"d/m/Y H:i" }}</td>
+                  <td>{% if observation.client %}<a href="{% url 'fiduciary:client_detail' observation.client.pk %}">{{ observation.client.full_name }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if observation.assignment %}<a href="{% url 'fiduciary:assignment_detail' observation.assignment.pk %}">{{ observation.assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if observation.summary %}{{ observation.summary|truncatechars:80 }}{% else %}&mdash;{% endif %}</td>
+                  <td>{% if observation.detail %}{{ observation.detail|truncatechars:80 }}{% else %}&mdash;{% endif %}</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:observation_detail' observation.pk %}">Ver detalle</a></td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="6">No hay observaciones relacionadas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

@@ -10,6 +10,7 @@ from .views import (
     ProjectStatusView,
     ProjectUpdateView,
     PropertyUnitCreateView,
+    PropertyUnitHistoryView,
     PropertyUnitListView,
     PropertyUnitStatusView,
     PropertyUnitUpdateView,
@@ -37,6 +38,7 @@ urlpatterns = [
     path("structural-groups/<int:pk>/<str:action>/", StructuralGroupStatusView.as_view(), name="structural_group_status"),
     path("property-units/", PropertyUnitListView.as_view(), name="property_unit_list"),
     path("property-units/new/", PropertyUnitCreateView.as_view(), name="property_unit_create"),
+    path("property-units/<int:pk>/history/", PropertyUnitHistoryView.as_view(), name="property_unit_history"),
     path("property-units/<int:pk>/edit/", PropertyUnitUpdateView.as_view(), name="property_unit_update"),
     path("property-units/<int:pk>/<str:action>/", PropertyUnitStatusView.as_view(), name="property_unit_status"),
 ]

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}Observaciones | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Observaciones</h1>
+          <p>Consulte observaciones importadas y registre observaciones manuales sobre unidades.</p>
+        </div>
+        {% if can_update %}<a class="btn btn-success" href="{% url 'fiduciary:observation_create' %}">Nueva observacion</a>{% endif %}
+      </div>
+
+      <form class="filter-panel real-estate-filter" method="get">
+        <div><label class="form-label" for="{{ filter_form.project.id_for_label }}">{{ filter_form.project.label }}</label>{{ filter_form.project }}</div>
+        <div><label class="form-label" for="{{ filter_form.property_unit.id_for_label }}">{{ filter_form.property_unit.label }}</label>{{ filter_form.property_unit }}</div>
+        <div><label class="form-label" for="{{ filter_form.client.id_for_label }}">{{ filter_form.client.label }}</label>{{ filter_form.client }}</div>
+        <div><label class="form-label" for="{{ filter_form.document.id_for_label }}">{{ filter_form.document.label }}</label>{{ filter_form.document }}</div>
+        <div><label class="form-label" for="{{ filter_form.assignment_number.id_for_label }}">{{ filter_form.assignment_number.label }}</label>{{ filter_form.assignment_number }}</div>
+        <div><label class="form-label" for="{{ filter_form.origin.id_for_label }}">{{ filter_form.origin.label }}</label>{{ filter_form.origin }}</div>
+        <div><label class="form-label" for="{{ filter_form.date_from.id_for_label }}">{{ filter_form.date_from.label }}</label>{{ filter_form.date_from }}</div>
+        <div><label class="form-label" for="{{ filter_form.date_to.id_for_label }}">{{ filter_form.date_to.label }}</label>{{ filter_form.date_to }}</div>
+        <div class="filter-actions"><button class="btn btn-success" type="submit">Buscar</button><a class="btn btn-outline-secondary" href="{% url 'fiduciary:observation_list' %}">Limpiar</a></div>
+      </form>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Observaciones registradas</h2><span>{{ observations|length }} registro{{ observations|length|pluralize }}</span></div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead><tr><th>Fecha</th><th>Proyecto</th><th>Unidad</th><th>Cliente</th><th>Encargo</th><th>Resumen</th><th>Detalle</th><th>Origen</th><th>Usuario</th><th>Acciones</th></tr></thead>
+            <tbody>
+              {% for observation in observations %}
+                <tr>
+                  <td>{{ observation.created_at|date:"d/m/Y H:i" }}</td>
+                  <td>{{ observation.property_unit.project.name }}</td>
+                  <td><a href="{% url 'real_estate:property_unit_history' observation.property_unit.pk %}">{{ observation.property_unit.name|default:observation.property_unit.code }}</a></td>
+                  <td>{% if observation.client %}<a href="{% url 'fiduciary:client_detail' observation.client.pk %}">{{ observation.client.full_name }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if observation.assignment %}<a href="{% url 'fiduciary:assignment_detail' observation.assignment.pk %}">{{ observation.assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if observation.summary %}{{ observation.summary|truncatechars:80 }}{% else %}&mdash;{% endif %}</td>
+                  <td>{% if observation.detail %}{{ observation.detail|truncatechars:80 }}{% else %}&mdash;{% endif %}</td>
+                  <td>{{ observation.get_origin_display }}</td>
+                  <td>{{ observation.imported_by.get_full_name|default:observation.imported_by.username }}</td>
+                  <td class="actions-cell">
+                    <a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:observation_detail' observation.pk %}">Ver detalle</a>
+                    {% if can_update and observation.origin == "manual" %}
+                      <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:observation_update' observation.pk %}">Editar</a>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="10">No hay observaciones con los filtros seleccionados.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% include "includes/pagination.html" %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

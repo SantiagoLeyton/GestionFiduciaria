@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Detalle de auditoria | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Detalle de auditoria</h1>
+          <p>{{ record.get_entity_kind_display }} - {{ record.get_action_display }}</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:audit_list' %}">Volver</a>
+      </div>
+
+      <section class="data-section">
+        <div class="row g-3">
+          <div class="col-md-4"><strong>Responsable</strong><br>{{ responsible.get_full_name|default:responsible.username }}</div>
+          <div class="col-md-4"><strong>Fecha</strong><br>{{ record.created_at|date:"d/m/Y" }}</div>
+          <div class="col-md-4"><strong>Hora</strong><br>{{ record.created_at|date:"H:i:s" }}</div>
+          <div class="col-md-4"><strong>Accion</strong><br>{{ record.get_action_display }}</div>
+          <div class="col-md-4"><strong>Entidad</strong><br>{{ record.get_entity_kind_display }}</div>
+          {% if record.entity_id %}<div class="col-md-4"><strong>ID de entidad</strong><br>{{ record.entity_id }}</div>{% endif %}
+          {% if record.summary %}<div class="col-12"><strong>Motivo / descripcion</strong><br>{{ record.summary|linebreaksbr }}</div>{% endif %}
+          {% if record.batch.summary %}<div class="col-12"><strong>Informacion relacionada</strong><br>{{ record.batch.summary|linebreaksbr }}</div>{% endif %}
+          <div class="col-md-6"><strong>Lote</strong><br>{{ record.batch }}</div>
+          {% if record.imported_file %}<div class="col-md-6"><strong>Archivo</strong><br>{{ record.imported_file.original_name }}</div>{% endif %}
+          {% if record.sheet_result %}<div class="col-md-4"><strong>Hoja</strong><br>{{ record.sheet_result.sheet_name }}</div>{% endif %}
+          {% if record.source_row %}<div class="col-md-4"><strong>Fila</strong><br>{{ record.source_row }}</div>{% endif %}
+          {% if record.source_column %}<div class="col-md-4"><strong>Columna</strong><br>{{ record.source_column }}</div>{% endif %}
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

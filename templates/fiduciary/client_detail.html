@@ -37,6 +37,35 @@
           {% empty %}<tr><td colspan="5">Sin encargos fiduciarios relacionados.</td></tr>{% endfor %}
         </tbody></table></div>
       </section>
+      <section class="data-section">
+        <h2>Observaciones relacionadas</h2>
+        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Fecha</th><th>Unidad</th><th>Encargo</th><th>Origen</th><th>Resumen</th></tr></thead><tbody>
+          {% for observation in client_obj.historical_observations.all %}
+            <tr>
+              <td>{{ observation.created_at|date:"d/m/Y H:i" }}</td>
+              <td><a href="{% url 'real_estate:property_unit_history' observation.property_unit.pk %}">{{ observation.property_unit.name|default:observation.property_unit.code }}</a></td>
+              <td>{% if observation.assignment %}<a href="{% url 'fiduciary:assignment_detail' observation.assignment.pk %}">{{ observation.assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+              <td>{{ observation.get_origin_display }}</td>
+              <td>{{ observation.summary|default:observation.detail|truncatechars:100 }}</td>
+            </tr>
+          {% empty %}<tr><td colspan="5">Sin observaciones relacionadas.</td></tr>{% endfor %}
+        </tbody></table></div>
+      </section>
+      <section class="data-section">
+        <h2>Novedades relacionadas</h2>
+        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Fecha</th><th>Unidad</th><th>Tipo</th><th>Encargo anterior</th><th>Encargo nuevo</th><th>Resumen</th></tr></thead><tbody>
+          {% for novelty in novelties %}
+            <tr>
+              <td>{{ novelty.effective_date|default:novelty.created_at|date:"d/m/Y" }}</td>
+              <td><a href="{% url 'real_estate:property_unit_history' novelty.property_unit.pk %}">{{ novelty.property_unit.name|default:novelty.property_unit.code }}</a></td>
+              <td>{{ novelty.display_type }}</td>
+              <td>{% if novelty.previous_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.previous_assignment.pk %}">{{ novelty.previous_assignment.assignment_number }}</a>{% elif novelty.historical_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.historical_assignment.pk %}">{{ novelty.historical_assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+              <td>{% if novelty.new_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.new_assignment.pk %}">{{ novelty.new_assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+              <td>{{ novelty.summary|default:novelty.detail|truncatechars:100 }}</td>
+            </tr>
+          {% empty %}<tr><td colspan="6">Sin novedades relacionadas.</td></tr>{% endfor %}
+        </tbody></table></div>
+      </section>
     </section>
   </main>
 </div>

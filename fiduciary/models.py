@@ -237,67 +237,250 @@ class FiduciaryAssignmentHolder(DatedActiveRelation):
         return f"{self.assignment.assignment_number} - {self.client.full_name} ({role})"
 
 
-class FiduciaryNovelty(models.Model):
-    class NoveltyType(models.TextChoices):
-        CESSION = "cession", "Cesion"
-        WITHDRAWAL = "withdrawal", "Retiro"
-        EXCLUSION = "exclusion", "Exclusion"
-        ADMINISTRATIVE_CORRECTION = "administrative_correction", "Correccion administrativa"
-        SUBSTITUTION = "substitution", "Sustitucion"
-        OTHER = "other", "Otro"
+class ImportedHistoricalObservation(models.Model):
+    class Origin(models.TextChoices):
+        MAIN_TABLE_OBSERVATION = "main_table_observation", "Observacion tabla principal"
+        MANUAL = "manual", "Observacion manual"
 
     class Status(models.TextChoices):
-        APPLIED = "applied", "Aplicada"
-        FAILED = "failed", "Fallida"
+        IMPORTED = "imported", "Importada"
+        PARTIAL = "partial", "Parcial"
 
-    project = models.ForeignKey("real_estate.Project", on_delete=models.PROTECT, related_name="fiduciary_novelties")
-    property_unit = models.ForeignKey(PropertyUnit, on_delete=models.PROTECT, related_name="fiduciary_novelties")
-    novelty_type = models.CharField("tipo de novedad", max_length=32, choices=NoveltyType.choices)
-    status = models.CharField("estado", max_length=16, choices=Status.choices, default=Status.APPLIED)
-    effective_date = models.DateField("fecha efectiva")
-    reason = models.TextField("motivo")
-    other_description = models.TextField("descripcion de la novedad", blank=True)
-    previous_primary_client = models.ForeignKey(
-        Client, on_delete=models.PROTECT, related_name="novelties_as_previous_primary", blank=True, null=True
+    batch = models.ForeignKey("ImportBatch", on_delete=models.PROTECT, related_name="historical_observations", blank=True, null=True)
+    imported_file = models.ForeignKey("ImportedFile", on_delete=models.PROTECT, related_name="historical_observations", blank=True, null=True)
+    sheet_result = models.ForeignKey("ImportedSheetResult", on_delete=models.PROTECT, related_name="historical_observations", blank=True, null=True)
+    source_novelty = models.ForeignKey(
+        "ImportedHistoricalNovelty",
+        on_delete=models.PROTECT,
+        related_name="structured_observations",
+        blank=True,
+        null=True,
     )
-    new_primary_client = models.ForeignKey(
-        Client, on_delete=models.PROTECT, related_name="novelties_as_new_primary", blank=True, null=True
+    project = models.ForeignKey("real_estate.Project", on_delete=models.PROTECT, related_name="historical_observations", blank=True, null=True)
+    property_unit = models.ForeignKey(PropertyUnit, on_delete=models.PROTECT, related_name="historical_observations", null=True)
+    client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name="historical_observations", blank=True, null=True)
+    assignment = models.ForeignKey(FiduciaryAssignment, on_delete=models.PROTECT, related_name="historical_observations", blank=True, null=True)
+    related_payments = models.ManyToManyField("Payment", related_name="historical_observations", blank=True)
+    origin = models.CharField("origen", max_length=32, choices=Origin.choices)
+    status = models.CharField("estado", max_length=16, choices=Status.choices, default=Status.IMPORTED)
+    historical_section = models.CharField("seccion historica", max_length=180, blank=True)
+    historical_month = models.PositiveSmallIntegerField("mes historico", blank=True, null=True)
+    historical_year = models.PositiveSmallIntegerField("ano historico", blank=True, null=True)
+    summary = models.TextField("resumen", blank=True)
+    detail = models.TextField("detalle", blank=True)
+    source_sheet = models.CharField("hoja origen", max_length=150, blank=True)
+    source_row = models.PositiveIntegerField("fila origen", blank=True, null=True)
+    source_order = models.PositiveIntegerField("orden origen", default=0)
+    dedupe_key = models.CharField("clave de deduplicacion", max_length=64, unique=True)
+    source_payload = models.JSONField("payload sanitizado", default=dict, blank=True)
+    imported_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="imported_historical_observations")
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="updated_historical_observations",
+        blank=True,
+        null=True,
     )
-    previous_assignment = models.ForeignKey(
-        FiduciaryAssignment, on_delete=models.PROTECT, related_name="novelties_as_previous_assignment", blank=True, null=True
-    )
-    new_assignment = models.ForeignKey(
-        FiduciaryAssignment, on_delete=models.PROTECT, related_name="novelties_as_new_assignment", blank=True, null=True
-    )
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="fiduciary_novelties")
-    ip_address = models.GenericIPAddressField("direccion IP", blank=True, null=True)
-    affected_payments_count = models.PositiveIntegerField("pagos afectados", default=0)
-    before_data = models.JSONField("datos anteriores", default=dict, blank=True)
-    after_data = models.JSONField("datos nuevos", default=dict, blank=True)
-    result_message = models.TextField("resultado", blank=True)
-    created_at = models.DateTimeField("fecha de registro", auto_now_add=True)
+    created_at = models.DateTimeField("fecha de creacion", auto_now_add=True)
     updated_at = models.DateTimeField("fecha de actualizacion", auto_now=True)
 
     class Meta:
-        ordering = ("-effective_date", "-created_at", "-pk")
+        ordering = ("historical_year", "historical_month", "source_order", "source_row", "pk")
         indexes = [
-            models.Index(fields=["project", "property_unit"], name="fiduciary_novelty_unit_idx"),
-            models.Index(fields=["novelty_type", "status"], name="fiduciary_novelty_type_idx"),
-            models.Index(fields=["effective_date"], name="fiduciary_novelty_date_idx"),
+            models.Index(fields=["origin", "status"], name="fid_histobs_origin_status_idx"),
+            models.Index(fields=["property_unit", "source_order"], name="fid_histobs_unit_order_idx"),
+            models.Index(fields=["client"], name="fid_histobs_client_idx"),
+            models.Index(fields=["assignment"], name="fid_histobs_assignment_idx"),
         ]
 
     def clean(self):
         super().clean()
-        self.reason = self.reason.strip()
-        self.other_description = self.other_description.strip()
-        self.result_message = self.result_message.strip()
-        if self.property_unit_id and self.project_id and self.property_unit.project_id != self.project_id:
-            raise ValidationError({"property_unit": "La unidad no pertenece al proyecto seleccionado."})
-        if self.novelty_type == self.NoveltyType.OTHER and not self.other_description:
-            raise ValidationError({"other_description": "Describa la novedad."})
+        self.historical_section = self.historical_section.strip()
+        self.summary = self.summary.strip()
+        self.detail = self.detail.strip()
+        self.source_sheet = self.source_sheet.strip()
+        self.dedupe_key = self.dedupe_key.strip()
+        if not self.project_id and self.property_unit_id:
+            self.project = self.property_unit.project
+        if not self.property_unit_id:
+            raise ValidationError({"property_unit": "La unidad es obligatoria para registrar una observacion."})
+        if self.origin == self.Origin.MANUAL and self.client_id and self.property_unit_id:
+            related = UnitOwnership.objects.filter(client=self.client, property_unit=self.property_unit).exists()
+            related = related or FiduciaryAssignmentHolder.objects.filter(
+                client=self.client,
+                assignment__property_unit=self.property_unit,
+            ).exists()
+            related = related or ImportedHistoricalObservation.objects.filter(
+                client=self.client,
+                property_unit=self.property_unit,
+            ).exclude(pk=self.pk).exists()
+            if not related:
+                raise ValidationError({"client": "El cliente seleccionado no pertenece al historial de la unidad."})
+        if self.assignment_id and self.property_unit_id and self.assignment.property_unit_id != self.property_unit_id:
+            raise ValidationError({"assignment": "El encargo seleccionado no pertenece a la unidad."})
+        if self.origin == self.Origin.MANUAL and not self.detail:
+            raise ValidationError({"detail": "Registre el detalle de la observacion."})
+        if self.historical_month and not 1 <= self.historical_month <= 12:
+            raise ValidationError({"historical_month": "El mes debe estar entre 1 y 12."})
+
+    def save(self, *args, **kwargs):
+        if not self.dedupe_key:
+            import uuid
+
+            self.dedupe_key = uuid.uuid4().hex
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.get_novelty_type_display()} - {self.property_unit}"
+        return f"{self.get_origin_display()} - fila {self.source_row}"
+
+
+class OperationalNovelty(models.Model):
+    class NoveltyType(models.TextChoices):
+        CESSION = "cession", "Cesion"
+        WITHDRAWAL = "withdrawal", "Retiro"
+        EXCLUSION = "exclusion", "Exclusion"
+        SUBSTITUTION = "substitution", "Sustitucion"
+        ADMINISTRATIVE_CORRECTION = "administrative_correction", "Correccion administrativa"
+        OTHER = "other", "Otro"
+        HISTORICAL = "historical", "Historica importada"
+
+    class Origin(models.TextChoices):
+        MANUAL = "manual", "Manual"
+        AUTOMATIC = "automatic", "Automatica"
+        HISTORICAL_IMPORT = "historical_import", "Importacion historica"
+
+    class Status(models.TextChoices):
+        APPLIED = "applied", "Aplicada"
+        IMPORTED = "imported", "Importada"
+        DESCRIPTIVE = "descriptive", "Descriptiva"
+
+    project = models.ForeignKey("real_estate.Project", on_delete=models.PROTECT, related_name="operational_novelties", blank=True, null=True)
+    property_unit = models.ForeignKey(PropertyUnit, on_delete=models.PROTECT, related_name="operational_novelties")
+    novelty_type = models.CharField("tipo de novedad", max_length=32, choices=NoveltyType.choices)
+    other_type = models.CharField("cual", max_length=120, blank=True)
+    origin = models.CharField("origen", max_length=24, choices=Origin.choices, default=Origin.MANUAL)
+    status = models.CharField("estado", max_length=24, choices=Status.choices, default=Status.APPLIED)
+    effective_date = models.DateField("fecha efectiva", blank=True, null=True)
+    previous_client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name="novelties_as_previous_client", blank=True, null=True)
+    new_client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name="novelties_as_new_client", blank=True, null=True)
+    historical_client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name="historical_novelties", blank=True, null=True)
+    previous_assignment = models.ForeignKey(
+        FiduciaryAssignment,
+        on_delete=models.PROTECT,
+        related_name="novelties_as_previous_assignment",
+        blank=True,
+        null=True,
+    )
+    new_assignment = models.ForeignKey(
+        FiduciaryAssignment,
+        on_delete=models.PROTECT,
+        related_name="novelties_as_new_assignment",
+        blank=True,
+        null=True,
+    )
+    historical_assignment = models.ForeignKey(
+        FiduciaryAssignment,
+        on_delete=models.PROTECT,
+        related_name="historical_novelties",
+        blank=True,
+        null=True,
+    )
+    summary = models.TextField("resumen", blank=True)
+    detail = models.TextField("detalle", blank=True)
+    source_observation = models.OneToOneField(
+        ImportedHistoricalObservation,
+        on_delete=models.PROTECT,
+        related_name="operational_novelty",
+        blank=True,
+        null=True,
+    )
+    source_novelty = models.ForeignKey(
+        "ImportedHistoricalNovelty",
+        on_delete=models.PROTECT,
+        related_name="operational_novelties",
+        blank=True,
+        null=True,
+    )
+    batch = models.ForeignKey("ImportBatch", on_delete=models.PROTECT, related_name="operational_novelties", blank=True, null=True)
+    imported_file = models.ForeignKey("ImportedFile", on_delete=models.PROTECT, related_name="operational_novelties", blank=True, null=True)
+    source_sheet = models.CharField("hoja origen", max_length=150, blank=True)
+    source_row = models.PositiveIntegerField("fila origen", blank=True, null=True)
+    historical_section = models.CharField("seccion historica", max_length=180, blank=True)
+    historical_month = models.PositiveSmallIntegerField("mes historico", blank=True, null=True)
+    historical_year = models.PositiveSmallIntegerField("ano historico", blank=True, null=True)
+    source_payload = models.JSONField("payload sanitizado", default=dict, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_operational_novelties")
+    created_at = models.DateTimeField("fecha de creacion", auto_now_add=True)
+    updated_at = models.DateTimeField("fecha de actualizacion", auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at", "-pk")
+        indexes = [
+            models.Index(fields=["property_unit", "created_at"], name="fid_opnov_unit_created_idx"),
+            models.Index(fields=["novelty_type", "origin"], name="fid_opnov_type_origin_idx"),
+            models.Index(fields=["previous_client"], name="fid_opnov_prev_client_idx"),
+            models.Index(fields=["new_client"], name="fid_opnov_new_client_idx"),
+            models.Index(fields=["historical_client"], name="fid_opnov_hist_client_idx"),
+            models.Index(fields=["previous_assignment"], name="fid_opnov_prev_assign_idx"),
+            models.Index(fields=["new_assignment"], name="fid_opnov_new_assign_idx"),
+            models.Index(fields=["historical_assignment"], name="fid_opnov_hist_assign_idx"),
+        ]
+
+    def clean(self):
+        super().clean()
+        self.other_type = self.other_type.strip()
+        self.summary = self.summary.strip()
+        self.detail = self.detail.strip()
+        self.source_sheet = self.source_sheet.strip()
+        self.historical_section = self.historical_section.strip()
+        if not self.project_id and self.property_unit_id:
+            self.project = self.property_unit.project
+        if self.novelty_type == self.NoveltyType.OTHER and not self.other_type:
+            raise ValidationError({"other_type": "Indique cual es la novedad."})
+        for field_name in ("previous_assignment", "new_assignment", "historical_assignment"):
+            assignment = getattr(self, field_name)
+            if assignment and self.property_unit_id and assignment.property_unit_id != self.property_unit_id:
+                raise ValidationError({field_name: "El encargo no pertenece a la unidad seleccionada."})
+        for field_name in ("previous_client", "new_client", "historical_client"):
+            client = getattr(self, field_name)
+            if (
+                field_name == "historical_client"
+                and client
+                and self.origin == self.Origin.HISTORICAL_IMPORT
+                and self.source_novelty_id
+            ):
+                continue
+            if (
+                field_name == "new_client"
+                and client
+                and self.novelty_type in {self.NoveltyType.CESSION, self.NoveltyType.SUBSTITUTION}
+                and self.origin in {self.Origin.MANUAL, self.Origin.AUTOMATIC}
+            ):
+                continue
+            if client and self.property_unit_id and not self._client_belongs_to_unit_history(client):
+                raise ValidationError({field_name: "El cliente no pertenece al contexto historico o actual de la unidad."})
+        if self.historical_month and not 1 <= self.historical_month <= 12:
+            raise ValidationError({"historical_month": "El mes debe estar entre 1 y 12."})
+
+    def _client_belongs_to_unit_history(self, client):
+        if UnitOwnership.objects.filter(property_unit_id=self.property_unit_id, client=client).exists():
+            return True
+        if FiduciaryAssignmentHolder.objects.filter(assignment__property_unit_id=self.property_unit_id, client=client).exists():
+            return True
+        if ImportedHistoricalObservation.objects.filter(property_unit_id=self.property_unit_id, client=client).exists():
+            return True
+        return OperationalNovelty.objects.filter(
+            property_unit_id=self.property_unit_id,
+        ).filter(
+            models.Q(previous_client=client) | models.Q(new_client=client) | models.Q(historical_client=client)
+        ).exclude(pk=self.pk).exists()
+
+    @property
+    def display_type(self):
+        return self.other_type if self.novelty_type == self.NoveltyType.OTHER and self.other_type else self.get_novelty_type_display()
+
+    def __str__(self):
+        return f"{self.display_type} - {self.property_unit}"
 
 
 class ImportBatch(models.Model):

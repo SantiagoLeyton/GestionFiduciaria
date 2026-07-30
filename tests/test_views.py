@@ -166,7 +166,12 @@ def test_home_renders_private_page(client, commercial_user):
     response = client.get(reverse("home"))
 
     assert response.status_code == 200
-    assert "Fase 1 activa" in response.content.decode()
+    content = response.content.decode()
+    assert "module-card" in content
+    assert reverse("fiduciary:historical_import_list") in content
+    assert reverse("fiduciary:payment_list") in content
+    assert "sidebar" not in content
+    assert "© 2026 Constructora Centenario. Todos los derechos reservados." in content
 
 
 @pytest.mark.django_db
@@ -175,9 +180,9 @@ def test_navigation_for_commercial_does_not_show_admin_future_items(client, comm
     response = client.get(reverse("home"))
     content = response.content.decode()
 
-    assert "Importar libro historico" in content
+    assert reverse("fiduciary:historical_import_list") in content
     assert "Auditoria" not in content
-    assert "Usuarios" in content
+    assert "Usuarios" not in content
 
 
 @pytest.mark.django_db
@@ -186,7 +191,51 @@ def test_navigation_for_accounting_admin_shows_admin_future_items(client, accoun
     response = client.get(reverse("home"))
     content = response.content.decode()
 
-    assert "Auditoria" in content
-    assert "Usuarios" in content
+    assert reverse("fiduciary:audit_list") in content
+    assert "Usuarios" not in content
     assert accounting_admin_user.role_label in content
     assert "Administrador de Contabilidad" not in content
+
+
+@pytest.mark.django_db
+def test_internal_pages_keep_sidebar_and_remove_static_header_search(client, accounting_admin_user):
+    client.force_login(accounting_admin_user)
+
+    response = client.get(reverse("fiduciary:historical_import_list"))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert 'class="sidebar"' in content
+    assert "assets/logo.png" in content
+    assert "data-theme-toggle" in content
+    assert "Buscar proyectos" not in content
+    assert "search-placeholder" not in content
+    assert "Usuarios" not in content
+    assert "© 2026 Constructora Centenario. Todos los derechos reservados." in content
+
+
+@pytest.mark.django_db
+def test_login_uses_static_visual_asset_and_footer_text(client):
+    response = client.get(reverse("login"))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "assets/login.gif" in content
+    assert "Contraseña" in content
+    assert "Mantener sesión iniciada" in content
+    assert "Iniciar sesión" in content
+    assert "Todo acceso no autorizado" not in content
+    assert "© 2026 Constructora Centenario. Todos los derechos reservados." in content
+
+
+@pytest.mark.django_db
+def test_theme_script_and_persistence_hook_are_present(client, commercial_user):
+    client.force_login(commercial_user)
+
+    response = client.get(reverse("home"))
+    content = response.content.decode()
+
+    assert "js/theme.js" in content
+    assert "pagosfiducia-theme" in content
+    assert "data-theme-toggle" in content
+    assert "aria-label=\"Cambiar tema\"" in content

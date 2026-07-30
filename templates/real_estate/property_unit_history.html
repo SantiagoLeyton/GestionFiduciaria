@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block title %}Historial de unidad | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Historial de unidad</h1>
+          <p>{{ property_unit.project.name }} · {{ property_unit.name|default:property_unit.code }}</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'real_estate:property_unit_list' %}">Volver</a>
+      </div>
+
+      <form class="row g-2 mb-3" method="get">
+        <div class="col-md-5">
+          <label class="form-label" for="assignment-filter">Encargo</label>
+          <select class="form-select" id="assignment-filter" name="assignment">
+            <option value="">Todos los encargos</option>
+            {% for assignment in assignment_filter_options %}
+              <option value="{{ assignment.pk }}" {% if selected_assignment_id == assignment.pk|stringformat:"s" %}selected{% endif %}>
+                {{ assignment.assignment_number }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2 align-self-end">
+          <button class="btn btn-success w-100" type="submit">Filtrar</button>
+        </div>
+      </form>
+
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Observaciones</h2>
+          <span>{{ observations|length }} registro{{ observations|length|pluralize }}</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Cliente</th>
+                <th>Encargo</th>
+                <th>Contenido</th>
+                <th>Origen</th>
+                <th>Usuario</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for observation in observations %}
+                <tr>
+                  <td>{{ observation.created_at|date:"d/m/Y H:i" }}</td>
+                  <td>{% if observation.client %}<a href="{% url 'fiduciary:client_detail' observation.client.pk %}">{{ observation.client.full_name }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if observation.assignment %}<a href="{% url 'fiduciary:assignment_detail' observation.assignment.pk %}">{{ observation.assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+                  <td>{{ observation.detail|default:observation.summary|linebreaksbr }}</td>
+                  <td>{{ observation.get_origin_display }}</td>
+                  <td>{{ observation.imported_by.get_full_name|default:observation.imported_by.username }}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="6">No hay observaciones registradas para esta unidad.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="data-section mt-4">
+        <div class="section-header">
+          <h2>Novedades</h2>
+          <span>{{ novelties|length }} registro{{ novelties|length|pluralize }}</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr>
+                <th>Fecha / seccion</th>
+                <th>Tipo</th>
+                <th>Titular anterior</th>
+                <th>Titular nuevo</th>
+                <th>Encargo anterior</th>
+                <th>Encargo nuevo</th>
+                <th>Resumen</th>
+                <th>Origen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for novelty in novelties %}
+                <tr>
+                  <td>
+                    {% if novelty.effective_date %}
+                      {{ novelty.effective_date|date:"d/m/Y" }}
+                    {% elif novelty.historical_section %}
+                      {{ novelty.historical_section }}
+                    {% else %}
+                      {{ novelty.created_at|date:"d/m/Y" }}
+                    {% endif %}
+                  </td>
+                  <td>{{ novelty.display_type }}</td>
+                  <td>{% if novelty.previous_client %}<a href="{% url 'fiduciary:client_detail' novelty.previous_client.pk %}">{{ novelty.previous_client.full_name }}</a>{% elif novelty.historical_client %}<a href="{% url 'fiduciary:client_detail' novelty.historical_client.pk %}">{{ novelty.historical_client.full_name }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if novelty.new_client %}<a href="{% url 'fiduciary:client_detail' novelty.new_client.pk %}">{{ novelty.new_client.full_name }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if novelty.previous_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.previous_assignment.pk %}">{{ novelty.previous_assignment.assignment_number }}</a>{% elif novelty.historical_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.historical_assignment.pk %}">{{ novelty.historical_assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if novelty.new_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.new_assignment.pk %}">{{ novelty.new_assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+                  <td>{{ novelty.summary|default:novelty.detail|linebreaksbr }}</td>
+                  <td>{{ novelty.get_origin_display }}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="8">No hay novedades registradas para esta unidad.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

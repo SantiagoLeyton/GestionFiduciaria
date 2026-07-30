@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load money %}
 
 {% block title %}Previsualizacion reporte diario | Centenario Gestion Fiduciaria{% endblock %}
 
@@ -29,7 +30,7 @@
           <div class="col-md-2"><strong>Encargo no encontrado</strong><div>{{ assignment_not_found_count }}</div></div>
           <div class="col-md-2"><strong>Fechas invalidas</strong><div>{{ invalid_date_count }}</div></div>
           <div class="col-md-2"><strong>Valores invalidos</strong><div>{{ invalid_amount_count }}</div></div>
-          <div class="col-md-3"><strong>Total monetario valido</strong><div>{{ summary.valid_amount|default:"0" }}</div></div>
+          <div class="col-md-3"><strong>Total monetario valido</strong><div>{{ summary.valid_amount|default:"0"|money_co }}</div></div>
         </div>
         {% if blocking_count %}<div class="alert alert-warning mt-3">El lote tiene errores bloqueantes. Resuelva los encargos pendientes o corrija el archivo.</div>{% endif %}
       </section>
@@ -62,7 +63,7 @@
               {% for row in rows %}
                 <tr>
                   <td>{{ row.sheet_name }}</td><td>{{ row.row_number }}</td><td>{{ row.original_assignment_number }}</td>
-                  <td>{{ row.payment_date|date:"d/m/Y"|default:"-" }}</td><td>{{ row.amount|default:"-" }}</td><td>{{ row.concept|default:"-" }}</td>
+                  <td>{{ row.payment_date|date:"d/m/Y"|default:"-" }}</td><td>{{ row.amount|money_co }}</td><td>{{ row.concept|default:"-" }}</td>
                   <td>{{ row.get_status_display }}</td>
                   <td>{% if row.status == "assignment_not_found" and can_import %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:daily_report_resolve' batch.pk row.pk %}">Resolver</a>{% endif %}</td>
                 </tr>

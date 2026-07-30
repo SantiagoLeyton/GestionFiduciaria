@@ -1,15 +1,26 @@
 {% load static %}
 <!doctype html>
-<html lang="es">
+<html lang="es" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    (function () {
+      var stored = localStorage.getItem("pagosfiducia-theme");
+      var theme = stored || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
   <title>{% block title %}Centenario Gestion Fiduciaria{% endblock %}</title>
   <link rel="stylesheet" href="{% static 'vendor/bootstrap/bootstrap.min.css' %}">
   <link rel="stylesheet" href="{% static 'css/app.css' %}">
 </head>
 <body>
   {% block body %}{% endblock %}
+  {% if request.resolver_match.url_name != "home" and request.resolver_match.url_name != "login" %}
+    {% include "includes/footer.html" %}
+  {% endif %}
+  <script src="{% static 'js/theme.js' %}"></script>
   {% block extra_js %}{% endblock %}
 </body>
 </html>

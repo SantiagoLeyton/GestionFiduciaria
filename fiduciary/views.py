@@ -6,6 +6,8 @@ from django.contrib import messages
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Min, Prefetch, Q, Sum
+from django.db.models import Value
+from django.db.models.functions import Replace
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse, reverse_lazy
@@ -28,6 +30,12 @@ from .forms import (
     HistoricalImportUploadForm,
     ImportResolutionForm,
     MAX_IMPORT_FILE_SIZE_BYTES,
+    AuditFilterForm,
+    NoveltyFilterForm,
+    OperationalNoveltyForm,
+    ObservationFilterForm,
+    ObservationForm,
+    PaymentFilterForm,
     OwnershipFinalizeForm,
     PrimaryOwnershipChangeForm,
     StructuralGroupResolutionForm,
@@ -37,7 +45,15 @@ from .forms import (
     eligible_assignment_clients,
     validate_assignment_holder_formset,
 )
-from .domain_services import change_assignment, change_primary_ownership, finalize_ownership, save_form_object_safely, sync_active_assignment_primary_holder
+from .domain_services import (
+    change_assignment,
+    change_primary_ownership,
+    apply_operational_novelty,
+    create_primary_ownership_with_assignment,
+    finalize_ownership,
+    save_form_object_safely,
+    sync_active_assignment_primary_holder,
+)
 from .utils import calculate_sha256
 from .imports.historical import (
     DuplicateHistoricalImportError,
@@ -67,10 +83,13 @@ from .models import (
     DetectedStructureElement,
     FiduciaryAssignment,
     FiduciaryAssignmentHolder,
+    ImportAppliedRecord,
     ImportBatch,
     ImportedFile,
+    ImportedHistoricalObservation,
     ImportRowIssue,
     ImportResolution,
+    OperationalNovelty,
     Payment,
     UnitOwnership,
 )
@@ -953,6 +972,7 @@ class ClientListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
         self.filter_form = ClientFilterForm(self.request.GET)
         if self.filter_form.is_valid():
             q = self.filter_form.cleaned_data.get("q")
+            document = self.filter_form.cleaned_data.get("document")
             document_type = self.filter_form.cleaned_data.get("document_type")
             information_status = self.filter_form.cleaned_data.get("information_status")
             status = self.filter_form.cleaned_data.get("status")
@@ -966,6 +986,22 @@ class ClientListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
                     | Q(phone__icontains=q)
                     | Q(email__icontains=q)
                 )
+            if document:
+                queryset = queryset.annotate(
+                    normalized_document_number=Replace(
+                        Replace(
+                            Replace(
+                                Replace("document_number", Value(" "), Value("")),
+                                Value("."),
+                                Value(""),
+                            ),
+                            Value(","),
+                            Value(""),
+                        ),
+                        Value("-"),
+                        Value(""),
+                    )
+                ).filter(normalized_document_number__icontains=document)
             if document_type:
                 queryset = queryset.filter(document_type=document_type)
             if information_status:
@@ -1003,6 +1039,10 @@ class ClientDetailView(FiduciaryReadRequiredMixin, DetailView):
                     "assignment", "assignment__property_unit", "assignment__property_unit__project"
                 ).order_by("-is_active", "-start_date"),
             ),
+            Prefetch(
+                "historical_observations",
+                queryset=ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").select_related("property_unit", "assignment").order_by("-created_at", "-pk"),
+            ),
         )
 
     def get_context_data(self, **kwargs):
@@ -1010,6 +1050,11 @@ class ClientDetailView(FiduciaryReadRequiredMixin, DetailView):
         context["can_create"] = can_create_fiduciary(self.request.user)
         context["can_update"] = can_update_fiduciary(self.request.user)
         context["can_manage"] = context["can_update"]
+        context["novelties"] = OperationalNovelty.objects.filter(
+            Q(previous_client=self.object) | Q(new_client=self.object) | Q(historical_client=self.object)
+        ).select_related(
+            "property_unit", "previous_assignment", "new_assignment", "historical_assignment", "created_by"
+        ).order_by("-created_at", "-pk")
         return context
 
 
@@ -1068,6 +1113,490 @@ class ClientStatusView(FiduciaryManagementRequiredMixin, View):
         return redirect("fiduciary:client_list")
 
 
+class ObservationListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
+    model = ImportedHistoricalObservation
+    template_name = "fiduciary/observation_list.html"
+    context_object_name = "observations"
+    paginate_by = 10
+
+    def get_queryset(self):
+        queryset = ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").select_related(
+            "project",
+            "property_unit",
+            "client",
+            "assignment",
+            "imported_by",
+        ).order_by("-created_at", "-pk")
+        self.filter_form = ObservationFilterForm(self.request.GET)
+        if self.filter_form.is_valid():
+            project = self.filter_form.cleaned_data.get("project")
+            unit = self.filter_form.cleaned_data.get("property_unit")
+            client = self.filter_form.cleaned_data.get("client")
+            document = self.filter_form.cleaned_data.get("document")
+            assignment_number = self.filter_form.cleaned_data.get("assignment_number")
+            origin = self.filter_form.cleaned_data.get("origin")
+            date_from = self.filter_form.cleaned_data.get("date_from")
+            date_to = self.filter_form.cleaned_data.get("date_to")
+            if project:
+                queryset = queryset.filter(property_unit__project=project)
+            if unit:
+                queryset = queryset.filter(property_unit=unit)
+            if client:
+                queryset = queryset.filter(client=client)
+            if document:
+                normalized = document
+                queryset = queryset.annotate(
+                    normalized_document_number=Replace(
+                        Replace(
+                            Replace(
+                                Replace("client__document_number", Value(" "), Value("")),
+                                Value("."),
+                                Value(""),
+                            ),
+                            Value(","),
+                            Value(""),
+                        ),
+                        Value("-"),
+                        Value(""),
+                    )
+                ).filter(normalized_document_number__icontains=normalized)
+            if assignment_number:
+                queryset = queryset.filter(assignment__assignment_number__icontains=assignment_number)
+            if origin:
+                queryset = queryset.filter(origin=origin)
+            if date_from:
+                queryset = queryset.filter(created_at__date__gte=date_from)
+            if date_to:
+                queryset = queryset.filter(created_at__date__lte=date_to)
+        return queryset
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        context["filter_form"] = getattr(self, "filter_form", ObservationFilterForm(self.request.GET))
+        return context
+
+
+class ObservationCreateView(FiduciaryManagementRequiredMixin, CreateView):
+    model = ImportedHistoricalObservation
+    form_class = ObservationForm
+    template_name = "fiduciary/observation_form.html"
+    success_url = reverse_lazy("fiduciary:observation_list")
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def form_valid(self, form):
+        try:
+            with transaction.atomic():
+                self.object = form.save()
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Observacion creada correctamente.")
+        return redirect(self.success_url)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = "Nueva observacion"
+        context["back_url"] = "fiduciary:observation_list"
+        return context
+
+
+class ObservationUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
+    model = ImportedHistoricalObservation
+    form_class = ObservationForm
+    template_name = "fiduciary/observation_form.html"
+    success_url = reverse_lazy("fiduciary:observation_list")
+
+    def dispatch(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        if self.object.origin != ImportedHistoricalObservation.Origin.MANUAL:
+            raise PermissionDenied("Las observaciones importadas son de solo lectura.")
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def form_valid(self, form):
+        try:
+            with transaction.atomic():
+                self.object = form.save()
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Observacion actualizada correctamente.")
+        return redirect(self.success_url)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = "Editar observacion"
+        context["back_url"] = "fiduciary:observation_list"
+        return context
+
+
+class ObservationDetailView(FiduciaryReadRequiredMixin, QueryStringMixin, DetailView):
+    model = ImportedHistoricalObservation
+    template_name = "fiduciary/observation_detail.html"
+    context_object_name = "observation"
+
+    def get_queryset(self):
+        return ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").select_related(
+            "project",
+            "property_unit",
+            "client",
+            "assignment",
+            "imported_by",
+            "imported_file",
+            "batch",
+        )
+
+    def get_context_data(self, **kwargs):
+        return self.add_common_context(super().get_context_data(**kwargs))
+
+
+class ObservationContextView(FiduciaryReadRequiredMixin, View):
+    def get(self, request):
+        project_id = request.GET.get("project")
+        unit_id = request.GET.get("unit")
+        payload = {"units": [], "clients": [], "assignments": []}
+        if project_id:
+            units = PropertyUnit.objects.filter(project_id=project_id, is_active=True).order_by("name", "code")
+            payload["units"] = [{"id": unit.pk, "text": str(unit)} for unit in units]
+        if not unit_id:
+            return JsonResponse(payload)
+        clients = (
+            Client.objects.filter(
+                Q(unit_ownerships__property_unit_id=unit_id)
+                | Q(fiduciary_assignment_holders__assignment__property_unit_id=unit_id)
+                | Q(historical_observations__property_unit_id=unit_id)
+                | Q(novelties_as_previous_client__property_unit_id=unit_id)
+                | Q(novelties_as_new_client__property_unit_id=unit_id)
+                | Q(historical_novelties__property_unit_id=unit_id)
+            )
+            .distinct()
+            .order_by("last_names_or_company", "first_names", "document_number")
+        )
+        assignments = FiduciaryAssignment.objects.filter(property_unit_id=unit_id).order_by("-is_active", "assignment_number")
+        payload["clients"] = [{"id": client.pk, "text": f"{client.full_name} - {client.document_number or 'Sin documento'}"} for client in clients]
+        payload["assignments"] = [{"id": assignment.pk, "text": assignment.assignment_number} for assignment in assignments]
+        return JsonResponse(payload)
+
+
+class NoveltyListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
+    model = OperationalNovelty
+    template_name = "fiduciary/novelty_list.html"
+    context_object_name = "novelties"
+    paginate_by = 10
+
+    def get_queryset(self):
+        queryset = OperationalNovelty.objects.select_related(
+            "project",
+            "property_unit",
+            "previous_client",
+            "new_client",
+            "historical_client",
+            "previous_assignment",
+            "new_assignment",
+            "historical_assignment",
+            "created_by",
+        ).order_by("-created_at", "-pk")
+        self.filter_form = NoveltyFilterForm(self.request.GET)
+        if self.filter_form.is_valid():
+            project = self.filter_form.cleaned_data.get("project")
+            unit = self.filter_form.cleaned_data.get("property_unit")
+            novelty_type = self.filter_form.cleaned_data.get("novelty_type")
+            client = self.filter_form.cleaned_data.get("client")
+            document = self.filter_form.cleaned_data.get("document")
+            assignment_number = self.filter_form.cleaned_data.get("assignment_number")
+            origin = self.filter_form.cleaned_data.get("origin")
+            date_from = self.filter_form.cleaned_data.get("date_from")
+            date_to = self.filter_form.cleaned_data.get("date_to")
+            if project:
+                queryset = queryset.filter(property_unit__project=project)
+            if unit:
+                queryset = queryset.filter(property_unit=unit)
+            if novelty_type:
+                queryset = queryset.filter(novelty_type=novelty_type)
+            if client:
+                queryset = queryset.filter(Q(previous_client=client) | Q(new_client=client) | Q(historical_client=client))
+            if document:
+                queryset = queryset.filter(
+                    Q(previous_client__document_number__icontains=document)
+                    | Q(new_client__document_number__icontains=document)
+                    | Q(historical_client__document_number__icontains=document)
+                )
+            if assignment_number:
+                queryset = queryset.filter(
+                    Q(previous_assignment__assignment_number__icontains=assignment_number)
+                    | Q(new_assignment__assignment_number__icontains=assignment_number)
+                    | Q(historical_assignment__assignment_number__icontains=assignment_number)
+                )
+            if origin:
+                queryset = queryset.filter(origin=origin)
+            if date_from:
+                queryset = queryset.filter(created_at__date__gte=date_from)
+            if date_to:
+                queryset = queryset.filter(created_at__date__lte=date_to)
+        return queryset
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        context["filter_form"] = getattr(self, "filter_form", NoveltyFilterForm(self.request.GET))
+        return context
+
+
+class NoveltyDetailView(FiduciaryReadRequiredMixin, QueryStringMixin, DetailView):
+    model = OperationalNovelty
+    template_name = "fiduciary/novelty_detail.html"
+    context_object_name = "novelty"
+
+    def get_queryset(self):
+        return OperationalNovelty.objects.select_related(
+            "project",
+            "property_unit",
+            "previous_client",
+            "new_client",
+            "historical_client",
+            "previous_assignment",
+            "new_assignment",
+            "historical_assignment",
+            "created_by",
+            "imported_file",
+            "batch",
+            "source_observation",
+        )
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        novelty = self.object
+        related_observations = ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").filter(
+            property_unit=novelty.property_unit,
+        )
+        client_ids = [
+            client_id
+            for client_id in (novelty.previous_client_id, novelty.new_client_id, novelty.historical_client_id)
+            if client_id
+        ]
+        assignment_ids = [
+            assignment_id
+            for assignment_id in (
+                novelty.previous_assignment_id,
+                novelty.new_assignment_id,
+                novelty.historical_assignment_id,
+            )
+            if assignment_id
+        ]
+        filters = Q(pk=novelty.source_observation_id) if novelty.source_observation_id else Q()
+        if client_ids:
+            filters |= Q(client_id__in=client_ids)
+        if assignment_ids:
+            filters |= Q(assignment_id__in=assignment_ids)
+        context["related_observations"] = (
+            related_observations.filter(filters).select_related("client", "assignment", "imported_by").distinct()
+            if filters
+            else related_observations.none()
+        )
+        return context
+
+
+class NoveltyCreateView(FiduciaryManagementRequiredMixin, QueryStringMixin, FormView):
+    form_class = OperationalNoveltyForm
+    template_name = "fiduciary/novelty_form.html"
+    success_url = reverse_lazy("fiduciary:novelty_list")
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def form_valid(self, form):
+        try:
+            result = apply_operational_novelty(
+                unit=form.cleaned_data["property_unit"],
+                novelty_type=form.cleaned_data["novelty_type"],
+                effective_date=form.cleaned_data["effective_date"],
+                summary=form.cleaned_data.get("summary", ""),
+                detail=form.cleaned_data.get("detail", ""),
+                user=self.request.user,
+                new_client=form.cleaned_data.get("new_client"),
+                new_assignment_number=form.cleaned_data.get("new_assignment_number", ""),
+                secondary_clients=form.cleaned_data.get("secondary_clients"),
+                other_type=form.cleaned_data.get("other_type", ""),
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Novedad registrada correctamente.")
+        return redirect("fiduciary:novelty_detail", pk=result.novelty.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = "Nueva novedad"
+        return context
+
+
+class PaymentListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
+    model = Payment
+    template_name = "fiduciary/payment_list.html"
+    context_object_name = "payments"
+    paginate_by = 10
+
+    def get_queryset(self):
+        self.filter_form = PaymentFilterForm(self.request.GET)
+        self.search_performed = self.filter_form.has_criteria()
+        queryset = Payment.objects.select_related(
+            "assignment",
+            "assignment__property_unit",
+            "assignment__property_unit__project",
+            "assignment__property_unit__structural_group",
+            "assignment__property_unit__structural_group__grouping_type",
+            "source_file",
+            "source_file__batch",
+        ).prefetch_related(
+            Prefetch(
+                "assignment__holders",
+                queryset=FiduciaryAssignmentHolder.objects.select_related("client").order_by("-is_primary", "client__last_names_or_company"),
+                to_attr="prefetched_holders",
+            )
+        ).order_by("-exact_date", "-period_year", "-period_month", "-created_at", "-pk")
+        if not self.search_performed:
+            return queryset.none()
+        if self.filter_form.is_valid():
+            project = self.filter_form.cleaned_data.get("project")
+            grouping_type = self.filter_form.cleaned_data.get("grouping_type")
+            structural_group = self.filter_form.cleaned_data.get("structural_group")
+            unit = self.filter_form.cleaned_data.get("property_unit")
+            client = self.filter_form.cleaned_data.get("client")
+            document = self.filter_form.cleaned_data.get("document")
+            assignment_number = self.filter_form.cleaned_data.get("assignment_number")
+            date_from = self.filter_form.cleaned_data.get("date_from")
+            date_to = self.filter_form.cleaned_data.get("date_to")
+            if project:
+                queryset = queryset.filter(assignment__property_unit__project=project)
+            if grouping_type:
+                queryset = queryset.filter(assignment__property_unit__structural_group__grouping_type=grouping_type)
+            if structural_group:
+                queryset = queryset.filter(assignment__property_unit__structural_group=structural_group)
+            if unit:
+                queryset = queryset.filter(assignment__property_unit=unit)
+            if client:
+                queryset = queryset.filter(assignment__holders__client=client)
+            if document:
+                queryset = queryset.annotate(
+                    normalized_holder_document=Replace(
+                        Replace(
+                            Replace(
+                                Replace("assignment__holders__client__document_number", Value(" "), Value("")),
+                                Value("."),
+                                Value(""),
+                            ),
+                            Value(","),
+                            Value(""),
+                        ),
+                        Value("-"),
+                        Value(""),
+                    )
+                ).filter(normalized_holder_document__icontains=document)
+            if assignment_number:
+                queryset = queryset.filter(assignment__assignment_number__icontains=assignment_number)
+            if date_from:
+                queryset = queryset.filter(
+                    Q(exact_date__gte=date_from)
+                    | Q(period_year__gt=date_from.year)
+                    | Q(period_year=date_from.year, period_month__gte=date_from.month)
+                )
+            if date_to:
+                queryset = queryset.filter(
+                    Q(exact_date__lte=date_to)
+                    | Q(period_year__lt=date_to.year)
+                    | Q(period_year=date_to.year, period_month__lte=date_to.month)
+                )
+        return queryset.distinct()
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        for payment in context["payments"]:
+            holders = getattr(payment.assignment, "prefetched_holders", [])
+            payment.display_client = next((holder.client for holder in holders if holder.is_primary), None) or (
+                holders[0].client if holders else None
+            )
+        context["filter_form"] = getattr(self, "filter_form", PaymentFilterForm(self.request.GET))
+        context["search_performed"] = getattr(self, "search_performed", False)
+        return context
+
+
+class AuditListView(FiduciaryManagementRequiredMixin, QueryStringMixin, ListView):
+    model = ImportAppliedRecord
+    template_name = "fiduciary/audit_list.html"
+    context_object_name = "records"
+    paginate_by = 10
+
+    def get_queryset(self):
+        queryset = ImportAppliedRecord.objects.select_related(
+            "batch",
+            "batch__initiated_by",
+            "batch__imported_by",
+            "imported_file",
+            "sheet_result",
+        ).order_by("-created_at", "-pk")
+        self.filter_form = AuditFilterForm(self.request.GET)
+        if self.filter_form.is_valid():
+            responsible = self.filter_form.cleaned_data.get("responsible")
+            date_from = self.filter_form.cleaned_data.get("date_from")
+            date_to = self.filter_form.cleaned_data.get("date_to")
+            action = self.filter_form.cleaned_data.get("action")
+            entity_kind = self.filter_form.cleaned_data.get("entity_kind")
+            reason = self.filter_form.cleaned_data.get("reason")
+            batch = self.filter_form.cleaned_data.get("batch")
+            imported_file = self.filter_form.cleaned_data.get("imported_file")
+            if responsible:
+                queryset = queryset.filter(Q(batch__imported_by=responsible) | Q(batch__initiated_by=responsible))
+            if date_from:
+                queryset = queryset.filter(created_at__date__gte=date_from)
+            if date_to:
+                queryset = queryset.filter(created_at__date__lte=date_to)
+            if action:
+                queryset = queryset.filter(action=action)
+            if entity_kind:
+                queryset = queryset.filter(entity_kind=entity_kind)
+            if reason:
+                queryset = queryset.filter(Q(summary__icontains=reason) | Q(batch__summary__icontains=reason))
+            if batch:
+                queryset = queryset.filter(batch=batch)
+            if imported_file:
+                queryset = queryset.filter(imported_file=imported_file)
+        return queryset
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        context["filter_form"] = getattr(self, "filter_form", AuditFilterForm(self.request.GET))
+        return context
+
+
+class AuditDetailView(FiduciaryManagementRequiredMixin, QueryStringMixin, DetailView):
+    model = ImportAppliedRecord
+    template_name = "fiduciary/audit_detail.html"
+    context_object_name = "record"
+
+    def get_queryset(self):
+        return ImportAppliedRecord.objects.select_related(
+            "batch",
+            "batch__initiated_by",
+            "batch__imported_by",
+            "imported_file",
+            "sheet_result",
+        )
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        context["responsible"] = self.object.batch.imported_by or self.object.batch.initiated_by
+        return context
+
+
 class UnitOwnershipListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
     model = UnitOwnership
     template_name = "fiduciary/ownership_list.html"
@@ -1104,18 +1633,22 @@ class UnitOwnershipCreateView(FiduciaryCreateRequiredMixin, CreateView):
 
     def form_valid(self, form):
         try:
-            self.object = save_form_object_safely(form)
-            if self.object.is_primary and self.object.is_active:
-                sync_active_assignment_primary_holder(
-                    unit=self.object.property_unit,
-                    client=self.object.client,
-                    effective_date=self.object.start_date,
-                    reason=self.object.last_change_reason or "Registro de titular principal",
-                )
+            result = create_primary_ownership_with_assignment(
+                unit=form.cleaned_data["property_unit"],
+                primary_client=form.cleaned_data["client"],
+                assignment_number=form.cleaned_data["assignment_number"],
+                effective_date=form.cleaned_data["start_date"],
+                reason=form.cleaned_data.get("change_reason", ""),
+                secondary_clients=form.cleaned_data.get("secondary_clients"),
+                novelty_type=form.cleaned_data.get("novelty_type"),
+                other_type=form.cleaned_data.get("other_type", ""),
+                created_by=self.request.user,
+            )
+            self.object = result.ownership
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
-        messages.success(self.request, "Titularidad creada correctamente.")
+        messages.success(self.request, "Titularidad y encargo fiduciario creados correctamente.")
         return redirect(self.success_url)
 
 
@@ -1251,6 +1784,10 @@ class AssignmentDetailView(FiduciaryReadRequiredMixin, DetailView):
                     "exact_date", "period_year", "period_month", "source_row", "pk"
                 ),
             ),
+            Prefetch(
+                "historical_observations",
+                queryset=ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").select_related("client", "property_unit").order_by("-created_at", "-pk"),
+            ),
         )
 
     def get_context_data(self, **kwargs):
@@ -1265,6 +1802,11 @@ class AssignmentDetailView(FiduciaryReadRequiredMixin, DetailView):
         context["payment_total"] = stats["total"] or 0
         context["first_payment"] = payments[0] if payments else None
         context["last_payment"] = payments[-1] if payments else None
+        context["novelties"] = OperationalNovelty.objects.filter(
+            Q(previous_assignment=self.object) | Q(new_assignment=self.object) | Q(historical_assignment=self.object)
+        ).select_related(
+            "property_unit", "previous_client", "new_client", "historical_client", "created_by"
+        ).order_by("-created_at", "-pk")
         return context
 
 
@@ -1273,6 +1815,9 @@ class AssignmentCreateView(FiduciaryCreateRequiredMixin, CreateView):
     form_class = FiduciaryAssignmentForm
     template_name = "fiduciary/assignment_form.html"
     success_url = reverse_lazy("fiduciary:assignment_list")
+
+    def dispatch(self, request, *args, **kwargs):
+        raise PermissionDenied("Los encargos fiduciarios solo se crean desde Nueva titularidad.")
 
     def get_holder_formset(self, unit_id=None):
         eligible_clients = eligible_assignment_clients(unit_id)

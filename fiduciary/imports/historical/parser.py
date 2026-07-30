@@ -339,6 +339,9 @@ class HistoricalWorkbookParser:
         formula_cached_columns = set()
         project, grouping_code, grouping_name = self._extract_sheet_structure(sheet)
         in_novelty_section = False
+        novelty_section = ""
+        novelty_section_month = None
+        novelty_section_year = None
         novelty_rows = 0
         for row_number in range(header_row + 1, sheet.used_rows + 1):
             if self._is_row_empty(sheet, row_number):
@@ -347,10 +350,20 @@ class HistoricalWorkbookParser:
                 continue
             if self._is_novelty_header_row(sheet, row_number):
                 in_novelty_section = True
+                novelty_section = ""
+                novelty_section_month = None
+                novelty_section_year = None
                 ignored_rows += 1
                 ignored_reasons["novelty_section"] += 1
                 continue
             if in_novelty_section:
+                subtitle = self._novelty_subtitle(sheet, row_number, columns)
+                if subtitle:
+                    novelty_section = subtitle
+                    novelty_section_month, novelty_section_year = _month_year_from_text(subtitle)
+                    ignored_rows += 1
+                    ignored_reasons["novelty_subtitle"] += 1
+                    continue
                 novelty = self._extract_novelty(
                     sheet,
                     row_number,
@@ -359,6 +372,9 @@ class HistoricalWorkbookParser:
                     grouping_name,
                     columns,
                     header_row,
+                    novelty_section,
+                    novelty_section_month,
+                    novelty_section_year,
                 )
                 if novelty:
                     novelties.append(novelty)
@@ -455,6 +471,7 @@ class HistoricalWorkbookParser:
         unit = self._value(sheet, row_number, columns.get("unit"))
         assignment_number = self._value(sheet, row_number, columns.get("assignment_number"))
         document_number = self._value(sheet, row_number, columns.get("document_number"))
+        observation = self._value(sheet, row_number, columns.get("observations")) or ""
         clients = self._extract_clients(sheet, row_number, columns, document_number)
         payments = self._extract_payments(sheet, row_number, payment_columns)
 
@@ -476,6 +493,7 @@ class HistoricalWorkbookParser:
             )
             if assignment_number
             else None,
+            observation=observation,
             clients=clients,
             payments=payments,
         )
@@ -549,6 +567,9 @@ class HistoricalWorkbookParser:
         grouping_name: str,
         columns: dict[str, DetectedColumn],
         header_row: int,
+        historical_section: str,
+        section_month: int | None,
+        section_year: int | None,
     ) -> HistoricalNovelty | None:
         cells = []
         for column in range(1, sheet.used_columns + 1):
@@ -574,6 +595,10 @@ class HistoricalWorkbookParser:
 
         unit = self._value(sheet, row_number, columns.get("unit"))
         assignment_number = self._value(sheet, row_number, columns.get("assignment_number"))
+        client_name = self._first_client_name(sheet, row_number, columns)
+        document_number = self._value(sheet, row_number, columns.get("document_number"))
+        if not any([unit, assignment_number, client_name, document_number]):
+            return None
         return HistoricalNovelty(
             sheet_name=sheet.name,
             row_number=row_number,
@@ -589,8 +614,38 @@ class HistoricalWorkbookParser:
             )
             if assignment_number
             else None,
+            historical_section=historical_section,
+            section_month=section_month,
+            section_year=section_year,
             cells=cells,
         )
+
+    def _novelty_subtitle(self, sheet: RawSheet, row_number: int, columns: dict[str, DetectedColumn]) -> str:
+        values = [
+            clean_text(cell.value)
+            for (row, _), cell in sheet.cells.items()
+            if row == row_number and clean_text(cell.value)
+        ]
+        if not values or len(values) > 3:
+            return ""
+        if any(self._value(sheet, row_number, columns.get(key)) for key in ["assignment_number", "document_number"]):
+            return ""
+        if self._first_client_name(sheet, row_number, columns):
+            return ""
+        text = " ".join(values).strip()
+        normalized = normalize_text(text)
+        if normalized in {"ventas", "por vender", "total", "subtotal"}:
+            return ""
+        return text
+
+    def _first_client_name(self, sheet: RawSheet, row_number: int, columns: dict[str, DetectedColumn]) -> str | None:
+        name_columns = [column for key, column in columns.items() if key.startswith("client_name_")]
+        name_columns.sort(key=lambda column: column.index)
+        for column in name_columns:
+            value = self._value(sheet, row_number, column)
+            if value:
+                return value
+        return None
 
     def _formula_issues_for_row(
         self,
@@ -688,3 +743,15 @@ def _split_contact_values(value: str | None, *, separators=("/",)) -> list[str]:
         return []
     pattern = "|".join(re.escape(separator) for separator in separators)
     return [part.strip() for part in re.split(pattern, text) if part.strip()]
+
+
+def _month_year_from_text(value: str) -> tuple[int | None, int | None]:
+    normalized = normalize_text(value).upper()
+    compact = compact_normalized(value).upper()
+    year_match = re.search(r"(20\d{2}|19\d{2})", compact)
+    if not year_match:
+        return None, None
+    for month_text, month in MONTHS.items():
+        if re.search(rf"\b{re.escape(month_text)}\b", normalized) or month_text in compact:
+            return month, int(year_match.group(1))
+    return None, None

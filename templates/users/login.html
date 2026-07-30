@@ -1,6 +1,7 @@
 {% extends "base.html" %}
+{% load static %}
 
-{% block title %}Iniciar sesion | Centenario Gestion Fiduciaria{% endblock %}
+{% block title %}Iniciar sesión | Centenario Gestión Fiduciaria{% endblock %}
 
 {% block body %}
 <main class="login-page">
@@ -9,11 +10,11 @@
       <div class="brand-icon">C</div>
       <div>
         <strong>Constructora Centenario</strong>
-        <span>Gestion Fiduciaria</span>
+        <span>Gestión Fiduciaria</span>
       </div>
     </div>
     <h1>Bienvenido</h1>
-    <p>Ingrese sus credenciales para acceder a la plataforma de gestion fiduciaria.</p>
+    <p>Ingrese sus credenciales para acceder a la plataforma de gestión fiduciaria.</p>
     {% include "includes/messages.html" %}
     <form method="post" novalidate>
       {% csrf_token %}
@@ -26,27 +27,21 @@
         {{ form.username.errors }}
       </div>
       <div class="mb-3">
-        <label class="form-label" for="{{ form.password.id_for_label }}">{{ form.password.label }}</label>
+        <label class="form-label" for="{{ form.password.id_for_label }}">Contraseña</label>
         {{ form.password }}
         {{ form.password.errors }}
       </div>
       <div class="form-check mb-3">
         {{ form.remember_me }}
-        <label class="form-check-label" for="{{ form.remember_me.id_for_label }}">{{ form.remember_me.label }}</label>
+        <label class="form-check-label" for="{{ form.remember_me.id_for_label }}">Mantener sesión iniciada</label>
       </div>
       {{ form.non_field_errors }}
-      <button class="btn btn-success w-100" type="submit">Iniciar sesion</button>
+      <button class="btn btn-success w-100" type="submit">Iniciar sesión</button>
     </form>
-    <p class="access-note">
-      Este sistema es de uso exclusivo para personal autorizado de Constructora Centenario.
-      Todo acceso no autorizado sera monitoreado y reportado.
-    </p>
+    <p class="access-note">© 2026 Constructora Centenario. Todos los derechos reservados.</p>
   </section>
   <section class="login-visual" aria-hidden="true">
-    <div>
-      <h2>Solidez fiduciaria disenada para trascender.</h2>
-      <p>Transparencia, seguridad patrimonial y excelencia operativa en cada proyecto.</p>
-    </div>
+    <img src="{% static 'assets/login.gif' %}" alt="" onerror="this.hidden=true;">
   </section>
 </main>
 {% endblock %}

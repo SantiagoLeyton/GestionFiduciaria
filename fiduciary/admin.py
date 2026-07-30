@@ -9,11 +9,13 @@ from .models import (
     ImportAppliedRecord,
     ImportBatch,
     ImportedFile,
+    ImportedHistoricalObservation,
     ImportedHistoricalNovelty,
     ImportNovelty,
     ImportResolution,
     ImportedSheetResult,
     ImportRowIssue,
+    OperationalNovelty,
     Payment,
     UnitOwnership,
 )
@@ -127,6 +129,40 @@ class ImportedHistoricalNoveltyAdmin(NoDeleteAdmin):
     list_display = ("imported_file", "sheet_result", "row_number", "unit_code", "assignment_number", "status")
     list_filter = ("status", "sheet_result")
     search_fields = ("unit_code", "assignment_number", "project_name", "grouping_name", "sanitized_summary")
+
+
+@admin.register(ImportedHistoricalObservation)
+class ImportedHistoricalObservationAdmin(NoDeleteAdmin):
+    list_display = ("origin", "status", "property_unit", "client", "assignment", "source_sheet", "source_row", "created_at")
+    list_filter = ("origin", "status", "historical_month", "historical_year")
+    search_fields = (
+        "summary",
+        "detail",
+        "historical_section",
+        "property_unit__code",
+        "property_unit__name",
+        "client__document_number",
+        "assignment__assignment_number",
+    )
+
+
+@admin.register(OperationalNovelty)
+class OperationalNoveltyAdmin(NoDeleteAdmin):
+    list_display = ("novelty_type", "origin", "status", "property_unit", "previous_client", "new_client", "created_at")
+    list_filter = ("novelty_type", "origin", "status")
+    search_fields = (
+        "summary",
+        "detail",
+        "other_type",
+        "property_unit__code",
+        "property_unit__name",
+        "previous_client__document_number",
+        "new_client__document_number",
+        "historical_client__document_number",
+        "previous_assignment__assignment_number",
+        "new_assignment__assignment_number",
+        "historical_assignment__assignment_number",
+    )
 
 
 @admin.register(DailyReportRow)

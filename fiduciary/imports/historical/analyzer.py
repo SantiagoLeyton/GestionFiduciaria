@@ -248,7 +248,7 @@ def _persist_historical_novelties(batch: ImportBatch, imported_file: ImportedFil
                     "unit_name": novelty.unit_name or "",
                     "assignment_number": novelty.assignment.assignment_number if novelty.assignment else "",
                     "assignment_status": novelty.assignment.status if novelty.assignment and novelty.assignment.status else "",
-                    "original_cells": [_novelty_cell_payload(cell) for cell in novelty.cells],
+                    "original_cells": _novelty_payload(novelty),
                     "sanitized_summary": _novelty_summary(novelty),
                     "status": ImportedHistoricalNovelty.Status.DETECTED,
                 },
@@ -267,6 +267,53 @@ def _novelty_cell_payload(cell) -> dict[str, Any]:
         "has_cached_value": cell.has_cached_value,
         "is_date": cell.is_date,
     }
+
+
+def _novelty_payload(novelty) -> list[dict[str, Any]]:
+    payload = [_novelty_cell_payload(cell) for cell in novelty.cells]
+    if novelty.historical_section:
+        payload.append(
+            {
+                "coordinate": "",
+                "column_letter": "",
+                "column_index": 0,
+                "header": "__historical_section__",
+                "value": novelty.historical_section,
+                "formula": "",
+                "has_formula": False,
+                "has_cached_value": False,
+                "is_date": False,
+            }
+        )
+    if novelty.section_month:
+        payload.append(
+            {
+                "coordinate": "",
+                "column_letter": "",
+                "column_index": 0,
+                "header": "__section_month__",
+                "value": novelty.section_month,
+                "formula": "",
+                "has_formula": False,
+                "has_cached_value": False,
+                "is_date": False,
+            }
+        )
+    if novelty.section_year:
+        payload.append(
+            {
+                "coordinate": "",
+                "column_letter": "",
+                "column_index": 0,
+                "header": "__section_year__",
+                "value": novelty.section_year,
+                "formula": "",
+                "has_formula": False,
+                "has_cached_value": False,
+                "is_date": False,
+            }
+        )
+    return payload
 
 
 def _json_safe_value(value):

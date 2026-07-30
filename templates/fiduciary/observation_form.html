@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>{{ title }}</h1>
+          <p>Registre observaciones manuales asociadas a una unidad y, opcionalmente, a cliente o encargo.</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url back_url %}">Volver</a>
+      </div>
+      <form class="form-panel" method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+        <div class="form-grid">
+          {% for field in form %}
+            <div>
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {{ field.errors }}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Guardar</button>
+          <a class="btn btn-outline-secondary" href="{% url back_url %}">Cancelar</a>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const unit = document.getElementById("id_property_unit");
+  const project = document.getElementById("id_project");
+  const client = document.getElementById("id_client");
+  const assignment = document.getElementById("id_assignment");
+  const url = "{% url 'fiduciary:observation_context' %}";
+  if (!unit || !client || !assignment) return;
+  function fill(select, rows, emptyLabel) {
+    const selected = select.value;
+    select.innerHTML = "";
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = emptyLabel;
+    select.appendChild(empty);
+    rows.forEach(row => {
+      const option = document.createElement("option");
+      option.value = row.id;
+      option.textContent = row.text;
+      if (String(row.id) === selected) option.selected = true;
+      select.appendChild(option);
+    });
+  }
+  function loadUnits() {
+    if (!project || !project.value) return;
+    fetch(url + "?project=" + encodeURIComponent(project.value), {headers: {"X-Requested-With": "XMLHttpRequest"}})
+      .then(response => response.json())
+      .then(data => {
+        fill(unit, data.units || [], "Seleccione una unidad");
+        loadContext();
+      });
+  }
+  function loadContext() {
+    if (!unit.value) {
+      fill(client, [], "Sin cliente relacionado");
+      fill(assignment, [], "Sin encargo relacionado");
+      return;
+    }
+    fetch(url + "?unit=" + encodeURIComponent(unit.value), {headers: {"X-Requested-With": "XMLHttpRequest"}})
+      .then(response => response.json())
+      .then(data => {
+        fill(client, data.clients || [], "Sin cliente relacionado");
+        fill(assignment, data.assignments || [], "Sin encargo relacionado");
+      });
+  }
+  if (project) project.addEventListener("change", loadUnits);
+  unit.addEventListener("change", loadContext);
+  loadContext();
+});
+</script>
+{% endblock %}

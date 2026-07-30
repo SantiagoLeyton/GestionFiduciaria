@@ -111,6 +111,15 @@ def test_parser_extracts_montecielo_contacts_and_split_documents():
     assert row.clients[0].phone
 
 
+@pytest.mark.skipif(not MONTECIELO_FILE.exists(), reason="Libro real de Montecielo no disponible")
+def test_parser_preserves_montecielo_303_novelty_summary_text():
+    workbook = HistoricalWorkbookParser(MONTECIELO_FILE, grouping_type_hint="Torre").parse()
+    novelty = next(novelty for sheet in workbook.sheets for novelty in sheet.novelties if novelty.unit_code == "303")
+    values = {str(cell.value).strip() for cell in novelty.cells}
+
+    assert "*TERMIN.SIN ABONOS" in values
+
+
 def test_parser_extracts_monthly_payments_and_formula_metadata(parsed_workbook):
     row_with_payments = next(row for sheet in parsed_workbook.sheets for row in sheet.rows if row.payments)
 
@@ -159,10 +168,12 @@ def test_parser_extracts_montecielo_style_title_and_preserves_novelty_section():
         (156, 1): CellData(156, 1, "A", "A156", "POR VENDER"),
         (157, 1): CellData(157, 1, "A", "A157", "TOTAL"),
         (161, 1): CellData(161, 1, "A", "A161", "NOVEDADES"),
-        (162, 1): CellData(162, 1, "A", "A162", "303"),
-        (162, 2): CellData(162, 2, "B", "B162", "Cambio reportado"),
+        (162, 1): CellData(162, 1, "A", "A162", "TERMINACIONES MAR/2026"),
+        (163, 1): CellData(163, 1, "A", "A163", "303"),
+        (163, 2): CellData(163, 2, "B", "B163", "EF-303"),
+        (163, 4): CellData(163, 4, "D", "D163", "Cliente historico"),
     }
-    sheet = RawSheet("T2", 1, "visible", "A1:AW162", cells, set(), set())
+    sheet = RawSheet("T2", 1, "visible", "A1:AW163", cells, set(), set())
     parser = HistoricalWorkbookParser(Path("samples/fiduciary/historical/LIBRO MONTECIELO T2(5).xlsx"), grouping_type_hint="Torre")
 
     parsed_sheet = parser._parse_sheet(sheet)
@@ -171,6 +182,7 @@ def test_parser_extracts_montecielo_style_title_and_preserves_novelty_section():
     assert parsed_sheet.rows[0].project == "Montecielo"
     assert parsed_sheet.rows[0].grouping_name == "T2"
     assert parsed_sheet.ignored_row_reasons["novelty_section"] == 1
+    assert parsed_sheet.ignored_row_reasons["novelty_subtitle"] == 1
     assert parsed_sheet.ignored_row_reasons["novelty"] == 1
     assert len(parsed_sheet.novelties) == 1
     novelty = parsed_sheet.novelties[0]
@@ -178,9 +190,12 @@ def test_parser_extracts_montecielo_style_title_and_preserves_novelty_section():
     assert novelty.project == "Montecielo"
     assert novelty.grouping_name == "T2"
     assert novelty.unit_code == "303"
-    assert novelty.assignment.assignment_number == "Cambio reportado"
+    assert novelty.assignment.assignment_number == "EF-303"
+    assert novelty.historical_section == "TERMINACIONES MAR/2026"
+    assert novelty.section_month == 3
+    assert novelty.section_year == 2026
     assert all(isinstance(cell, HistoricalNoveltyCell) for cell in novelty.cells)
-    assert {cell.coordinate for cell in novelty.cells} == {"A162", "B162"}
+    assert {cell.coordinate for cell in novelty.cells} == {"A163", "B163", "D163"}
     assert "HISTORICAL_NOVELTY_SECTION_SKIPPED" not in {issue.code for issue in parsed_sheet.issues}
 
 

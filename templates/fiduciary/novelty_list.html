@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}Novedades | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>Novedades</h1><p>Consulte el historial operativo de cambios sobre unidades, titulares y encargos.</p></div>
+        {% if can_update %}<a class="btn btn-success" href="{% url 'fiduciary:novelty_create' %}">Registrar novedad</a>{% endif %}
+      </div>
+      <form class="filter-panel" method="get">
+        <div class="form-grid">
+          {% for field in filter_form %}
+            <div>
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Buscar</button>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:novelty_list' %}">Limpiar</a>
+        </div>
+      </form>
+      <section class="data-section">
+        <div class="section-header"><h2>Novedades registradas</h2><span>{{ page_obj.paginator.count }} registro{{ page_obj.paginator.count|pluralize }}</span></div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr>
+                <th>Fecha</th><th>Proyecto</th><th>Unidad</th><th>Tipo</th><th>Titular anterior</th><th>Titular nuevo</th><th>Encargo anterior</th><th>Encargo nuevo</th><th>Observaciones</th><th>Origen</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for novelty in novelties %}
+                <tr>
+                  <td>{{ novelty.effective_date|default:novelty.created_at|date:"d/m/Y" }}</td>
+                  <td>{{ novelty.property_unit.project.name }}</td>
+                  <td><a href="{% url 'real_estate:property_unit_history' novelty.property_unit.pk %}">{{ novelty.property_unit.name|default:novelty.property_unit.code }}</a></td>
+                  <td>{{ novelty.display_type }}</td>
+                  <td>{% if novelty.previous_client %}<a href="{% url 'fiduciary:client_detail' novelty.previous_client.pk %}">{{ novelty.previous_client.full_name }}</a>{% elif novelty.historical_client %}<a href="{% url 'fiduciary:client_detail' novelty.historical_client.pk %}">{{ novelty.historical_client.full_name }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if novelty.new_client %}<a href="{% url 'fiduciary:client_detail' novelty.new_client.pk %}">{{ novelty.new_client.full_name }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if novelty.previous_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.previous_assignment.pk %}">{{ novelty.previous_assignment.assignment_number }}</a>{% elif novelty.historical_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.historical_assignment.pk %}">{{ novelty.historical_assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+                  <td>{% if novelty.new_assignment %}<a href="{% url 'fiduciary:assignment_detail' novelty.new_assignment.pk %}">{{ novelty.new_assignment.assignment_number }}</a>{% else %}-{% endif %}</td>
+                  <td>{{ novelty.summary|default:novelty.detail|truncatechars:90 }}</td>
+                  <td>{{ novelty.get_origin_display }}</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:novelty_detail' novelty.pk %}">Ver</a></td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="11">No hay novedades registradas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% include "includes/pagination.html" %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

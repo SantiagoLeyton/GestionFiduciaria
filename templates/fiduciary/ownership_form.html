@@ -67,6 +67,38 @@
     const button = document.getElementById("client-search-button");
     const results = document.getElementById("client-search-results");
     const clientSelect = document.getElementById("id_client");
+    const secondarySelect = document.getElementById("id_secondary_clients");
+    if (secondarySelect) {
+      const wrapper = secondarySelect.closest("div");
+      const search = document.createElement("input");
+      search.type = "search";
+      search.className = "form-control mb-2";
+      search.placeholder = "Buscar secundario por nombre o documento";
+      const selected = document.createElement("div");
+      selected.className = "form-text";
+      wrapper.insertBefore(search, secondarySelect);
+      wrapper.appendChild(selected);
+      function refreshSecondary() {
+        const term = search.value.toLowerCase().trim();
+        Array.from(secondarySelect.options).forEach(option => {
+          option.hidden = term && !option.textContent.toLowerCase().includes(term);
+        });
+        const names = Array.from(secondarySelect.selectedOptions).map(option => option.textContent);
+        selected.textContent = names.length ? "Seleccionados: " + names.join(", ") : "Sin secundarios seleccionados";
+      }
+      search.addEventListener("input", refreshSecondary);
+      secondarySelect.addEventListener("change", refreshSecondary);
+      refreshSecondary();
+    }
+    const noveltyType = document.querySelector("[data-novelty-type]");
+    const otherType = document.querySelector("[data-other-type]");
+    function refreshOtherType() {
+      if (!noveltyType || !otherType) return;
+      const container = otherType.closest("div");
+      if (container) container.style.display = noveltyType.value === "other" ? "" : "none";
+    }
+    if (noveltyType) noveltyType.addEventListener("change", refreshOtherType);
+    refreshOtherType();
     if (!url || !criterion || !q || !button || !results || !clientSelect) return;
     button.addEventListener("click", function () {
       results.innerHTML = "";

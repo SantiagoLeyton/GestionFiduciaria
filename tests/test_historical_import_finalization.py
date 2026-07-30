@@ -11,6 +11,7 @@ from django.urls import reverse
 from fiduciary.imports.historical import analyze_historical_import, store_historical_import_file
 from fiduciary.imports.historical.finalize import (
     HistoricalImportFinalizationError,
+    _summary_detail_from_cells,
     finalize_historical_import,
 )
 from fiduciary.imports.historical.resolutions import auto_resolve_new_units, update_batch_resolution_state
@@ -20,7 +21,9 @@ from fiduciary.models import (
     ImportAppliedRecord,
     ImportBatch,
     ImportedFile,
+    ImportedHistoricalObservation,
     ImportedHistoricalNovelty,
+    OperationalNovelty,
     Payment,
 )
 from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
@@ -65,13 +68,19 @@ def test_finalize_historical_import_creates_definitive_entities(accounting_admin
     assert batch.imported_at is not None
     assert imported_file.status == ImportedFile.Status.COMPLETED
     assert result.created_property_units == 200
-    assert result.created_assignments == 200
+    assert result.created_assignments == 201
     assert result.created_payments == 210
     assert PropertyUnit.objects.count() == 200
-    assert FiduciaryAssignment.objects.count() == 200
+    assert FiduciaryAssignment.objects.count() == 201
+    assert FiduciaryAssignment.objects.filter(is_active=False).count() == 1
     assert Payment.objects.count() == 210
     assert Client.objects.filter(source_origin=Client.SourceOrigin.HISTORICAL_IMPORT).exists()
     assert ImportedHistoricalNovelty.objects.filter(batch=batch, status=ImportedHistoricalNovelty.Status.READY).count() == 1
+    assert OperationalNovelty.objects.filter(
+        batch=batch,
+        origin=OperationalNovelty.Origin.HISTORICAL_IMPORT,
+        novelty_type=OperationalNovelty.NoveltyType.HISTORICAL,
+    ).count() == 1
     assert ImportAppliedRecord.objects.filter(batch=batch, entity_kind=ImportAppliedRecord.EntityKind.PAYMENT).count() == 210
 
 
@@ -166,9 +175,41 @@ def test_finalize_view_uses_post_and_completes_batch(client, accounting_admin_us
     assert batch.status == ImportBatch.Status.COMPLETED
 
 
+def test_property_unit_history_view_shows_imported_historical_novelties(client, accounting_admin_user):
+    batch = prepare_ready_historical_batch(accounting_admin_user)
+    finalize_historical_import(batch_id=batch.pk, user=accounting_admin_user)
+    novelty = OperationalNovelty.objects.filter(
+        origin=OperationalNovelty.Origin.HISTORICAL_IMPORT,
+        property_unit__isnull=False,
+    ).select_related("property_unit").first()
+    assert novelty is not None
+    client.force_login(accounting_admin_user)
+
+    response = client.get(reverse("real_estate:property_unit_history", args=[novelty.property_unit_id]))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "Novedades" in content
+    assert novelty.summary in content
+    assert novelty.get_origin_display() in content
+
+
 def test_uploaded_analysis_stores_file_path(accounting_admin_user):
     batch = prepare_ready_historical_batch(accounting_admin_user)
     imported_file = batch.files.get()
 
     assert imported_file.stored_path
     assert (settings.MEDIA_ROOT / imported_file.stored_path).exists()
+
+
+def test_historical_novelty_summary_keeps_descriptive_text_from_name_columns():
+    summary, detail = _summary_detail_from_cells(
+        [
+            {"header": "NOMBRE CLIENTE", "value": "*TERMIN.SIN ABONOS", "formula": False},
+            {"header": "OBSERVACIONES", "value": "Detalle historico", "formula": False},
+            {"header": "RECIBO FIDUCIA MAR/2026", "value": "100000", "formula": False},
+        ]
+    )
+
+    assert summary == "*TERMIN.SIN ABONOS"
+    assert detail == "Detalle historico"

@@ -2,11 +2,19 @@ from dataclasses import dataclass
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 
-from .models import Client, FiduciaryAssignment, FiduciaryAssignmentHolder, FiduciaryNovelty, UnitOwnership
+from .models import Client, FiduciaryAssignment, FiduciaryAssignmentHolder, OperationalNovelty, UnitOwnership
 
 
-NOVELTY_TYPE_CHOICES = FiduciaryNovelty.NoveltyType.choices
+NOVELTY_TYPE_CHOICES = [
+    ("cession", "Cesion"),
+    ("exclusion", "Exclusion"),
+    ("substitution", "Sustitucion"),
+    ("administrative_correction", "Correccion administrativa"),
+    ("withdrawal", "Retiro"),
+    ("other", "Otro"),
+]
 
 
 @dataclass(frozen=True)
@@ -22,6 +30,13 @@ class AssignmentChangeResult:
 
 
 ASSIGNMENT_CHANGE_WITHOUT_NEW_ASSIGNMENT = {"withdrawal", "exclusion"}
+
+
+@dataclass(frozen=True)
+class OperationalNoveltyResult:
+    novelty: OperationalNovelty
+    ownership: UnitOwnership | None = None
+    assignment: FiduciaryAssignment | None = None
 
 
 def validate_unit_primary_available(*, unit, current_instance=None) -> None:
@@ -240,136 +255,234 @@ def change_assignment(
     return AssignmentChangeResult(previous_assignment=current, new_assignment=target_assignment)
 
 
-def register_fiduciary_novelty(
+@dataclass(frozen=True)
+class OwnershipAssignmentCreationResult:
+    ownership: UnitOwnership
+    assignment: FiduciaryAssignment
+    novelty: OperationalNovelty
+
+
+def create_primary_ownership_with_assignment(
     *,
-    project,
-    property_unit,
-    novelty_type: str,
+    unit,
+    primary_client: Client,
+    assignment_number: str,
     effective_date,
-    reason: str,
-    created_by,
-    ip_address: str | None = None,
-    new_primary_client: Client | None = None,
+    reason: str = "",
     secondary_clients=None,
-    new_assignment_number: str = "",
-    other_description: str = "",
-) -> FiduciaryNovelty:
+    novelty_type: str = OperationalNovelty.NoveltyType.CESSION,
+    other_type: str = "",
+    created_by=None,
+) -> OwnershipAssignmentCreationResult:
     secondary_clients = list(secondary_clients or [])
+    assignment_number = (assignment_number or "").strip()
+    reason = (reason or "Registro de nueva titularidad y encargo fiduciario.").strip()
+    other_type = (other_type or "").strip()
+    if novelty_type == OperationalNovelty.NoveltyType.OTHER and not other_type:
+        raise ValidationError({"other_type": "Indique cual es la novedad."})
+    if not assignment_number:
+        raise ValidationError({"assignment_number": "Registre el numero del nuevo encargo fiduciario."})
+    if primary_client in secondary_clients:
+        raise ValidationError({"secondary_clients": "El titular principal no debe repetirse como secundario."})
+    if FiduciaryAssignment.objects.filter(assignment_number=assignment_number).exists():
+        raise ValidationError({"assignment_number": "El numero de encargo ya existe y no puede reutilizarse."})
+
     with transaction.atomic():
-        unit = property_unit.__class__.objects.select_for_update().get(pk=property_unit.pk)
-        previous_primary = (
+        locked_unit = unit.__class__.objects.select_for_update().get(pk=unit.pk)
+        current_primary = (
             UnitOwnership.objects.select_for_update()
-            .filter(property_unit=unit, is_active=True, is_primary=True)
+            .filter(property_unit=locked_unit, is_active=True, is_primary=True)
             .select_related("client")
             .first()
         )
-        previous_assignment = (
+        current_assignment = (
             FiduciaryAssignment.objects.select_for_update()
-            .filter(property_unit=unit, is_active=True)
-            .prefetch_related("holders", "payments")
+            .filter(property_unit=locked_unit, is_active=True)
+            .prefetch_related("holders")
             .first()
         )
-        before = _unit_state(unit)
-        affected_payments = previous_assignment.payments.count() if previous_assignment else 0
+        if current_primary and current_primary.client_id == primary_client.pk:
+            raise ValidationError({"client": "El cliente ya es titular principal vigente de la unidad."})
+        previous_client = current_primary.client if current_primary else None
+        previous_assignment = current_assignment
 
-        if novelty_type in ASSIGNMENT_CHANGE_WITHOUT_NEW_ASSIGNMENT:
-            if previous_assignment:
-                result = change_assignment(
-                    current_assignment=previous_assignment,
-                    new_assignment_number="",
-                    effective_date=effective_date,
-                    novelty_type=novelty_type,
-                    reason=reason,
-                    primary_client=None,
-                    secondary_clients=[],
-                    other_description=other_description,
-                )
-                new_assignment = result.new_assignment
-            else:
-                UnitOwnership.objects.filter(property_unit=unit, is_active=True).update(
-                    is_active=False,
-                    end_date=effective_date,
-                    last_change_reason=_reason(novelty_type, other_description or reason),
-                )
-                new_assignment = None
-        elif previous_assignment:
-            result = change_assignment(
-                current_assignment=previous_assignment,
-                new_assignment_number=new_assignment_number,
-                effective_date=effective_date,
-                novelty_type=novelty_type,
-                reason=reason,
-                primary_client=new_primary_client,
-                secondary_clients=secondary_clients,
-                other_description=other_description,
-            )
-            new_assignment = result.new_assignment
-        else:
-            if not new_primary_client:
-                raise ValidationError({"new_primary_client": "Seleccione el titular principal."})
-            change_primary_ownership(
-                unit=unit,
-                new_client=new_primary_client,
-                effective_date=effective_date,
-                novelty_type=novelty_type,
-                reason=other_description or reason,
-            )
-            new_assignment = None
+        if current_primary:
+            current_primary.is_active = False
+            current_primary.end_date = effective_date
+            current_primary.last_change_reason = reason
+            current_primary.full_clean()
+            current_primary.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])
 
-        after = _unit_state(unit)
-        novelty = FiduciaryNovelty(
-            project=project,
-            property_unit=unit,
+        if current_assignment:
+            current_assignment.is_active = False
+            current_assignment.end_date = effective_date
+            current_assignment.last_change_reason = reason
+            current_assignment.full_clean()
+            current_assignment.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])
+            current_assignment.holders.filter(is_active=True).update(
+                is_active=False,
+                end_date=effective_date,
+                last_change_reason=reason,
+                updated_at=timezone.now(),
+            )
+
+        ownership = UnitOwnership(
+            client=primary_client,
+            property_unit=locked_unit,
+            is_primary=True,
+            start_date=effective_date,
+            last_change_reason=reason,
+        )
+        ownership.full_clean()
+        ownership.save()
+
+        assignment = FiduciaryAssignment(
+            assignment_number=assignment_number,
+            property_unit=locked_unit,
+            start_date=effective_date,
+            observations=reason,
+            last_change_reason=reason,
+        )
+        assignment.full_clean()
+        assignment.save()
+        FiduciaryAssignmentHolder.objects.create(
+            assignment=assignment,
+            client=primary_client,
+            is_primary=True,
+            start_date=effective_date,
+            last_change_reason=reason,
+        )
+
+        seen_secondary_ids = set()
+        for client in secondary_clients:
+            if client.pk in seen_secondary_ids:
+                raise ValidationError({"secondary_clients": "No puede seleccionar el mismo cliente secundario mas de una vez."})
+            seen_secondary_ids.add(client.pk)
+            secondary_ownership, _ = UnitOwnership.objects.get_or_create(
+                client=client,
+                property_unit=locked_unit,
+                is_active=True,
+                defaults={
+                    "is_primary": False,
+                    "start_date": effective_date,
+                    "last_change_reason": reason,
+                },
+            )
+            if secondary_ownership.is_primary:
+                raise ValidationError({"secondary_clients": "Un titular principal vigente no puede agregarse como secundario."})
+            FiduciaryAssignmentHolder.objects.create(
+                assignment=assignment,
+                client=client,
+                is_primary=False,
+                start_date=effective_date,
+                last_change_reason=reason,
+            )
+        novelty = OperationalNovelty(
+            project=locked_unit.project,
+            property_unit=locked_unit,
             novelty_type=novelty_type,
+            other_type=other_type,
+            origin=OperationalNovelty.Origin.AUTOMATIC,
+            status=OperationalNovelty.Status.APPLIED,
             effective_date=effective_date,
-            reason=reason,
-            other_description=other_description,
-            previous_primary_client=previous_primary.client if previous_primary else None,
-            new_primary_client=new_primary_client,
+            previous_client=previous_client,
+            new_client=primary_client,
             previous_assignment=previous_assignment,
-            new_assignment=new_assignment,
+            new_assignment=assignment,
+            summary=reason,
+            detail=reason,
             created_by=created_by,
-            ip_address=ip_address or None,
-            affected_payments_count=affected_payments,
-            before_data=before,
-            after_data=after,
-            result_message="Novedad aplicada correctamente.",
         )
         novelty.full_clean()
         novelty.save()
-    return novelty
+    return OwnershipAssignmentCreationResult(ownership=ownership, assignment=assignment, novelty=novelty)
 
 
-def _unit_state(unit) -> dict:
-    active_ownerships = [
-        {
-            "client_id": ownership.client_id,
-            "client": ownership.client.full_name,
-            "is_primary": ownership.is_primary,
-        }
-        for ownership in UnitOwnership.objects.filter(property_unit=unit, is_active=True)
-        .select_related("client")
-        .order_by("-is_primary", "pk")
-    ]
-    assignment = (
-        FiduciaryAssignment.objects.filter(property_unit=unit, is_active=True)
-        .prefetch_related("holders", "payments")
-        .first()
-    )
-    return {
-        "unit_id": unit.pk,
-        "unit": str(unit),
-        "ownerships": active_ownerships,
-        "assignment_id": assignment.pk if assignment else None,
-        "assignment_number": assignment.assignment_number if assignment else "",
-        "holders": [
-            {"client_id": holder.client_id, "client": holder.client.full_name, "is_primary": holder.is_primary}
-            for holder in assignment.holders.select_related("client").filter(is_active=True).order_by("-is_primary", "pk")
-        ]
-        if assignment
-        else [],
-        "payments_count": assignment.payments.count() if assignment else 0,
-    }
+def apply_operational_novelty(
+    *,
+    unit,
+    novelty_type: str,
+    effective_date,
+    summary: str,
+    detail: str,
+    user,
+    new_client: Client | None = None,
+    new_assignment_number: str = "",
+    secondary_clients=None,
+    other_type: str = "",
+) -> OperationalNoveltyResult:
+    summary = (summary or "").strip()
+    detail = (detail or "").strip()
+    other_type = (other_type or "").strip()
+    if novelty_type == OperationalNovelty.NoveltyType.OTHER and not other_type:
+        raise ValidationError({"other_type": "Indique cual es la novedad."})
+    if novelty_type in {OperationalNovelty.NoveltyType.CESSION, OperationalNovelty.NoveltyType.SUBSTITUTION}:
+        result = create_primary_ownership_with_assignment(
+            unit=unit,
+            primary_client=new_client,
+            assignment_number=new_assignment_number,
+            effective_date=effective_date,
+            reason=summary or detail or "Novedad operativa.",
+            secondary_clients=secondary_clients,
+            novelty_type=novelty_type,
+            other_type=other_type,
+            created_by=user,
+        )
+        if detail:
+            result.novelty.detail = detail
+            result.novelty.full_clean()
+            result.novelty.save(update_fields=["detail", "updated_at"])
+        return OperationalNoveltyResult(novelty=result.novelty, ownership=result.ownership, assignment=result.assignment)
+
+    with transaction.atomic():
+        locked_unit = unit.__class__.objects.select_for_update().get(pk=unit.pk)
+        current_primary = (
+            UnitOwnership.objects.select_for_update()
+            .filter(property_unit=locked_unit, is_active=True, is_primary=True)
+            .select_related("client")
+            .first()
+        )
+        current_assignment = (
+            FiduciaryAssignment.objects.select_for_update()
+            .filter(property_unit=locked_unit, is_active=True)
+            .first()
+        )
+        operation_reason = summary or detail or dict(NOVELTY_TYPE_CHOICES).get(novelty_type, novelty_type)
+        if novelty_type in {OperationalNovelty.NoveltyType.WITHDRAWAL, OperationalNovelty.NoveltyType.EXCLUSION}:
+            if current_primary:
+                current_primary.is_active = False
+                current_primary.end_date = effective_date
+                current_primary.last_change_reason = operation_reason
+                current_primary.full_clean()
+                current_primary.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])
+            if current_assignment:
+                current_assignment.holders.filter(is_active=True, is_primary=True).update(
+                    is_active=False,
+                    end_date=effective_date,
+                    last_change_reason=operation_reason,
+                    updated_at=timezone.now(),
+                )
+                current_assignment.last_change_reason = operation_reason
+                current_assignment.full_clean()
+                current_assignment.save(update_fields=["last_change_reason", "updated_at"])
+        novelty = OperationalNovelty(
+            project=locked_unit.project,
+            property_unit=locked_unit,
+            novelty_type=novelty_type,
+            other_type=other_type,
+            origin=OperationalNovelty.Origin.MANUAL,
+            status=OperationalNovelty.Status.APPLIED if novelty_type != OperationalNovelty.NoveltyType.OTHER else OperationalNovelty.Status.DESCRIPTIVE,
+            effective_date=effective_date,
+            previous_client=current_primary.client if current_primary else None,
+            new_client=new_client if novelty_type not in {OperationalNovelty.NoveltyType.WITHDRAWAL, OperationalNovelty.NoveltyType.EXCLUSION} else None,
+            previous_assignment=current_assignment,
+            summary=summary,
+            detail=detail,
+            created_by=user,
+        )
+        novelty.full_clean()
+        novelty.save()
+    return OperationalNoveltyResult(novelty=novelty)
 
 
 def save_form_object_safely(form):

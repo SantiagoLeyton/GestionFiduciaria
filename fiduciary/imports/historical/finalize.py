@@ -1,3 +1,4 @@
+import hashlib
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from fiduciary.models import (
@@ -15,9 +17,11 @@ from fiduciary.models import (
     ImportAppliedRecord,
     ImportBatch,
     ImportedFile,
+    ImportedHistoricalObservation,
     ImportedHistoricalNovelty,
     ImportResolution,
     ImportRowIssue,
+    OperationalNovelty,
     Payment,
     UnitOwnership,
 )
@@ -47,6 +51,8 @@ class HistoricalImportFinalizationResult:
     created_payments: int = 0
     duplicate_payments: int = 0
     preserved_novelties: int = 0
+    imported_observations: int = 0
+    imported_novelties: int = 0
 
 
 def store_historical_import_file(*, imported_file: ImportedFile, source_path) -> None:
@@ -144,6 +150,8 @@ class _FinalizationContext:
         self.created_payments = 0
         self.duplicate_payments = 0
         self.preserved_novelties = 0
+        self.imported_observations = 0
+        self.imported_novelties = 0
 
     def materialize_structure(self) -> None:
         self._materialize_kind(DetectedStructureElement.InferredKind.PROJECT)
@@ -168,6 +176,7 @@ class _FinalizationContext:
                     self._assignment_holder_for_client(assignment, client, historical_client.is_primary, ownership)
                 for payment in row.payments:
                     self._payment_for_row(assignment, payment, sheet_result)
+                self._main_row_observation(row, unit, assignment, clients[0] if clients else None, sheet_result)
         self.batch.processed_rows = workbook.statistics.valid_rows
 
     def preserve_historical_novelties(self) -> None:
@@ -184,6 +193,7 @@ class _FinalizationContext:
                 source_row=novelty.row_number,
                 summary="Novedad historica preservada para fases posteriores.",
             )
+            self._historical_novelty_observation(novelty)
 
     def result(self) -> HistoricalImportFinalizationResult:
         return HistoricalImportFinalizationResult(
@@ -199,6 +209,8 @@ class _FinalizationContext:
             created_payments=self.created_payments,
             duplicate_payments=self.duplicate_payments,
             preserved_novelties=self.preserved_novelties,
+            imported_observations=self.imported_observations,
+            imported_novelties=self.imported_novelties,
         )
 
     def summary(self) -> str:
@@ -208,7 +220,8 @@ class _FinalizationContext:
             f"agrupaciones creadas: {self.created_structural_groups}; unidades creadas: {self.created_property_units}; "
             f"clientes creados: {self.created_clients}; encargos creados: {self.created_assignments}; "
             f"pagos creados: {self.created_payments}; pagos duplicados omitidos: {self.duplicate_payments}; "
-            f"novedades preservadas: {self.preserved_novelties}."
+            f"novedades preservadas: {self.preserved_novelties}; "
+            f"observaciones historicas importadas: {self.imported_observations}."
         )
 
     def _materialize_kind(self, kind: str) -> None:
@@ -453,6 +466,227 @@ class _FinalizationContext:
         else:
             raise HistoricalImportFinalizationError("; ".join(result.errors) or "No fue posible crear el pago.")
 
+    def _main_row_observation(self, row, unit: PropertyUnit, assignment: FiduciaryAssignment, client: Client | None, sheet_result) -> None:
+        detail = (row.observation or "").strip()
+        if not detail:
+            return
+        self._save_historical_observation(
+            origin=ImportedHistoricalObservation.Origin.MAIN_TABLE_OBSERVATION,
+            sheet_result=sheet_result,
+            source_novelty=None,
+            source_sheet=row.sheet_name,
+            source_row=row.row_number,
+            source_order=row.row_number,
+            project=unit.project,
+            unit=unit,
+            client=client,
+            assignment=assignment,
+            summary="",
+            detail=detail,
+            historical_section="",
+            historical_month=None,
+            historical_year=None,
+            payload={"row_type": "main_table"},
+        )
+
+    def _historical_novelty_observation(self, novelty: ImportedHistoricalNovelty) -> None:
+        unit = self._unit_from_imported_novelty(novelty)
+        assignment = self._assignment_from_imported_novelty(novelty, unit)
+        client = self._client_from_imported_novelty(novelty)
+        summary, detail = _summary_detail_from_cells(novelty.original_cells)
+        if not any([summary, detail, client, unit, assignment]):
+            return
+        if not unit:
+            return
+        operational_novelty, created = OperationalNovelty.objects.update_or_create(
+            source_novelty=novelty,
+            defaults={
+                "batch": self.batch,
+                "imported_file": self.imported_file,
+                "project": unit.project if unit else self._project_from_imported_novelty(novelty),
+                "property_unit": unit,
+                "novelty_type": OperationalNovelty.NoveltyType.HISTORICAL,
+                "origin": OperationalNovelty.Origin.HISTORICAL_IMPORT,
+                "status": OperationalNovelty.Status.IMPORTED if unit else OperationalNovelty.Status.DESCRIPTIVE,
+                "historical_client": client,
+                "historical_assignment": assignment,
+                "summary": summary,
+                "detail": detail,
+                "source_sheet": novelty.sheet_result.sheet_name,
+                "source_row": novelty.row_number,
+                "historical_section": _cell_payload_value(novelty.original_cells, "__historical_section__") or "",
+                "historical_month": _int_or_none(_cell_payload_value(novelty.original_cells, "__section_month__")),
+                "historical_year": _int_or_none(_cell_payload_value(novelty.original_cells, "__section_year__")),
+                "source_payload": {"cells": novelty.original_cells},
+                "created_by": self.user,
+            },
+        )
+        operational_novelty.full_clean()
+        operational_novelty.save()
+        if created:
+            self.imported_novelties += 1
+        if assignment:
+            payments = assignment.payments.filter(source_file=novelty.imported_file, source_row=novelty.row_number)
+            if payments.exists():
+                pass
+
+    def _project_from_imported_novelty(self, novelty: ImportedHistoricalNovelty) -> Project | None:
+        project_name = (novelty.project_name or "").strip()
+        if not project_name:
+            return None
+        query = Project.objects.filter(Q(code__iexact=project_name) | Q(name__iexact=project_name))
+        return query.first() if query.count() == 1 else None
+
+    def _unit_from_imported_novelty(self, novelty: ImportedHistoricalNovelty) -> PropertyUnit | None:
+        unit_value = novelty.unit_code or novelty.unit_name
+        if not unit_value:
+            return None
+        key = (normalize_text(novelty.grouping_name), normalize_text(unit_value))
+        unit = self.units_by_context.get(key)
+        if unit:
+            return unit
+        project = self._project_from_imported_novelty(novelty)
+        if not project:
+            return None
+        query = PropertyUnit.objects.filter(project=project).filter(Q(code__iexact=unit_value) | Q(name__iexact=unit_value))
+        return query.first() if query.count() == 1 else None
+
+    def _assignment_from_imported_novelty(self, novelty: ImportedHistoricalNovelty, unit: PropertyUnit | None) -> FiduciaryAssignment | None:
+        number = novelty.assignment_number.strip()
+        if not number:
+            return None
+        assignment = FiduciaryAssignment.objects.filter(assignment_number=number).first()
+        if assignment:
+            return assignment
+        if not unit:
+            return None
+        assignment = FiduciaryAssignment(
+            assignment_number=number,
+            property_unit=unit,
+            start_date=self.today,
+            end_date=self.today,
+            is_active=False,
+            observations="Encargo historico reconstruido desde seccion NOVEDADES.",
+            last_change_reason=_reason(self.batch),
+        )
+        assignment.full_clean()
+        assignment.save()
+        self.created_assignments += 1
+        self._trace(
+            ImportAppliedRecord.EntityKind.FIDUCIARY_ASSIGNMENT,
+            ImportAppliedRecord.Action.CREATED,
+            assignment.pk,
+            sheet_result=novelty.sheet_result,
+            source_row=novelty.row_number,
+        )
+        return assignment
+
+    def _client_from_imported_novelty(self, novelty: ImportedHistoricalNovelty) -> Client | None:
+        document = _first_cell_by_header(novelty.original_cells, {"cedula cliente", "documento cliente", "identificacion", "identificacion cliente"})
+        name = _first_cell_by_header(novelty.original_cells, {"nombre cliente"})
+        document = str(document).strip() if document else ""
+        name = str(name).strip() if name else ""
+        if document:
+            existing = Client.objects.filter(document_number=document).first()
+            if existing:
+                return existing
+        if not name:
+            return None
+        result = create_imported_client(
+            full_name=name,
+            document_number=document or None,
+            source_origin=Client.SourceOrigin.HISTORICAL_IMPORT,
+            incomplete_reason="Cliente historico importado desde seccion NOVEDADES.",
+        )
+        if result.status == "invalid" or not result.client:
+            return None
+        if not UnitOwnership.objects.filter(client=result.client, is_active=True).exists():
+            result.client.is_active = False
+            result.client.last_change_reason = "Cliente historico sin titularidad vigente importado desde NOVEDADES."
+            result.client.save(update_fields=["is_active", "last_change_reason", "updated_at"])
+        if result.status == "created":
+            self.created_clients += 1
+        return result.client
+
+    def _save_historical_observation(
+        self,
+        *,
+        origin,
+        sheet_result,
+        source_novelty,
+        source_sheet,
+        source_row,
+        source_order,
+        project,
+        unit,
+        client,
+        assignment,
+        summary,
+        detail,
+        historical_section,
+        historical_month,
+        historical_year,
+        payload,
+        status=ImportedHistoricalObservation.Status.IMPORTED,
+    ) -> ImportedHistoricalObservation:
+        dedupe_key = _observation_dedupe_key(
+            origin=origin,
+            project=project,
+            unit=unit,
+            client=client,
+            assignment=assignment,
+            source_sheet=source_sheet,
+            summary=summary,
+            detail=detail,
+            historical_section=historical_section,
+        )
+        defaults = {
+                "batch": self.batch,
+                "imported_file": self.imported_file,
+                "sheet_result": sheet_result,
+                "source_novelty": source_novelty,
+                "project": project,
+                "property_unit": unit,
+                "client": client,
+                "assignment": assignment,
+                "origin": origin,
+                "status": status,
+                "historical_section": historical_section,
+                "historical_month": historical_month,
+                "historical_year": historical_year,
+                "summary": summary,
+                "detail": detail,
+                "source_sheet": source_sheet,
+                "source_row": source_row,
+                "source_order": source_order,
+                "source_payload": payload,
+                "imported_by": self.user,
+            }
+        natural_match = ImportedHistoricalObservation.objects.filter(
+            origin=origin,
+            property_unit=unit,
+            client=client,
+            assignment=assignment,
+            source_sheet=source_sheet,
+            source_row=source_row,
+            historical_section=historical_section,
+        ).first()
+        if natural_match:
+            for field, value in defaults.items():
+                setattr(natural_match, field, value)
+            natural_match.dedupe_key = dedupe_key
+            natural_match.full_clean()
+            natural_match.save()
+            observation, created = natural_match, False
+        else:
+            observation, created = ImportedHistoricalObservation.objects.update_or_create(
+                dedupe_key=dedupe_key,
+                defaults=defaults,
+            )
+        if created:
+            self.imported_observations += 1
+        return observation
+
     def _single_project(self) -> Project:
         projects = list(self.projects.values())
         if len({project.pk for project in projects}) != 1:
@@ -557,6 +791,110 @@ def _safe_error(exc: Exception) -> str:
 
 def _created_action(created: bool) -> str:
     return ImportAppliedRecord.Action.CREATED if created else ImportAppliedRecord.Action.REUSED
+
+
+def _summary_detail_from_cells(cells: list[dict]) -> tuple[str, str]:
+    detail_parts = []
+    summary_parts = []
+    seen = set()
+    for cell in cells:
+        header = normalize_text(cell.get("header") or "")
+        value = str(cell.get("value") or "").strip()
+        if not value or cell.get("formula"):
+            continue
+        if header in {"observaciones", "observacion"}:
+            detail_parts.append(value)
+            continue
+        if _cell_is_summary_candidate(cell, value):
+            key = normalize_text(value)
+            if key not in seen:
+                summary_parts.append(value)
+                seen.add(key)
+    return " | ".join(summary_parts), "\n".join(detail_parts)
+
+
+def _cell_is_summary_candidate(cell: dict, value: str) -> bool:
+    header = normalize_text(cell.get("header") or "")
+    if header == "nombre cliente":
+        return _looks_descriptive_novelty_text(value)
+    ignored_headers = {
+        "#",
+        "vendedor",
+        "encargo fiduciario",
+        "apto",
+        "apartamento",
+        "local",
+        "bodega",
+        "unidad",
+        "vinc",
+        "cedula cliente",
+        "documento cliente",
+        "identificacion cliente",
+        "identificacion",
+        "nombre cliente",
+        "telefono",
+        "email",
+        "correo",
+        "contacto",
+    }
+    if header in ignored_headers or header.startswith("recibo fiducia"):
+        return False
+    normalized = normalize_text(value)
+    if not normalized or normalized in {"0", "1", "#"}:
+        return False
+    if _looks_numeric_only(value) or "%" in value:
+        return False
+    return any(ch.isalpha() for ch in value)
+
+
+def _looks_descriptive_novelty_text(value: str) -> bool:
+    normalized = normalize_text(value)
+    compact = normalized.replace(" ", "")
+    if value.strip().startswith("*"):
+        return True
+    keywords = {"termin", "terminacion", "retiro", "retirado", "cesion", "exclusion", "sustitucion", "anulacion", "cambio"}
+    return any(keyword in compact for keyword in keywords)
+
+
+def _looks_numeric_only(value: str) -> bool:
+    text = value.replace(".", "").replace(",", "").replace("$", "").replace(" ", "").strip()
+    return bool(text) and text.replace("-", "").isdigit()
+
+
+def _first_cell_by_header(cells: list[dict], headers: set[str]):
+    for cell in cells:
+        if normalize_text(cell.get("header") or "") in headers:
+            value = cell.get("value")
+            if value not in ("", None):
+                return value
+    return None
+
+
+def _cell_payload_value(cells: list[dict], pseudo_header: str):
+    for cell in cells:
+        if cell.get("header") == pseudo_header:
+            return cell.get("value")
+    return None
+
+
+def _int_or_none(value):
+    try:
+        return int(value) if value not in ("", None) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _observation_dedupe_key(*, origin, project, unit, client, assignment, source_sheet, summary, detail, historical_section) -> str:
+    parts = [
+        str(origin),
+        str(project.pk if project else ""),
+        str(unit.pk if unit else ""),
+        str(client.document_number if client and client.document_number else client.pk if client else ""),
+        str(assignment.assignment_number if assignment else ""),
+        normalize_text(source_sheet),
+        normalize_text(historical_section),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 def _reason(batch: ImportBatch) -> str:

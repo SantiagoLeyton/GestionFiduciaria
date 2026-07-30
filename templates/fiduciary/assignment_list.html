@@ -10,8 +10,7 @@
     <section class="content">
       {% include "includes/messages.html" %}
       <div class="page-heading">
-        <div><h1>Encargos fiduciarios</h1><p>Consulte encargos, titulares y relacion con unidades inmobiliarias.</p></div>
-        {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:assignment_create' %}">Nuevo encargo</a>{% endif %}
+        <div><h1>Encargos fiduciarios</h1><p>Consulte encargos, titulares y relacion con unidades inmobiliarias. Los nuevos encargos se registran desde Nueva titularidad.</p></div>
       </div>
       <form class="filter-panel real-estate-filter" method="get">
         <div><label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>{{ filter_form.q }}</div>

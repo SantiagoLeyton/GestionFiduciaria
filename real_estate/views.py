@@ -5,7 +5,7 @@ from django.db.models import Prefetch
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse_lazy
-from django.views.generic import CreateView, ListView, UpdateView, View
+from django.views.generic import CreateView, DetailView, ListView, UpdateView, View
 
 from .forms import (
     GroupingTypeForm,
@@ -372,3 +372,46 @@ class PropertyUnitUpdateView(EntityUpdateView):
 class PropertyUnitStatusView(EntityStatusView):
     model = PropertyUnit
     list_url_name = "real_estate:property_unit_list"
+
+
+class PropertyUnitHistoryView(RealEstateReadRequiredMixin, DetailView):
+    model = PropertyUnit
+    template_name = "real_estate/property_unit_history.html"
+    context_object_name = "property_unit"
+
+    def get_queryset(self):
+        return PropertyUnit.objects.select_related("project", "structural_group", "structural_group__grouping_type")
+
+    def get_context_data(self, **kwargs):
+        from fiduciary.models import FiduciaryAssignment, ImportedHistoricalObservation, OperationalNovelty
+
+        context = super().get_context_data(**kwargs)
+        assignment_id = self.request.GET.get("assignment")
+        assignments = FiduciaryAssignment.objects.filter(property_unit=self.object).order_by("-is_active", "assignment_number")
+        observations = (
+            ImportedHistoricalObservation.objects.filter(property_unit=self.object).exclude(origin="historical_novelty")
+            .select_related("client", "assignment", "imported_file", "batch", "sheet_result")
+            .prefetch_related("related_payments")
+            .order_by("historical_year", "historical_month", "source_order", "source_row", "pk")
+        )
+        novelties = OperationalNovelty.objects.filter(property_unit=self.object).select_related(
+            "previous_client",
+            "new_client",
+            "historical_client",
+            "previous_assignment",
+            "new_assignment",
+            "historical_assignment",
+            "created_by",
+        )
+        if assignment_id:
+            observations = observations.filter(assignment_id=assignment_id)
+            novelties = novelties.filter(
+                Q(previous_assignment_id=assignment_id)
+                | Q(new_assignment_id=assignment_id)
+                | Q(historical_assignment_id=assignment_id)
+            )
+        context["observations"] = observations
+        context["novelties"] = novelties
+        context["assignment_filter_options"] = assignments
+        context["selected_assignment_id"] = str(assignment_id or "")
+        return context

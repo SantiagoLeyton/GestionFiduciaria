@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Auditoria | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Auditoria</h1>
+          <p>Consulte la trazabilidad registrada durante las operaciones de importacion.</p>
+        </div>
+      </div>
+
+      <form class="filter-panel" method="get">
+        <div class="form-grid">
+          {% for field in filter_form %}
+            <div>
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Buscar</button>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:audit_list' %}">Limpiar</a>
+        </div>
+      </form>
+
+      <section class="data-section">
+        <div class="section-header"><h2>Registros de auditoria</h2><span>{{ page_obj.paginator.count }} registro{{ page_obj.paginator.count|pluralize }}</span></div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr><th>Fecha y hora</th><th>Responsable</th><th>Accion</th><th>Entidad</th><th>Descripcion</th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for record in records %}
+                <tr>
+                  <td>{{ record.created_at|date:"d/m/Y H:i" }}</td>
+                  <td>{% with responsible=record.batch.imported_by|default:record.batch.initiated_by %}{{ responsible.get_full_name|default:responsible.username }}{% endwith %}</td>
+                  <td>{{ record.get_action_display }}</td>
+                  <td>{{ record.get_entity_kind_display }}</td>
+                  <td>{{ record.summary|default:record.batch.summary|truncatechars:100 }}</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:audit_detail' record.pk %}">Ver detalle</a></td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="6">No hay registros de auditoria con los filtros seleccionados.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% include "includes/pagination.html" %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

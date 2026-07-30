@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% load money %}
+
+{% block title %}Pagos | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Pagos</h1>
+          <p>Consulte los pagos registrados por importaciones historicas y reportes fiduciarios.</p>
+        </div>
+      </div>
+
+      <form class="filter-panel" method="get">
+        <div class="form-grid">
+          {% for field in filter_form %}
+            <div>
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Buscar</button>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:payment_list' %}">Limpiar</a>
+        </div>
+      </form>
+
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Pagos registrados</h2>
+          {% if search_performed %}<span>{{ page_obj.paginator.count }} registro{{ page_obj.paginator.count|pluralize }}</span>{% endif %}
+        </div>
+        {% if not search_performed %}
+          <div class="empty-state">Seleccione al menos un criterio de busqueda para consultar pagos.</div>
+        {% else %}
+          <div class="table-responsive">
+            <table class="table align-middle data-table">
+              <thead>
+                <tr><th>Fecha</th><th>Proyecto</th><th>Unidad</th><th>Cliente</th><th>Valor</th><th>Encargo fiduciario</th><th>Origen</th></tr>
+              </thead>
+              <tbody>
+                {% for payment in payments %}
+                  <tr>
+                    <td>{% if payment.exact_date %}{{ payment.exact_date|date:"d/m/Y" }}{% else %}{{ payment.period_month }}/{{ payment.period_year }}{% endif %}</td>
+                    <td><a href="{% url 'real_estate:project_list' %}?q={{ payment.assignment.property_unit.project.code }}">{{ payment.assignment.property_unit.project.name }}</a></td>
+                    <td><a href="{% url 'real_estate:property_unit_history' payment.assignment.property_unit.pk %}">{{ payment.assignment.property_unit.name|default:payment.assignment.property_unit.code }}</a></td>
+                    <td>{% if payment.display_client %}<a href="{% url 'fiduciary:client_detail' payment.display_client.pk %}">{{ payment.display_client.full_name }}</a>{% else %}-{% endif %}</td>
+                    <td>{{ payment.amount|money_co }}</td>
+                    <td><a href="{% url 'fiduciary:assignment_detail' payment.assignment.pk %}">{{ payment.assignment.assignment_number }}</a></td>
+                    <td>{{ payment.source_file.get_file_type_display }} - {{ payment.source_file.original_name }}</td>
+                  </tr>
+                {% empty %}
+                  <tr><td colspan="7">No hay pagos con los filtros seleccionados.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% include "includes/pagination.html" %}
+        {% endif %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}
