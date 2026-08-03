@@ -109,13 +109,10 @@ La arquitectura definitiva de despliegue centraliza la instalación en un servid
 
 Los usuarios no instalan el sistema en sus equipos. El acceso se realiza exclusivamente desde un navegador web mediante una dirección interna de la red corporativa, disponible para los computadores conectados a la misma red LAN o Wi-Fi.
 
-La solución también incluye **Gestión Fiduciaria Server Manager**, una herramienta administrativa independiente de la aplicación web, utilizada únicamente en el servidor para facilitar tareas de administración como iniciar, detener o reiniciar el servidor, abrir la aplicación, visualizar su estado, verificar la conexión con PostgreSQL y consultar registros del sistema.
+La arquitectura de despliegue centraliza la ejecución en el servidor Windows. Desde allí se administra el servidor de la aplicación, la base de datos PostgreSQL y los archivos requeridos por el sistema.
 
 ```text
 Servidor Windows
-    |
-    v
-Gestión Fiduciaria Server Manager
     |
     v
 Servidor Django
@@ -189,7 +186,7 @@ Crear un archivo `.env` a partir de `.env.example`.
 copy .env.example .env
 ```
 
-### 5. Ejecutar migraciones
+### 5. Ejecutar migraciones manualmente
 
 ```powershell
 python manage.py migrate
@@ -230,27 +227,15 @@ No se deben versionar secretos reales en el repositorio.
 
 ## Ejecución
 
-La ejecución operativa del sistema se administra desde **Gestión Fiduciaria Server Manager** en el servidor Windows.
+La ejecución operativa del sistema se realiza en el servidor Windows configurado para alojar la aplicación web.
 
-Desde esta herramienta administrativa se gestiona el estado del servidor de la aplicación. Los usuarios finales acceden al sistema desde el navegador mediante la URL interna definida por la empresa.
+Los usuarios finales acceden al sistema desde el navegador mediante la URL interna definida por la empresa.
 
 El acceso de usuarios debe realizarse mediante la dirección interna configurada en la red corporativa:
 
 ```text
 http://<direccion-interna-del-servidor>/
 ```
-
-Durante tareas técnicas de mantenimiento en el servidor, los archivos estáticos pueden recolectarse cuando sea necesario:
-
-```powershell
-python manage.py collectstatic --noinput
-```
-
-<div align="center"> 
-
-*Herramienta no incluida en el repositorio ⚠️* 
-
-</div>
 
 ---
 
@@ -296,10 +281,7 @@ El sistema incorpora mecanismos orientados a proteger el acceso y la trazabilida
 | Estado | Proyecto finalizado |
 | Tipo | Aplicación web |
 
-La solución está compuesta por dos componentes:
-
-1. **Gestión Fiduciaria:** aplicación web.
-2. **Gestión Fiduciaria Server Manager:** herramienta de administración del servidor.
+La solución está compuesta por la aplicación web **Gestión Fiduciaria** y los componentes necesarios para su ejecución en el servidor Windows definido para el sistema.
 
 ---
 
