@@ -21,6 +21,8 @@
     <a class="nav-link {% if url_name == 'payment_list' %}active{% endif %}" href="{% url 'fiduciary:payment_list' %}">Pagos</a>
     {% if request.user.is_accounting_admin or request.user.is_superuser %}
       <a class="nav-link {% if url_name == 'audit_list' or url_name == 'audit_detail' %}active{% endif %}" href="{% url 'fiduciary:audit_list' %}">Auditoría</a>
+      <a class="nav-link {% if url_name == 'user_list' or url_name == 'user_create' or url_name == 'user_update' or url_name == 'user_status' or url_name == 'user_delete' %}active{% endif %}" href="{% url 'user_list' %}">Gestión de cuentas</a>
+      <a class="nav-link {% if url_name == 'backup_list' or url_name == 'backup_confirm' or url_name == 'backup_create' %}active{% endif %}" href="{% url 'backup_list' %}">Copias de seguridad</a>
     {% endif %}
   </nav>
   <div class="sidebar-footer">v1.0.0 - 2026</div>

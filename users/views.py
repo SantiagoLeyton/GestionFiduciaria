@@ -1,17 +1,19 @@
 from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth import login, logout
+from django.contrib.admin.models import ADDITION, CHANGE, DELETION, LogEntry
 from django.db.models import Q
 from django.core.exceptions import PermissionDenied
-from django.shortcuts import redirect, render
-from django.urls import reverse
+from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse, reverse_lazy
+from django.utils.crypto import get_random_string
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
-from django.views.generic import ListView, View
+from django.views.generic import CreateView, ListView, UpdateView, View
 
-from .forms_admin import UserSearchForm
+from .forms_admin import ManagedUserCreateForm, ManagedUserUpdateForm, UserSearchForm
 from .forms import LoginForm
-from .permissions import UserReadRequiredMixin
+from .permissions import UserManagementRequiredMixin, UserReadRequiredMixin
 
 
 User = get_user_model()
@@ -73,9 +75,15 @@ class UserListView(UserReadRequiredMixin, ListView):
             if role:
                 queryset = queryset.filter(role=role)
             if status == "active":
-                queryset = queryset.filter(is_active=True)
+                queryset = queryset.filter(is_active=True, is_deleted=False)
             elif status == "inactive":
-                queryset = queryset.filter(is_active=False)
+                queryset = queryset.filter(is_active=False, is_deleted=False)
+            elif status == "deleted":
+                queryset = queryset.filter(is_deleted=True)
+            else:
+                queryset = queryset.filter(is_deleted=False)
+        else:
+            queryset = queryset.filter(is_deleted=False)
         return queryset
 
     def get_context_data(self, **kwargs):
@@ -87,8 +95,104 @@ class UserListView(UserReadRequiredMixin, ListView):
         return context
 
 
-class BlockedUserManagementView(UserReadRequiredMixin, View):
-    def dispatch(self, request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return self.handle_no_permission()
-        raise PermissionDenied
+class ManagedUserCreateView(UserManagementRequiredMixin, CreateView):
+    model = User
+    form_class = ManagedUserCreateForm
+    template_name = "users/user_form.html"
+    success_url = reverse_lazy("user_list")
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["actor"] = self.request.user
+        return kwargs
+
+    def form_valid(self, form):
+        user = form.save(commit=False)
+        user.username = _generate_internal_username(user.email)
+        user.set_password(get_random_string(48))
+        user.is_deleted = False
+        user.deleted_at = None
+        response = super().form_valid(form)
+        _log_user_action(self.request.user, self.object, ADDITION, "Cuenta creada desde Gestion de cuentas.")
+        messages.success(
+            self.request,
+            "Cuenta creada correctamente. El usuario debe utilizar la recuperacion de contrasena para definir su clave.",
+        )
+        return response
+
+
+class ManagedUserUpdateView(UserManagementRequiredMixin, UpdateView):
+    model = User
+    form_class = ManagedUserUpdateForm
+    template_name = "users/user_form.html"
+    success_url = reverse_lazy("user_list")
+
+    def get_queryset(self):
+        return User.objects.filter(is_deleted=False)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["actor"] = self.request.user
+        return kwargs
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        _log_user_action(self.request.user, self.object, CHANGE, "Cuenta actualizada desde Gestion de cuentas.")
+        messages.success(self.request, "Cuenta actualizada correctamente.")
+        return response
+
+
+class ManagedUserStatusView(UserManagementRequiredMixin, View):
+    allowed_actions = {"activate", "deactivate"}
+
+    def post(self, request, pk, action):
+        if action not in self.allowed_actions:
+            raise PermissionDenied
+        user = get_object_or_404(User, pk=pk, is_deleted=False)
+        if user.pk == request.user.pk and action == "deactivate":
+            messages.error(request, "No puede inactivar su propia cuenta desde esta pantalla.")
+            return redirect("user_list")
+        user.is_active = action == "activate"
+        user.save(update_fields=["is_active"])
+        label = "activada" if user.is_active else "inactivada"
+        _log_user_action(request.user, user, CHANGE, f"Cuenta {label} desde Gestion de cuentas.")
+        messages.success(request, f"Cuenta {label} correctamente.")
+        return redirect("user_list")
+
+
+class ManagedUserDeleteView(UserManagementRequiredMixin, View):
+    def post(self, request, pk):
+        user = get_object_or_404(User, pk=pk, is_deleted=False)
+        if user.pk == request.user.pk:
+            messages.error(request, "No puede eliminar logicamente su propia cuenta desde esta pantalla.")
+            return redirect("user_list")
+        user.mark_deleted()
+        user.save(update_fields=["is_deleted", "is_active", "deleted_at"])
+        _log_user_action(request.user, user, DELETION, "Cuenta eliminada logicamente desde Gestion de cuentas.")
+        messages.success(request, "Cuenta eliminada logicamente. El historial asociado se conserva.")
+        return redirect("user_list")
+
+
+BlockedUserManagementView = ManagedUserCreateView
+
+
+def _generate_internal_username(email):
+    base = (email.split("@", 1)[0] or "usuario").lower()
+    base = "".join(character if character.isalnum() or character in "._+-" else "_" for character in base)
+    base = base[:120] or "usuario"
+    candidate = base
+    suffix = 1
+    while User.objects.filter(username__iexact=candidate).exists():
+        suffix += 1
+        candidate = f"{base[:120]}_{suffix}"
+    return candidate
+
+
+def _log_user_action(actor, target_user, action_flag, message):
+    LogEntry.objects.log_actions(
+        user_id=actor.pk,
+        queryset=User.objects.filter(pk=target_user.pk),
+        action_flag=action_flag,
+        change_message=message,
+        single_object=True,
+    )

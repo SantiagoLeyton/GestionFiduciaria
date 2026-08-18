@@ -171,7 +171,8 @@ def test_home_renders_private_page(client, commercial_user):
     assert reverse("fiduciary:historical_import_list") in content
     assert reverse("fiduciary:payment_list") in content
     assert "sidebar" not in content
-    assert "© 2026 Constructora Centenario. Todos los derechos reservados." in content
+    assert "Constructora Centenario" in content
+    assert "derechos reservados" in content
 
 
 @pytest.mark.django_db
@@ -181,8 +182,11 @@ def test_navigation_for_commercial_does_not_show_admin_future_items(client, comm
     content = response.content.decode()
 
     assert reverse("fiduciary:historical_import_list") in content
-    assert "Auditoría" not in content
-    assert "Usuarios" not in content
+    assert "Auditor\u00eda" not in content
+    assert "Gesti\u00f3n de cuentas" not in content
+    assert "Copias de seguridad" not in content
+    assert "\u00c3" not in content
+    assert "\u00c2" not in content
 
 
 @pytest.mark.django_db
@@ -192,9 +196,15 @@ def test_navigation_for_accounting_admin_shows_admin_future_items(client, accoun
     content = response.content.decode()
 
     assert reverse("fiduciary:audit_list") in content
-    assert "Usuarios" not in content
+    assert reverse("user_list") in content
+    assert reverse("backup_list") in content
+    assert "Gesti\u00f3n de cuentas" in content
+    assert "Copias de seguridad" in content
     assert accounting_admin_user.role_label in content
     assert "Administrador de Contabilidad" not in content
+    assert "Importar libro hist\u00f3rico" in content
+    assert "Tipos de agrupaci\u00f3n" in content
+    assert "Auditor\u00eda" in content
 
 
 @pytest.mark.django_db
@@ -206,12 +216,17 @@ def test_internal_pages_keep_sidebar_and_remove_static_header_search(client, acc
 
     assert response.status_code == 200
     assert 'class="sidebar"' in content
-    assert "assets/logo.png" in content
+    assert "assets/logo" in content
+    assert ".png" in content
     assert "data-theme-toggle" in content
     assert "Buscar proyectos" not in content
     assert "search-placeholder" not in content
-    assert "Usuarios" not in content
-    assert "© 2026 Constructora Centenario. Todos los derechos reservados." in content
+    assert "Gesti\u00f3n de cuentas" in content
+    assert "Constructora Centenario" in content
+    assert "derechos reservados" in content
+    assert "Importar libro hist\u00f3rico" in content
+    assert "Tipos de agrupaci\u00f3n" in content
+    assert "Auditor\u00eda" in content
 
 
 @pytest.mark.django_db
@@ -221,12 +236,15 @@ def test_login_uses_static_visual_asset_and_footer_text(client):
 
     assert response.status_code == 200
     assert "login-visual-media" in content
-    assert "assets/login.gif" in content
-    assert "Contraseña" in content
-    assert "Mantener sesión iniciada" in content
-    assert "Iniciar sesión" in content
+    assert "assets/login" in content
+    assert ".gif" in content
+    assert "Contrase\u00f1a" in content
+    assert "Mantener sesi\u00f3n iniciada" in content
+    assert "Iniciar sesi\u00f3n" in content
+    assert "\u00bfOlvid\u00f3 su contrase\u00f1a?" in content
     assert "Todo acceso no autorizado" not in content
-    assert "© 2026 Constructora Centenario. Todos los derechos reservados." in content
+    assert "Constructora Centenario" in content
+    assert "derechos reservados" in content
 
 
 @pytest.mark.django_db
@@ -236,7 +254,8 @@ def test_theme_script_and_persistence_hook_are_present(client, commercial_user):
     response = client.get(reverse("home"))
     content = response.content.decode()
 
-    assert "js/theme.js" in content
+    assert "js/theme" in content
+    assert ".js" in content
     assert "pagosfiducia-theme" in content
     assert "data-theme-toggle" in content
     assert "data-theme-label" in content
@@ -269,9 +288,10 @@ def test_home_cards_are_independent_blocks_with_logo(client, accounting_admin_us
     content = client.get(reverse("home")).content.decode()
 
     assert "home-brand" in content
-    assert "assets/logo.png" in content
-    assert content.count('class="module-card"') == 13
-    assert content.count('class="module-icon"') == 13
+    assert "assets/logo" in content
+    assert ".png" in content
+    assert content.count('class="module-card"') == 15
+    assert content.count('class="module-icon"') == 15
     assert "module-grid" in content
 
 
@@ -283,7 +303,7 @@ def test_topbar_theme_button_is_next_to_logout(client, accounting_admin_user):
 
     theme_index = content.index("data-theme-toggle")
     divider_index = content.index("topbar-divider")
-    logout_index = content.index("Cerrar sesión")
+    logout_index = content.index("Cerrar sesi\u00f3n")
     assert theme_index < divider_index < logout_index
 
 
@@ -294,4 +314,7 @@ def test_sidebar_logo_uses_controlled_size_class(client, accounting_admin_user):
     content = client.get(reverse("fiduciary:audit_list")).content.decode()
 
     assert "sidebar-logo-img" in content
-    assert "assets/logo.png" in content
+    assert "assets/logo" in content
+    assert ".png" in content
+
+

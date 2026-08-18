@@ -218,6 +218,11 @@ Variables definidas en `.env.example`:
 | `DB_HOST` | Host de base de datos |
 | `DB_PORT` | Puerto de base de datos |
 | `DB_CONNECT_TIMEOUT` | Tiempo máximo de conexión |
+| `BACKUP_STORAGE_PATH` | Carpeta local del servidor donde se almacenan los archivos ZIP de respaldo |
+| `BACKUP_PG_DUMP_PATH` | Ruta o comando disponible para ejecutar `pg_dump` |
+| `BACKUP_PG_RESTORE_PATH` | Ruta o comando disponible para ejecutar `pg_restore` |
+| `BACKUP_RETENTION_ORDINARY` | Cantidad máxima de respaldos ordinarios conservados |
+| `APP_VERSION` | Versión de la aplicación registrada en los respaldos |
 | `SESSION_COOKIE_SECURE` | Configuración de seguridad para cookie de sesión |
 | `CSRF_COOKIE_SECURE` | Configuración de seguridad para cookie CSRF |
 
@@ -236,6 +241,36 @@ El acceso de usuarios debe realizarse mediante la dirección interna configurada
 ```text
 http://<direccion-interna-del-servidor>/
 ```
+
+---
+
+## Copias de Seguridad
+
+Gestión Fiduciaria permite generar copias de seguridad ordinarias de la base de datos PostgreSQL desde el módulo **Copias de seguridad**, disponible únicamente para usuarios autorizados de Contabilidad.
+
+Cada respaldo se almacena como un archivo ZIP local en el servidor y contiene:
+
+- `manifest.json`
+- `pagos_fiducia.dump`
+- `checksum.sha256`
+
+La ubicación física de los archivos se define mediante `BACKUP_STORAGE_PATH`. Si no se configura, el sistema utiliza la carpeta local `backups/` dentro del servidor de la aplicación.
+
+La copia manual se genera desde el panel web mediante la acción **Crear copia de seguridad**.
+
+La ejecución automática diaria se realiza mediante el comando:
+
+```powershell
+python manage.py run_daily_backup_check
+```
+
+Este comando debe programarse una vez al día en el servidor Windows mediante el Programador de tareas o el mecanismo operativo definido para la instalación. El sistema solo genera una copia automática cuando detecta cambios relevantes desde el último respaldo ordinario exitoso.
+
+La política de conservación mantiene como máximo cuatro respaldos ordinarios válidos entre copias manuales y automáticas.
+
+Desde el mismo módulo se puede consultar el detalle de un respaldo, validar su integridad, descargar archivos ZIP ordinarios disponibles y ejecutar una restauración controlada. Antes de restaurar, el sistema genera automáticamente un respaldo preventivo `PRE_RESTORE` para permitir revertir la última restauración mientras dicho preventivo siga vigente.
+
+La restauración utiliza `pg_restore` sobre el dump generado por PostgreSQL. El respaldo `PRE_RESTORE` no participa en la retención de cuatro copias ordinarias y se desactiva cuando se genera posteriormente un nuevo respaldo ordinario válido.
 
 ---
 

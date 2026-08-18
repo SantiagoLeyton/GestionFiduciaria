@@ -37,6 +37,9 @@
       </div>
       {{ form.non_field_errors }}
       <button class="btn btn-success w-100" type="submit">Iniciar sesión</button>
+      <div class="text-center mt-3">
+        <a href="{% url 'password_reset' %}">¿Olvidó su contraseña?</a>
+      </div>
     </form>
     <p class="access-note" aria-label="© 2026 Constructora Centenario. Todos los derechos reservados.">© 2026 Constructora Centenario.<br class="mobile-break"> Todos los derechos reservados.</p>
   </section>

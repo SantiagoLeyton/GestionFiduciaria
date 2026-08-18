@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}Detalle de copia de seguridad | Centenario Gestión Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Detalle de copia de seguridad</h1>
+          <p>Información administrativa e integridad del respaldo.</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'backup_list' %}">Volver</a>
+      </div>
+
+      <section class="data-section">
+        <div class="section-header"><h2>{{ backup.file_name|default:"Respaldo sin archivo" }}</h2></div>
+        <dl class="row mb-0">
+          <dt class="col-md-3">Fecha y hora</dt><dd class="col-md-9">{{ backup.created_at|date:"d/m/Y H:i" }}</dd>
+          <dt class="col-md-3">Tipo</dt><dd class="col-md-9">{{ backup.get_backup_type_display }}</dd>
+          <dt class="col-md-3">Estado</dt><dd class="col-md-9">{{ backup.get_status_display }}</dd>
+          <dt class="col-md-3">Tamaño</dt><dd class="col-md-9">{{ backup.file_size|filesizeformat }}</dd>
+          <dt class="col-md-3">Responsable</dt><dd class="col-md-9">{% if backup.created_by %}{{ backup.created_by.full_name }}{% else %}Automático{% endif %}</dd>
+          <dt class="col-md-3">Versión</dt><dd class="col-md-9">{{ manifest.application_version|default:"-" }}</dd>
+          <dt class="col-md-3">Base de datos</dt><dd class="col-md-9">{{ manifest.database_name|default:"-" }}</dd>
+          <dt class="col-md-3">PostgreSQL</dt><dd class="col-md-9">{{ manifest.postgresql_version|default:"-" }}</dd>
+          <dt class="col-md-3">Checksum</dt><dd class="col-md-9">{{ manifest.checksum_algorithm|default:"-" }}</dd>
+          <dt class="col-md-3">Google Drive</dt>
+          <dd class="col-md-9">
+            {% if backup.requires_drive_sync %}
+              {{ backup.get_drive_sync_status_display }}
+              {% if backup.drive_synced_at %}
+                <div class="text-muted small">Sincronizado: {{ backup.drive_synced_at|date:"d/m/Y H:i" }}</div>
+              {% endif %}
+              {% if backup.drive_last_attempt_at %}
+                <div class="text-muted small">Último intento: {{ backup.drive_last_attempt_at|date:"d/m/Y H:i" }}</div>
+              {% endif %}
+              {% if backup.drive_last_error %}
+                <div class="text-muted small">{{ backup.drive_last_error }}</div>
+              {% endif %}
+            {% else %}
+              No aplica
+            {% endif %}
+          </dd>
+          <dt class="col-md-3">Identificador lógico</dt><dd class="col-md-9">{{ backup.backup_uid }}</dd>
+          <dt class="col-md-3">Integridad</dt>
+          <dd class="col-md-9">
+            {% if validation.valid %}
+              <span class="status-pill status-active">Integridad válida</span>
+            {% else %}
+              <span class="status-pill status-inactive">Integridad inválida</span>
+              <div class="text-muted mt-2">{{ validation.message }}</div>
+            {% endif %}
+          </dd>
+        </dl>
+      </section>
+
+      <div class="form-actions">
+        {% if validation.valid and backup.is_user_downloadable %}
+          <a class="btn btn-outline-success" href="{% url 'backup_download' backup.pk %}">Descargar</a>
+          <a class="btn btn-danger" href="{% url 'backup_restore_confirm' backup.pk %}">Restaurar</a>
+        {% endif %}
+        {% if backup.requires_drive_sync and backup.drive_sync_status != "synced" %}
+          <form class="d-inline" method="post" action="{% url 'backup_drive_retry' backup.pk %}">
+            {% csrf_token %}
+            <button class="btn btn-outline-primary" type="submit">Reintentar sincronización</button>
+          </form>
+        {% endif %}
+      </div>
+    </section>
+  </main>
+</div>
+{% endblock %}

@@ -3,6 +3,8 @@ import tempfile
 from pathlib import Path
 
 from django.contrib import messages
+from django.contrib.admin.models import LogEntry
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Min, Prefetch, Q, Sum
@@ -13,6 +15,7 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse, reverse_lazy
 from django.views.generic import CreateView, DetailView, FormView, ListView, TemplateView, UpdateView, View
 
+from core.models import BackupRecord
 from real_estate.models import GroupingType, PropertyUnit, StructuralGroup
 
 from .forms import (
@@ -71,8 +74,10 @@ from .imports.daily import (
     resolve_daily_report_assignment,
 )
 from .imports.historical.resolutions import (
+    ImmediateResolutionError,
     apply_resolution_to_equivalent_elements,
     auto_resolve_new_units,
+    create_immediate_structure_from_resolution,
     reanalyze_pending_resolutions,
     resolve_structural_group,
     update_batch_resolution_state,
@@ -543,8 +548,16 @@ class HistoricalImportResolutionView(FiduciaryImportRequiredMixin, FormView):
         _clear_resolution_targets(resolution)
         resolution.resolved_by = self.request.user
         resolution.status = ImportResolution.Status.APPLIED
-        resolution.save()
-        apply_resolution_to_equivalent_elements(resolution, self.request.user)
+        try:
+            immediate_message = create_immediate_structure_from_resolution(resolution, self.request.user)
+        except ImmediateResolutionError as exc:
+            form.add_error(None, str(exc))
+            return self.form_invalid(form)
+        if immediate_message:
+            messages.success(self.request, immediate_message)
+        else:
+            resolution.save()
+            apply_resolution_to_equivalent_elements(resolution, self.request.user)
         reanalyze_pending_resolutions(self.batch, user=self.request.user)
         self.batch.refresh_from_db()
         if self.batch.status == ImportBatch.Status.READY and _historical_batch_can_auto_finalize(self.batch):
@@ -557,13 +570,18 @@ class HistoricalImportResolutionView(FiduciaryImportRequiredMixin, FormView):
             except Exception as exc:
                 messages.error(self.request, str(exc))
             return redirect("fiduciary:historical_import_preview", pk=self.batch.pk)
-        messages.success(self.request, "Resolucion aplicada a las apariciones equivalentes.")
+        if not immediate_message:
+            messages.success(self.request, "Resolucion aplicada a las apariciones equivalentes.")
         return redirect("fiduciary:historical_import_pending", pk=self.batch.pk)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["batch"] = self.batch
         context["element"] = self.element
+        context["creates_immediately"] = self.element.inferred_kind in {
+            DetectedStructureElement.InferredKind.PROJECT,
+            DetectedStructureElement.InferredKind.GROUPING_TYPE,
+        }
         return context
 
 
@@ -1574,6 +1592,10 @@ class AuditListView(FiduciaryManagementRequiredMixin, QueryStringMixin, ListView
     def get_context_data(self, **kwargs):
         context = self.add_common_context(super().get_context_data(**kwargs))
         context["filter_form"] = getattr(self, "filter_form", AuditFilterForm(self.request.GET))
+        backup_content_type = ContentType.objects.get_for_model(BackupRecord)
+        context["backup_audit_logs"] = LogEntry.objects.filter(content_type=backup_content_type).select_related(
+            "user", "content_type"
+        ).order_by("-action_time")[:10]
         return context
 
 

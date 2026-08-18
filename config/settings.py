@@ -116,6 +116,28 @@ STORAGES = {
 MEDIA_ROOT = BASE_DIR / "media"
 MEDIA_URL = "media/"
 
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "False").lower() in {"1", "true", "yes", "on"}
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "False").lower() in {"1", "true", "yes", "on"}
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@localhost")
+SERVER_EMAIL = os.getenv("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
+
+BACKUP_STORAGE_PATH = os.getenv("BACKUP_STORAGE_PATH", str(BASE_DIR / "backups"))
+BACKUP_PG_DUMP_PATH = os.getenv("BACKUP_PG_DUMP_PATH", "pg_dump")
+BACKUP_PG_RESTORE_PATH = os.getenv("BACKUP_PG_RESTORE_PATH", "pg_restore")
+BACKUP_RETENTION_ORDINARY = int(os.getenv("BACKUP_RETENTION_ORDINARY", "4"))
+BACKUP_FORMAT_VERSION = "1.0"
+APP_VERSION = os.getenv("APP_VERSION", "1.1.0")
+GOOGLE_DRIVE_BACKUP_ENABLED = os.getenv("GOOGLE_DRIVE_BACKUP_ENABLED", "False").lower() in {"1", "true", "yes", "on"}
+GOOGLE_DRIVE_TOKEN_FILE = os.getenv("GOOGLE_DRIVE_TOKEN_FILE", "")
+GOOGLE_DRIVE_BACKUP_FOLDER_ID = os.getenv("GOOGLE_DRIVE_BACKUP_FOLDER_ID", "")
+GOOGLE_DRIVE_BACKUP_FOLDER_NAME = os.getenv("GOOGLE_DRIVE_BACKUP_FOLDER_NAME", "GestionFiduciaria-BACKUPS")
+GOOGLE_DRIVE_TIMEOUT_SECONDS = int(os.getenv("GOOGLE_DRIVE_TIMEOUT_SECONDS", "20"))
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 SESSION_COOKIE_HTTPONLY = True

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}Confirmar restauración | Centenario Gestión Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Confirmar restauración</h1>
+          <p>Esta operación reemplaza la información actual por el estado contenido en el respaldo.</p>
+        </div>
+      </div>
+
+      <section class="data-section">
+        <div class="alert alert-warning">
+          Antes de restaurar se generará automáticamente un respaldo preventivo PRE_RESTORE. Mientras ese respaldo exista, será posible revertir la restauración.
+        </div>
+        <p><strong>Archivo:</strong> {{ backup.file_name }}</p>
+        <p><strong>Fecha:</strong> {{ backup.created_at|date:"d/m/Y H:i" }}</p>
+        <p><strong>Integridad:</strong> {% if validation.valid %}válida{% else %}inválida{% endif %}</p>
+        {% if not validation.valid %}
+          <p class="text-danger">{{ validation.message }}</p>
+        {% endif %}
+      </section>
+
+      <div class="form-actions">
+        <a class="btn btn-outline-secondary" href="{% url 'backup_detail' backup.pk %}">Volver</a>
+        {% if validation.valid %}
+          <form method="post" action="{% url 'backup_restore' backup.pk %}">
+            {% csrf_token %}
+            <button class="btn btn-danger" type="submit">Sí, restaurar respaldo</button>
+          </form>
+        {% endif %}
+      </div>
+    </section>
+  </main>
+</div>
+{% endblock %}

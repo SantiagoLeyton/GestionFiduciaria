@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}Revertir restauración | Centenario Gestión Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Revertir restauración</h1>
+          <p>Volver al estado inmediatamente anterior a la última restauración.</p>
+        </div>
+      </div>
+
+      <section class="data-section">
+        {% if pre_restore %}
+          <div class="alert alert-warning">Se utilizará el respaldo preventivo vigente. Después de revertir, esta reversión dejará de estar disponible.</div>
+          <p><strong>Archivo preventivo:</strong> {{ pre_restore.file_name }}</p>
+          <p><strong>Fecha:</strong> {{ pre_restore.created_at|date:"d/m/Y H:i" }}</p>
+        {% else %}
+          <div class="alert alert-info">No existe una reversión disponible.</div>
+        {% endif %}
+      </section>
+
+      <div class="form-actions">
+        <a class="btn btn-outline-secondary" href="{% url 'backup_list' %}">Volver</a>
+        {% if pre_restore %}
+          <form method="post" action="{% url 'backup_revert' %}">
+            {% csrf_token %}
+            <button class="btn btn-danger" type="submit">Sí, revertir restauración</button>
+          </form>
+        {% endif %}
+      </div>
+    </section>
+  </main>
+</div>
+{% endblock %}

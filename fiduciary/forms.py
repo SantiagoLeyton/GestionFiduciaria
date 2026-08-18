@@ -1182,6 +1182,15 @@ class ImportResolutionForm(forms.ModelForm):
         self.fields["parent_structural_group"].queryset = StructuralGroup.objects.select_related(
             "project", "grouping_type"
         ).order_by("project__name", "name", "code")
+        if detected_element and detected_element.inferred_kind in {
+            DetectedStructureElement.InferredKind.PROJECT,
+            DetectedStructureElement.InferredKind.GROUPING_TYPE,
+        }:
+            self.fields["action"].choices = [
+                (ImportResolution.Action.ASSOCIATE_EXISTING, "Asociar con entidad existente"),
+                (ImportResolution.Action.CREATE_NEW, "Crear nuevo ahora"),
+                (ImportResolution.Action.IGNORE, "Ignorar"),
+            ]
         if detected_element and not self.is_bound:
             self.initial.setdefault("target_kind", detected_element.inferred_kind)
             value = detected_element.raw_value if detected_element.raw_value != "(sin valor)" else ""
@@ -1206,7 +1215,15 @@ class ImportResolutionForm(forms.ModelForm):
             field_name = required_by_kind.get(kind)
             if field_name and not cleaned.get(field_name):
                 self.add_error(field_name, "Seleccione la entidad existente.")
-        if action == ImportResolution.Action.CREATE_NEW and not (
+        if action == ImportResolution.Action.CREATE_NEW and kind in {
+            DetectedStructureElement.InferredKind.PROJECT,
+            DetectedStructureElement.InferredKind.GROUPING_TYPE,
+        }:
+            if not (cleaned.get("create_code") or "").strip():
+                self.add_error("create_code", "Registre el codigo.")
+            if not (cleaned.get("create_name") or "").strip():
+                self.add_error("create_name", "Registre el nombre.")
+        elif action == ImportResolution.Action.CREATE_NEW and not (
             (cleaned.get("create_code") or "").strip() or (cleaned.get("create_name") or "").strip()
         ):
             raise ValidationError("Registre codigo, nombre o ambos para crear el elemento en la importacion futura.")

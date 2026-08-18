@@ -2,6 +2,7 @@ from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower
+from django.utils import timezone
 
 from .managers import CustomUserManager
 
@@ -13,6 +14,8 @@ class User(AbstractUser):
 
     email = models.EmailField("correo electronico", unique=True)
     role = models.CharField("rol", max_length=32, choices=Role.choices)
+    is_deleted = models.BooleanField("eliminado logicamente", default=False)
+    deleted_at = models.DateTimeField("fecha de eliminacion logica", blank=True, null=True)
     objects = CustomUserManager()
     REQUIRED_FIELDS = ["email"]
 
@@ -42,3 +45,8 @@ class User(AbstractUser):
 
     def is_commercial(self):
         return self.role == self.Role.COMMERCIAL
+
+    def mark_deleted(self):
+        self.is_deleted = True
+        self.is_active = False
+        self.deleted_at = timezone.now()

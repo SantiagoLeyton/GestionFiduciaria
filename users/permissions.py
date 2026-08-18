@@ -11,7 +11,8 @@ def user_has_role(user, roles):
 def user_can_manage_users(user):
     return bool(
         user.is_authenticated
-        and (user.is_superuser or user.role == user.Role.ACCOUNTING_ADMIN)
+        and not getattr(user, "is_deleted", False)
+        and user.role == user.Role.ACCOUNTING_ADMIN
     )
 
 
@@ -52,4 +53,6 @@ class UserReadRequiredMixin(AccessMixin):
     def dispatch(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return self.handle_no_permission()
+        if not user_can_manage_users(request.user):
+            raise PermissionDenied
         return super().dispatch(request, *args, **kwargs)

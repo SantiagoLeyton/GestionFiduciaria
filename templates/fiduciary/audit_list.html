@@ -56,6 +56,30 @@
         </div>
         {% include "includes/pagination.html" %}
       </section>
+
+      <section class="data-section mt-4">
+        <div class="section-header"><h2>Copias de seguridad</h2><span>Eventos administrativos recientes</span></div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr><th>Fecha y hora</th><th>Responsable</th><th>Accion</th><th>Entidad</th><th>Descripcion</th></tr>
+            </thead>
+            <tbody>
+              {% for log in backup_audit_logs %}
+                <tr>
+                  <td>{{ log.action_time|date:"d/m/Y H:i" }}</td>
+                  <td>{{ log.user.get_full_name|default:log.user.username }}</td>
+                  <td>{{ log.get_action_flag_display }}</td>
+                  <td>{{ log.content_type.name }}</td>
+                  <td>{{ log.change_message|default:"Evento de copia de seguridad."|truncatechars:100 }}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="5">No hay eventos de copias de seguridad registrados.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </section>
   </main>
 </div>

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Crear copia de seguridad | Centenario Gestión Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Crear copia de seguridad</h1>
+          <p>El sistema generará un respaldo completo de PostgreSQL y lo validará antes de registrarlo.</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'backup_list' %}">Volver</a>
+      </div>
+
+      <section class="form-panel">
+        <div class="alert alert-info">
+          La copia se almacenará en la ubicación configurada del servidor. No se mostrarán rutas internas ni credenciales.
+        </div>
+        <form method="post" action="{% url 'backup_create' %}">
+          {% csrf_token %}
+          <div class="form-actions">
+            <button class="btn btn-success" type="submit">Confirmar copia de seguridad</button>
+            <a class="btn btn-outline-secondary" href="{% url 'backup_list' %}">Cancelar</a>
+          </div>
+        </form>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

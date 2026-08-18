@@ -13,6 +13,7 @@ from fiduciary.models import (
     DetectedStructureElement,
     FiduciaryAssignment,
     ImportBatch,
+    ImportAppliedRecord,
     ImportNovelty,
     ImportedFile,
     ImportedHistoricalNovelty,
@@ -448,6 +449,164 @@ def test_pending_list_and_resolution_apply_to_equivalent_elements(accounting_cli
     assert first.resolution.target_project == project
     assert second.resolution.target_project == project
     assert batch.status == ImportBatch.Status.READY
+
+
+@pytest.mark.django_db
+def test_create_new_project_resolution_creates_project_and_traces(accounting_client, accounting_admin_user):
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.AWAITING_RESOLUTION,
+    )
+    element = create_detected_element(
+        batch,
+        kind=DetectedStructureElement.InferredKind.PROJECT,
+        raw_value="Montecielo",
+    )
+
+    response = accounting_client.post(
+        reverse("fiduciary:historical_import_resolve", args=[batch.pk, element.pk]),
+        {
+            "target_kind": DetectedStructureElement.InferredKind.PROJECT,
+            "action": ImportResolution.Action.CREATE_NEW,
+            "create_code": "MON",
+            "create_name": "Montecielo",
+        },
+        follow=True,
+    )
+
+    assert response.status_code == 200
+    project = Project.objects.get(code="MON")
+    element.refresh_from_db()
+    assert element.status == DetectedStructureElement.Status.RESOLVED
+    assert element.resolution.action == ImportResolution.Action.ASSOCIATE_EXISTING
+    assert element.resolution.target_project == project
+    assert ImportAppliedRecord.objects.filter(
+        batch=batch,
+        entity_kind=ImportAppliedRecord.EntityKind.PROJECT,
+        action=ImportAppliedRecord.Action.CREATED,
+        entity_id=project.pk,
+        summary__contains=f"Pendiente: {element.pk}",
+    ).exists()
+    assert "Proyecto creado correctamente" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_create_new_project_resolution_rejects_duplicate_code_without_partial_data(accounting_client, accounting_admin_user):
+    Project.objects.create(code="MON", name="Montecielo existente")
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.AWAITING_RESOLUTION,
+    )
+    element = create_detected_element(
+        batch,
+        kind=DetectedStructureElement.InferredKind.PROJECT,
+        raw_value="Montecielo",
+    )
+
+    response = accounting_client.post(
+        reverse("fiduciary:historical_import_resolve", args=[batch.pk, element.pk]),
+        {
+            "target_kind": DetectedStructureElement.InferredKind.PROJECT,
+            "action": ImportResolution.Action.CREATE_NEW,
+            "create_code": "MON",
+            "create_name": "Montecielo nuevo",
+        },
+    )
+
+    assert response.status_code == 200
+    assert Project.objects.filter(code="MON").count() == 1
+    element.refresh_from_db()
+    assert element.status == DetectedStructureElement.Status.NEEDS_REVIEW
+    assert element.resolution.action == ImportResolution.Action.UNRESOLVED
+    assert not ImportAppliedRecord.objects.filter(batch=batch).exists()
+    assert "Ya existe un proyecto con ese codigo" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_create_new_project_and_grouping_type_are_available_for_group_resolution(accounting_client, accounting_admin_user):
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.AWAITING_RESOLUTION,
+    )
+    project_element = create_detected_element(
+        batch,
+        kind=DetectedStructureElement.InferredKind.PROJECT,
+        raw_value="Montecielo",
+    )
+    type_element = create_detected_element(
+        batch,
+        kind=DetectedStructureElement.InferredKind.GROUPING_TYPE,
+        raw_value="Torre",
+    )
+    group_element = create_detected_element(
+        batch,
+        kind=DetectedStructureElement.InferredKind.STRUCTURAL_GROUP,
+        raw_value="T2",
+        context={"project_id": None, "grouping_type_id": None},
+    )
+
+    accounting_client.post(
+        reverse("fiduciary:historical_import_resolve", args=[batch.pk, project_element.pk]),
+        {
+            "target_kind": DetectedStructureElement.InferredKind.PROJECT,
+            "action": ImportResolution.Action.CREATE_NEW,
+            "create_code": "MON",
+            "create_name": "Montecielo",
+        },
+        follow=True,
+    )
+    accounting_client.post(
+        reverse("fiduciary:historical_import_resolve", args=[batch.pk, type_element.pk]),
+        {
+            "target_kind": DetectedStructureElement.InferredKind.GROUPING_TYPE,
+            "action": ImportResolution.Action.CREATE_NEW,
+            "create_code": "TOR",
+            "create_name": "Torre",
+        },
+        follow=True,
+    )
+
+    project = Project.objects.get(code="MON")
+    grouping_type = GroupingType.objects.get(code="TOR")
+    group_element.refresh_from_db()
+    assert group_element.structural_context["project_id"] == project.pk
+    assert group_element.structural_context["grouping_type_id"] == grouping_type.pk
+
+    group_form_response = accounting_client.get(
+        reverse("fiduciary:historical_import_resolve_group", args=[batch.pk, group_element.pk])
+    )
+    content = group_form_response.content.decode()
+    assert group_form_response.status_code == 200
+    assert "Montecielo" in content
+    assert "Torre" in content
+
+    response = accounting_client.post(
+        reverse("fiduciary:historical_import_resolve_group", args=[batch.pk, group_element.pk]),
+        {
+            "action": ImportResolution.Action.CREATE_NEW,
+            "project": project.pk,
+            "grouping_type": grouping_type.pk,
+            "new_group_name": "T2",
+        },
+        follow=True,
+    )
+    assert response.status_code == 200
+    group_element.refresh_from_db()
+    assert group_element.status == DetectedStructureElement.Status.RESOLVED
+    assert group_element.resolution.parent_project == project
+    assert group_element.resolution.parent_grouping_type == grouping_type
+    assert ImportAppliedRecord.objects.filter(
+        batch=batch,
+        entity_kind=ImportAppliedRecord.EntityKind.GROUPING_TYPE,
+        action=ImportAppliedRecord.Action.CREATED,
+        entity_id=grouping_type.pk,
+    ).exists()
 
 
 @pytest.mark.django_db

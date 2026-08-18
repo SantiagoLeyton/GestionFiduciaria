@@ -1,5 +1,6 @@
 from django import forms
 from django.contrib.auth import authenticate
+from django.contrib.auth.forms import PasswordResetForm, SetPasswordForm
 
 
 class LoginForm(forms.Form):
@@ -57,3 +58,28 @@ class LoginForm(forms.Form):
 
     def get_user(self):
         return self.user_cache
+
+
+class AccountPasswordResetForm(PasswordResetForm):
+    email = forms.EmailField(
+        label="Correo electronico",
+        widget=forms.EmailInput(attrs={"class": "form-control", "autocomplete": "email"}),
+    )
+
+    def get_users(self, email):
+        for user in super().get_users(email):
+            if not getattr(user, "is_deleted", False):
+                yield user
+
+
+class AccountSetPasswordForm(SetPasswordForm):
+    new_password1 = forms.CharField(
+        label="Nueva contrasena",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"class": "form-control", "autocomplete": "new-password"}),
+    )
+    new_password2 = forms.CharField(
+        label="Confirmar contrasena",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"class": "form-control", "autocomplete": "new-password"}),
+    )

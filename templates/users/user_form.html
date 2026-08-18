@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{% if object %}Editar usuario{% else %}Nuevo usuario{% endif %} | Centenario Gestion Fiduciaria{% endblock %}
+{% block title %}{% if object %}Editar cuenta{% else %}Nueva cuenta{% endif %} | Centenario Gestion Fiduciaria{% endblock %}
 
 {% block body %}
 <div class="app-shell">
@@ -11,8 +11,8 @@
       {% include "includes/messages.html" %}
       <div class="page-heading">
         <div>
-          <h1>{% if object %}Editar usuario{% else %}Nuevo usuario{% endif %}</h1>
-          <p>Registre informacion de acceso y asigne uno de los roles oficiales.</p>
+          <h1>{% if object %}Editar cuenta{% else %}Nueva cuenta{% endif %}</h1>
+          <p>Registre la informacion administrativa y asigne uno de los roles oficiales.</p>
         </div>
         <a class="btn btn-outline-secondary" href="{% url 'user_list' %}">Volver</a>
       </div>
@@ -42,6 +42,11 @@
         {% if object and object.pk == request.user.pk %}
           <div class="alert alert-info mt-3">
             Por seguridad, no puede modificar su propio rol ni el estado de su cuenta desde esta pantalla.
+          </div>
+        {% endif %}
+        {% if not object %}
+          <div class="alert alert-info mt-3">
+            La contrasena no se define desde Gestion de cuentas. La persona usuaria debera usar la recuperacion de contrasena con su correo registrado.
           </div>
         {% endif %}
 

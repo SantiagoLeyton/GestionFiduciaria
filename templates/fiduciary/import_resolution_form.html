@@ -44,7 +44,11 @@
           {% endfor %}
         </div>
         <div class="alert alert-info mt-3">
-          Esta decision no crea datos definitivos. Solo prepara la resolucion para la importacion historica de una fase posterior.
+          {% if creates_immediately %}
+            Al aplicar esta resolucion, el registro sera creado inmediatamente y quedara disponible para continuar con la resolucion de los pendientes del lote.
+          {% else %}
+            Esta decision no crea datos definitivos. Solo prepara la resolucion para la importacion historica de una fase posterior.
+          {% endif %}
         </div>
         <div class="form-actions">
           <button class="btn btn-success" type="submit">Aplicar resolucion</button>

@@ -20,6 +20,8 @@ class UsernameOrEmailBackend(ModelBackend):
         except UserModel.MultipleObjectsReturned:
             return None
 
+        if getattr(user, "is_deleted", False):
+            return None
         if user.check_password(password) and self.user_can_authenticate(user):
             return user
         return None

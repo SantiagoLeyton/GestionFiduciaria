@@ -35,6 +35,8 @@
       <a class="module-card" href="{% url 'fiduciary:payment_list' %}"><span class="module-icon">PG</span><strong>Pagos</strong><small>Consulta de pagos.</small></a>
       {% if request.user.is_accounting_admin or request.user.is_superuser %}
         <a class="module-card" href="{% url 'fiduciary:audit_list' %}"><span class="module-icon">AU</span><strong>Auditoría</strong><small>Trazabilidad registrada.</small></a>
+        <a class="module-card" href="{% url 'user_list' %}"><span class="module-icon">GC</span><strong>Gestión de cuentas</strong><small>Administración de accesos.</small></a>
+        <a class="module-card" href="{% url 'backup_list' %}"><span class="module-icon">CS</span><strong>Copias de seguridad</strong><small>Respaldos del sistema.</small></a>
       {% endif %}
     </section>
   </main>

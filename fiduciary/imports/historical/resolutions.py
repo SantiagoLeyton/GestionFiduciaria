@@ -1,8 +1,9 @@
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from fiduciary.models import DetectedStructureElement, ImportBatch, ImportResolution
-from real_estate.models import PropertyUnit, StructuralGroup
+from fiduciary.models import DetectedStructureElement, ImportAppliedRecord, ImportBatch, ImportResolution
+from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
 
 from .normalize import normalize_text
 
@@ -14,6 +15,133 @@ READY_STATES = {
 }
 
 BLOCKED_STATES = {DetectedStructureElement.Status.DETECTED}
+
+
+class ImmediateResolutionError(ValueError):
+    pass
+
+
+def create_immediate_structure_from_resolution(resolution: ImportResolution, user) -> str | None:
+    detected = resolution.detected_element
+    if resolution.action != ImportResolution.Action.CREATE_NEW:
+        return None
+    if resolution.target_kind == DetectedStructureElement.InferredKind.PROJECT:
+        return _create_project_from_resolution(resolution, user)
+    if resolution.target_kind == DetectedStructureElement.InferredKind.GROUPING_TYPE:
+        return _create_grouping_type_from_resolution(resolution, user)
+    return None
+
+
+def _create_project_from_resolution(resolution: ImportResolution, user) -> str:
+    code = (resolution.create_code or "").strip()
+    name = (resolution.create_name or "").strip()
+    if not code or not name:
+        raise ImmediateResolutionError("Para crear el proyecto debe registrar codigo y nombre.")
+    if Project.objects.filter(code=code).exists():
+        raise ImmediateResolutionError(
+            "Ya existe un proyecto con ese codigo. Asocielo con el registro existente."
+        )
+    with transaction.atomic():
+        project = Project(code=code, name=name, description="", is_active=True)
+        try:
+            project.save()
+        except (ValidationError, IntegrityError) as exc:
+            raise ImmediateResolutionError(_readable_model_error(exc)) from exc
+        _convert_created_resolution_to_existing(
+            resolution=resolution,
+            target_kind=DetectedStructureElement.InferredKind.PROJECT,
+            target_field="target_project",
+            target=project,
+            user=user,
+        )
+        _trace_immediate_creation(
+            resolution,
+            entity_kind=ImportAppliedRecord.EntityKind.PROJECT,
+            entity_id=project.pk,
+            code=project.code,
+            name=project.name,
+            user=user,
+        )
+        apply_resolution_to_equivalent_elements(resolution, user)
+        update_batch_resolution_state(resolution.detected_element.batch)
+    return f"Proyecto creado correctamente: {project}."
+
+
+def _create_grouping_type_from_resolution(resolution: ImportResolution, user) -> str:
+    code = (resolution.create_code or "").strip()
+    name = (resolution.create_name or "").strip()
+    if not code or not name:
+        raise ImmediateResolutionError("Para crear el tipo de agrupacion debe registrar codigo y nombre.")
+    if GroupingType.objects.filter(code=code).exists():
+        raise ImmediateResolutionError(
+            "Ya existe un tipo de agrupacion con ese codigo. Asocielo con el registro existente."
+        )
+    with transaction.atomic():
+        grouping_type = GroupingType(code=code, name=name, description="", is_active=True)
+        try:
+            grouping_type.save()
+        except (ValidationError, IntegrityError) as exc:
+            raise ImmediateResolutionError(_readable_model_error(exc)) from exc
+        _convert_created_resolution_to_existing(
+            resolution=resolution,
+            target_kind=DetectedStructureElement.InferredKind.GROUPING_TYPE,
+            target_field="target_grouping_type",
+            target=grouping_type,
+            user=user,
+        )
+        _trace_immediate_creation(
+            resolution,
+            entity_kind=ImportAppliedRecord.EntityKind.GROUPING_TYPE,
+            entity_id=grouping_type.pk,
+            code=grouping_type.code,
+            name=grouping_type.name,
+            user=user,
+        )
+        apply_resolution_to_equivalent_elements(resolution, user)
+        update_batch_resolution_state(resolution.detected_element.batch)
+    return f"Tipo de agrupacion creado correctamente: {grouping_type}."
+
+
+def _convert_created_resolution_to_existing(*, resolution, target_kind, target_field, target, user) -> None:
+    resolution.action = ImportResolution.Action.ASSOCIATE_EXISTING
+    resolution.target_kind = target_kind
+    resolution.target_project = None
+    resolution.target_grouping_type = None
+    resolution.target_structural_group = None
+    resolution.target_property_unit = None
+    setattr(resolution, target_field, target)
+    resolution.parent_project = None
+    resolution.parent_grouping_type = None
+    resolution.parent_structural_group = None
+    resolution.resolved_by = user
+    resolution.resolved_at = timezone.now()
+    resolution.status = ImportResolution.Status.APPLIED
+    resolution.save()
+    _mark_element_from_resolution(resolution.detected_element, resolution)
+
+
+def _trace_immediate_creation(resolution, *, entity_kind, entity_id, code, name, user) -> None:
+    detected = resolution.detected_element
+    ImportAppliedRecord.objects.create(
+        batch=detected.batch,
+        entity_kind=entity_kind,
+        entity_id=entity_id,
+        action=ImportAppliedRecord.Action.CREATED,
+        summary=(
+            f"Creado durante resolucion de pendiente historico. "
+            f"Codigo: {code}. Nombre: {name}. "
+            f"Pendiente: {detected.pk}. Lote: {detected.batch_id}. "
+            f"Responsable: {getattr(user, 'username', '')}."
+        ),
+    )
+
+
+def _readable_model_error(exc) -> str:
+    if isinstance(exc, ValidationError):
+        if hasattr(exc, "message_dict"):
+            return " ".join(str(message) for messages in exc.message_dict.values() for message in messages)
+        return " ".join(str(message) for message in exc.messages)
+    return "No fue posible crear el registro por una restriccion de integridad."
 
 
 def apply_resolution_to_equivalent_elements(resolution: ImportResolution, user) -> int:

@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block title %}Copias de seguridad | Centenario Gestión Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Copias de seguridad</h1>
+          <p>Consulte y genere respaldos ordinarios de la base de datos.</p>
+        </div>
+      </div>
+
+      <section class="data-section mb-4">
+        <div class="section-header"><h2>Configuración automática</h2><span>{{ backup_settings.get_automation_status_display }}</span></div>
+        <form class="row g-3 align-items-end" method="post" action="{% url 'backup_settings' %}">
+          {% csrf_token %}
+          <div class="col-md-3">
+            <label class="form-label" for="{{ settings_form.daily_check_time.id_for_label }}">{{ settings_form.daily_check_time.label }}</label>
+            {{ settings_form.daily_check_time }}
+            {{ settings_form.daily_check_time.errors }}
+          </div>
+          <div class="col-md-3">
+            <div class="text-muted small">Última comprobación</div>
+            <div>{% if backup_settings.last_auto_check_at %}{{ backup_settings.last_auto_check_at|date:"d/m/Y H:i" }}{% else %}Sin comprobaciones{% endif %}</div>
+          </div>
+          <div class="col-md-3">
+            <div class="text-muted small">Resultado</div>
+            <div>{{ backup_settings.get_last_auto_check_result_display }}</div>
+          </div>
+          <div class="col-md-3">
+            <div class="text-muted small">Automatización del servidor</div>
+            <div>{{ backup_settings.get_automation_status_display }}</div>
+          </div>
+          <div class="col-12 d-flex gap-2">
+            <button class="btn btn-success" type="submit">Guardar hora</button>
+            <span class="text-muted align-self-center">La tarea diaria del servidor debe configurarse externamente.</span>
+          </div>
+        </form>
+      </section>
+
+      <section class="data-section mb-4">
+        <div class="section-header"><h2>Acciones</h2></div>
+        <div class="d-flex flex-wrap gap-2">
+          <a class="btn btn-success" href="{% url 'backup_confirm' %}">Crear copia de seguridad</a>
+          <a class="btn btn-outline-success" href="{% url 'backup_upload' %}">Cargar copia de seguridad</a>
+        </div>
+      </section>
+
+      {% if active_pre_restore %}
+        <div class="alert alert-warning d-flex justify-content-between align-items-center gap-3">
+          <div>
+            Existe una reversión disponible para volver al estado anterior a la última restauración.
+          </div>
+          <a class="btn btn-outline-dark btn-sm" href="{% url 'backup_revert_confirm' %}">Revertir restauración</a>
+        </div>
+      {% endif %}
+
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Respaldos registrados</h2>
+          <span>{{ page_obj.paginator.count }} respaldo{{ page_obj.paginator.count|pluralize }}</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table align-middle data-table">
+            <thead>
+              <tr>
+                <th>Fecha y hora</th>
+                <th>Tipo</th>
+                <th>Tamaño</th>
+                <th>Estado</th>
+                <th>Google Drive</th>
+                <th>Responsable</th>
+                <th>Archivo</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for backup in backups %}
+                <tr>
+                  <td>{{ backup.created_at|date:"d/m/Y H:i" }}</td>
+                  <td>{{ backup.get_backup_type_display }}</td>
+                  <td>{{ backup.file_size|filesizeformat }}</td>
+                  <td>
+                    {% if backup.status == backup.Status.SUCCESS %}
+                      <span class="status-pill status-active">{{ backup.get_status_display }}</span>
+                    {% else %}
+                      <span class="status-pill status-inactive">{{ backup.get_status_display }}</span>
+                    {% endif %}
+                    {% if backup.pk not in available_backup_ids %}
+                      <div class="text-muted small">No disponible físicamente para acciones</div>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if backup.requires_drive_sync %}
+                      {% if backup.drive_sync_status == "synced" %}
+                        <span class="status-pill status-active">Sincronizado</span>
+                      {% elif backup.drive_sync_status == "failed" %}
+                        <span class="status-pill status-inactive">Error</span>
+                      {% else %}
+                        <span class="status-pill status-pending">{{ backup.get_drive_sync_status_display }}</span>
+                      {% endif %}
+                    {% else %}
+                      <span class="text-muted">No aplica</span>
+                    {% endif %}
+                  </td>
+                  <td>{% if backup.created_by %}{{ backup.created_by.full_name }}{% else %}Automático{% endif %}</td>
+                  <td>{{ backup.file_name|default:"-" }}</td>
+                  <td class="text-end">
+                    <a class="btn btn-sm btn-outline-secondary" href="{% url 'backup_detail' backup.pk %}">Ver detalles</a>
+                    {% if backup.pk in available_backup_ids %}
+                      <a class="btn btn-sm btn-outline-success" href="{% url 'backup_download' backup.pk %}">Descargar</a>
+                      <a class="btn btn-sm btn-outline-danger" href="{% url 'backup_restore_confirm' backup.pk %}">Restaurar</a>
+                    {% endif %}
+                    {% if backup.requires_drive_sync and backup.drive_sync_status != "synced" %}
+                      <form class="d-inline" method="post" action="{% url 'backup_drive_retry' backup.pk %}">
+                        {% csrf_token %}
+                        <button class="btn btn-sm btn-outline-primary" type="submit">Reintentar Drive</button>
+                      </form>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="8">No hay copias de seguridad registradas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% include "includes/pagination.html" %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}
