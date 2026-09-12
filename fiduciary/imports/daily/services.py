@@ -85,7 +85,14 @@ def reanalyze_daily_report_import(*, batch: ImportBatch, user=None) -> int:
     return updated
 
 
-def resolve_daily_report_assignment(*, row: DailyReportRow, assignment: FiduciaryAssignment | None, user, note: str = "") -> None:
+def resolve_daily_report_assignment(
+    *,
+    row: DailyReportRow,
+    assignment: FiduciaryAssignment | None,
+    user,
+    note: str = "",
+    payment_destination: str | None = None,
+) -> None:
     if not can_import_fiduciary(user):
         raise PermissionDenied
     with transaction.atomic():
@@ -94,6 +101,7 @@ def resolve_daily_report_assignment(*, row: DailyReportRow, assignment: Fiduciar
         locked.resolved_by = user
         locked.resolved_at = timezone.now()
         locked.resolution_note = note.strip()
+        locked.payment_destination = Payment.Destination.FIDUCIARIA
         if assignment:
             locked.status = _duplicate_or_valid(locked)
             locked.message = "Encargo resuelto manualmente." if locked.status == DailyReportRow.Status.VALID else "Pago duplicado."
@@ -144,6 +152,7 @@ def finalize_daily_report_import(*, batch_id: int, user) -> DailyReportFinalizat
                     date_precision=Payment.DatePrecision.EXACT,
                     exact_date=row.payment_date,
                     concept=row.concept,
+                    destination=row.payment_destination or Payment.Destination.FIDUCIARIA,
                 )
                 if result.status == "created":
                     row.payment = result.payment
@@ -290,6 +299,7 @@ def _persist_rows(batch, imported_file, sheet_results, parsed) -> int:
             status=status,
             message=message,
             assignment=assignment,
+            payment_destination=Payment.Destination.FIDUCIARIA,
         )
         created += 1
     return created

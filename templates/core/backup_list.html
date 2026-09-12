@@ -39,7 +39,11 @@
           </div>
           <div class="col-12 d-flex gap-2">
             <button class="btn btn-success" type="submit">Guardar hora</button>
-            <span class="text-muted align-self-center">La tarea diaria del servidor debe configurarse externamente.</span>
+            {% if backup_settings.automation_status == "active" %}
+              <span class="text-muted align-self-center">La comprobaciÃ³n diaria se ejecuta automÃ¡ticamente desde el servidor.</span>
+            {% else %}
+              <span class="text-muted align-self-center">No se detectÃ³ el scheduler automÃ¡tico activo en este proceso.</span>
+            {% endif %}
           </div>
         </form>
       </section>

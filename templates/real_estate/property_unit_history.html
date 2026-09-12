@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load money %}
 
 {% block title %}Historial de unidad | Centenario Gestion Fiduciaria{% endblock %}
 
@@ -12,10 +13,30 @@
       <div class="page-heading">
         <div>
           <h1>Historial de unidad</h1>
-          <p>{{ property_unit.project.name }} · {{ property_unit.name|default:property_unit.code }}</p>
+          <p>{{ property_unit.project.name }}{% if property_unit.structural_group %} · {{ property_unit.structural_group }}{% endif %} · {{ property_unit.name|default:property_unit.code }}</p>
         </div>
         <a class="btn btn-outline-secondary" href="{% url 'real_estate:property_unit_list' %}">Volver</a>
       </div>
+
+      <section class="data-section mb-4">
+        <div class="section-header">
+          <h2>Unidad</h2>
+        </div>
+        <dl class="row mb-0">
+          <dt class="col-sm-3">Area</dt>
+          <dd class="col-sm-9">{% if property_unit.area %}{{ property_unit.area }} m2{% else %}-{% endif %}</dd>
+        </dl>
+      </section>
+
+      <section class="data-section mb-4">
+        <div class="section-header">
+          <h2>Informacion financiera</h2>
+        </div>
+        <dl class="row mb-0">
+          <dt class="col-sm-3">Valor inmueble</dt>
+          <dd class="col-sm-9">{{ property_unit.property_value|money_co }}</dd>
+        </dl>
+      </section>
 
       <form class="row g-2 mb-3" method="get">
         <div class="col-md-5">

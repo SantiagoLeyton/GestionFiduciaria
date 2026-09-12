@@ -13,7 +13,7 @@
         <div><h1>{{ title }}</h1><p>Registre eventos operativos que afectan titulares, unidades o encargos.</p></div>
         <a class="btn btn-outline-secondary" href="{% url 'fiduciary:novelty_list' %}">Volver</a>
       </div>
-      <form class="form-panel" method="post" novalidate>
+      <form class="form-panel" method="post" novalidate data-unit-hierarchy>
         {% csrf_token %}
         {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
         <div class="form-grid">
@@ -33,21 +33,237 @@
     </section>
   </main>
 </div>
+{% include "fiduciary/includes/unit_hierarchy_script.html" %}
 <script>
 document.addEventListener("DOMContentLoaded", function () {
+  const clientSearchUrl = "{{ client_search_url }}";
+  const assignmentClientsUrl = "{{ assignment_clients_url }}";
+  const initialClients = JSON.parse('{{ selected_clients_json|escapejs }}' || "{}");
   const type = document.querySelector("[data-novelty-type]");
   const other = document.querySelector("[data-field-name='other_type']");
   const newClient = document.querySelector("[data-field-name='new_client']");
   const newAssignment = document.querySelector("[data-field-name='new_assignment_number']");
   const secondary = document.querySelector("[data-field-name='secondary_clients']");
+  const newClientSelect = document.getElementById("id_new_client");
+  const unit = document.getElementById("id_property_unit");
+  const currentAssignment = document.getElementById("id_current_assignment");
+  const currentClient = document.getElementById("id_current_client");
+  const allTypeOptions = type ? Array.from(type.options).map(option => ({value: option.value, text: option.textContent})) : [];
+
+  function fillSelect(select, rows, emptyLabel) {
+    if (!select) return;
+    const selected = select.value;
+    select.innerHTML = "";
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = emptyLabel;
+    select.appendChild(empty);
+    rows.forEach(row => {
+      const option = document.createElement("option");
+      option.value = row.id;
+      option.textContent = row.text;
+      if (row.role) option.dataset.role = row.role;
+      if (String(row.id) === selected) option.selected = true;
+      select.appendChild(option);
+    });
+  }
+
+  function currentClientRole() {
+    if (!currentClient) return "";
+    const option = currentClient.selectedOptions[0];
+    return option ? (option.dataset.role || "") : "";
+  }
+
+  function refreshTypeOptions() {
+    if (!type) return;
+    const selected = type.value;
+    const role = currentClientRole();
+    type.innerHTML = "";
+    allTypeOptions.forEach(item => {
+      if (item.value === "historical") return;
+      if (role === "primary" && item.value === "exclusion") return;
+      if (role === "secondary" && (item.value === "cession" || item.value === "inclusion")) return;
+      const option = document.createElement("option");
+      option.value = item.value;
+      option.textContent = item.text;
+      type.appendChild(option);
+    });
+    if (Array.from(type.options).some(option => option.value === selected)) {
+      type.value = selected;
+    } else {
+      type.value = "";
+    }
+    refresh();
+  }
+
+  function loadContext() {
+    if (!unit || !unit.value) {
+      fillSelect(currentAssignment, [], "Seleccione un encargo");
+      fillSelect(currentClient, [], "Seleccione un cliente");
+      return;
+    }
+    fetch("{% url 'fiduciary:observation_context' %}" + "?unit=" + encodeURIComponent(unit.value), {headers: {"X-Requested-With": "XMLHttpRequest"}})
+      .then(response => response.json())
+      .then(data => {
+        fillSelect(currentAssignment, data.assignments || [], "Seleccione un encargo");
+        loadAssignmentClients();
+      });
+  }
+
+  function loadAssignmentClients() {
+    if (!currentAssignment || !currentAssignment.value) {
+      fillSelect(currentClient, [], "Seleccione un encargo primero");
+      refreshTypeOptions();
+      return;
+    }
+    fetch(assignmentClientsUrl + "?assignment=" + encodeURIComponent(currentAssignment.value), {headers: {"X-Requested-With": "XMLHttpRequest"}})
+      .then(response => response.json())
+      .then(data => {
+        fillSelect(currentClient, data.results || [], "Seleccione un cliente");
+        clearClientPicker(newClientSelect);
+        clearClientPicker(document.getElementById("id_secondary_clients"));
+        refreshTypeOptions();
+      });
+  }
+
+  function clearClientPicker(select) {
+    if (!select) return;
+    Array.from(select.options).forEach(option => { option.selected = false; });
+    select.dispatchEvent(new Event("client-picker:changed"));
+  }
+
+  function buildClientPicker(select, options) {
+    if (!select) return;
+    select.classList.add("visually-hidden");
+    const wrapper = document.createElement("div");
+    wrapper.className = "row g-2 align-items-end mt-2";
+    wrapper.innerHTML = `
+      <div class="col-md-3"><label class="form-label">Buscar por</label><select class="form-select" data-client-criterion><option value="document">Cedula/documento</option><option value="name">Nombre</option><option value="email">Correo</option></select></div>
+      <div class="col-md-6"><label class="form-label">Valor</label><input class="form-control" type="search" data-client-query></div>
+      <div class="col-md-3"><button class="btn btn-outline-success w-100" type="button" data-client-search>Buscar</button></div>
+      <div class="col-12"><div class="list-group mt-2" data-client-results></div><div class="form-text" data-client-selection></div></div>
+    `;
+    select.parentNode.appendChild(wrapper);
+    const criterion = wrapper.querySelector("[data-client-criterion]");
+    const query = wrapper.querySelector("[data-client-query]");
+    const button = wrapper.querySelector("[data-client-search]");
+    const results = wrapper.querySelector("[data-client-results]");
+    const selection = wrapper.querySelector("[data-client-selection]");
+
+    function selectedIds() {
+      return Array.from(select.selectedOptions || []).map(option => option.value).filter(Boolean);
+    }
+
+    function ensureOption(item, selected) {
+      let option = Array.from(select.options).find(existing => String(existing.value) === String(item.id));
+      if (!option) {
+        option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = item.text;
+        select.appendChild(option);
+      }
+      option.selected = selected;
+    }
+
+    function remove(id) {
+      const option = Array.from(select.options).find(existing => String(existing.value) === String(id));
+      if (option) option.selected = false;
+      refreshSelection();
+    }
+
+    function refreshSelection() {
+      selection.innerHTML = "";
+      const selected = Array.from(select.selectedOptions || []);
+      if (!selected.length) {
+        selection.textContent = options.emptyText;
+        return;
+      }
+      selected.forEach(option => {
+        const pill = document.createElement("span");
+        pill.className = "badge text-bg-light border me-2 mb-2";
+        pill.textContent = option.textContent + " ";
+        const removeButton = document.createElement("button");
+        removeButton.type = "button";
+        removeButton.className = "btn btn-sm btn-link p-0";
+        removeButton.textContent = "Retirar";
+        removeButton.addEventListener("click", function () { remove(option.value); });
+        pill.appendChild(removeButton);
+        selection.appendChild(pill);
+      });
+    }
+    select.addEventListener("client-picker:changed", refreshSelection);
+
+    button.addEventListener("click", function () {
+      results.innerHTML = "";
+      const params = new URLSearchParams({criterion: criterion.value, q: query.value});
+      params.append("scope", options.scope || "current");
+      if (currentAssignment && currentAssignment.value && options.scope !== "new_holder") params.append("assignment", currentAssignment.value);
+      const excludes = new Set(selectedIds());
+      if (currentClient && currentClient.value) excludes.add(currentClient.value);
+      if (options.excludePrimary && newClientSelect && newClientSelect.value) excludes.add(newClientSelect.value);
+      excludes.forEach(id => params.append("exclude", id));
+      fetch(clientSearchUrl + "?" + params.toString(), {headers: {"X-Requested-With": "XMLHttpRequest"}})
+        .then(response => response.json())
+        .then(data => {
+          (data.results || []).forEach(item => {
+            const row = document.createElement("div");
+            row.className = "list-group-item d-flex justify-content-between align-items-center gap-3";
+            const label = document.createElement("span");
+            label.textContent = item.text + " | " + item.status;
+            const action = document.createElement("button");
+            action.type = "button";
+            action.className = "btn btn-sm btn-outline-success";
+            action.textContent = options.multiple ? "Anadir" : "Seleccionar";
+            action.addEventListener("click", function () {
+              if (!options.multiple) Array.from(select.options).forEach(option => { option.selected = false; });
+              ensureOption(item, true);
+              refreshSelection();
+            });
+            row.appendChild(label);
+            row.appendChild(action);
+            results.appendChild(row);
+          });
+          if (!results.children.length) results.innerHTML = '<div class="text-muted">No se encontraron clientes.</div>';
+        });
+    });
+    query.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        button.click();
+      }
+    });
+
+    Array.from(select.options).forEach(option => {
+      const item = initialClients[String(option.value)];
+      if (item) option.textContent = item.text;
+    });
+    refreshSelection();
+  }
+
   function refresh() {
     if (!type) return;
     const value = type.value;
     const needsNew = value === "cession" || value === "substitution";
+    const needsSecondary = needsNew || value === "inclusion";
     if (other) other.style.display = value === "other" ? "" : "none";
-    [newClient, newAssignment, secondary].forEach(el => { if (el) el.style.display = needsNew ? "" : "none"; });
+    [newClient, newAssignment].forEach(el => { if (el) el.style.display = needsNew ? "" : "none"; });
+    if (secondary) secondary.style.display = needsSecondary ? "" : "none";
+    if (!needsNew) {
+      clearClientPicker(newClientSelect);
+      if (document.getElementById("id_new_assignment_number")) document.getElementById("id_new_assignment_number").value = "";
+    }
+    if (!needsSecondary) clearClientPicker(document.getElementById("id_secondary_clients"));
   }
   if (type) type.addEventListener("change", refresh);
+  if (currentAssignment) currentAssignment.addEventListener("change", loadAssignmentClients);
+  if (currentClient) currentClient.addEventListener("change", refreshTypeOptions);
+  if (unit) {
+    unit.addEventListener("change", loadContext);
+    unit.addEventListener("unit-hierarchy:changed", loadContext);
+    loadContext();
+  }
+  buildClientPicker(document.getElementById("id_new_client"), {multiple: false, scope: "new_holder", emptyText: "Sin nuevo titular seleccionado."});
+  buildClientPicker(document.getElementById("id_secondary_clients"), {multiple: true, scope: "new_secondary", emptyText: "Sin secundarios seleccionados.", excludePrimary: true});
   refresh();
 });
 </script>

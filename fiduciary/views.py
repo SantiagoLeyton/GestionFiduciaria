@@ -1,40 +1,60 @@
-import json
+﻿import json
+import logging
+import threading
 import tempfile
+import unicodedata
+import uuid
+from datetime import date
 from pathlib import Path
 
 from django.contrib import messages
-from django.contrib.admin.models import LogEntry
+from django.contrib.admin.models import CHANGE, LogEntry
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import IntegrityError, transaction
+from django.contrib.auth import get_user_model
+from django.db import IntegrityError, close_old_connections, transaction
 from django.db.models import Count, Min, Prefetch, Q, Sum
 from django.db.models import Value
 from django.db.models.functions import Replace
-from django.http import Http404, JsonResponse
+from django.conf import settings
+from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse, reverse_lazy
+from django.utils import timezone
+from django.utils.text import slugify
 from django.views.generic import CreateView, DetailView, FormView, ListView, TemplateView, UpdateView, View
 
 from core.models import BackupRecord
-from real_estate.models import GroupingType, PropertyUnit, StructuralGroup
+from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
+from real_estate.querysets import with_natural_unit_order
 
 from .forms import (
     AssignmentFilterForm,
+    AssignmentFinancialEntityForm,
     AssignmentHolderForm,
     AssignmentChangeForm,
+    AddSecondaryAssignmentHolderForm,
     ClientFilterForm,
     ClientForm,
     ClientUpdateForm,
     DailyReportAssignmentResolutionForm,
     DailyReportUploadForm,
     DIRECT_UNITS_VALUE,
+    ExportDocumentFilterForm,
+    ExportHistoricalWorkbookForm,
     FiduciaryAssignmentForm,
     FiduciaryAssignmentUpdateForm,
+    GlobalManualPaymentForm,
     HistoricalImportUploadForm,
     ImportResolutionForm,
+    ManualPaymentForm,
     MAX_IMPORT_FILE_SIZE_BYTES,
     AuditFilterForm,
     NoveltyFilterForm,
+    NewFiduciaryAssignmentForm,
+    assignment_choice_label,
+    assignment_can_receive_payment,
+    normalize_document_query,
     OperationalNoveltyForm,
     ObservationFilterForm,
     ObservationForm,
@@ -46,6 +66,8 @@ from .forms import (
     StatusReasonForm,
     UnitOwnershipForm,
     eligible_assignment_clients,
+    property_unit_choice_label,
+    unit_can_receive_new_assignment,
     validate_assignment_holder_formset,
 )
 from .domain_services import (
@@ -57,6 +79,8 @@ from .domain_services import (
     save_form_object_safely,
     sync_active_assignment_primary_holder,
 )
+from .exporters import export_historical_workbook
+from .services import create_payment
 from .utils import calculate_sha256
 from .imports.historical import (
     DuplicateHistoricalImportError,
@@ -64,6 +88,13 @@ from .imports.historical import (
     finalize_historical_import,
     find_existing_historical_import,
     store_historical_import_file,
+)
+from .imports.historical.readiness import (
+    has_available_stored_historical_file,
+    can_finalize_historical_import_batch,
+    has_blocked_dependencies,
+    has_open_blocking_issues,
+    has_unresolved_required_pendings,
 )
 from .imports.cancellation import CANCELABLE_BATCH_STATUSES, cancel_import_batch
 from .imports.daily import (
@@ -75,11 +106,17 @@ from .imports.daily import (
 )
 from .imports.historical.resolutions import (
     ImmediateResolutionError,
+    apply_resolution_to_current_element,
     apply_resolution_to_equivalent_elements,
     auto_resolve_new_units,
     create_immediate_structure_from_resolution,
+    equivalent_pending_elements,
     reanalyze_pending_resolutions,
     resolve_structural_group,
+    structural_group_pattern_elements,
+    structural_group_pattern_label,
+    structural_group_pattern_suggestions,
+    apply_structural_group_pattern_suggestions,
     update_batch_resolution_state,
 )
 from .models import (
@@ -103,10 +140,45 @@ from .permissions import (
     FiduciaryImportRequiredMixin,
     FiduciaryManagementRequiredMixin,
     FiduciaryReadRequiredMixin,
+    FiduciaryUpdateRequiredMixin,
     can_create_fiduciary,
     can_import_fiduciary,
     can_update_fiduciary,
 )
+
+logger = logging.getLogger(__name__)
+MANUAL_PAYMENT_SOURCE_SHA = "9" * 64
+
+
+def _payment_movement_type_label(payment: Payment) -> str:
+    if payment.movement_type == Payment.MovementType.ADDITION:
+        return "Abono"
+    return payment.get_movement_type_display()
+
+
+def _payment_movement_sort_key(payment: Payment):
+    if payment.exact_date:
+        return payment.exact_date
+    if payment.period_year and payment.period_month:
+        return date(payment.period_year, payment.period_month, 1)
+    return date.min
+
+
+def _assignment_movement_rows(payments: list[Payment]) -> list[dict]:
+    movements = [
+        {
+            "kind": "payment",
+            "date": _payment_movement_sort_key(payment),
+            "payment": payment,
+            "amount": payment.amount,
+            "concept": payment.concept or "-",
+            "type_label": _payment_movement_type_label(payment),
+            "source": f"{payment.source_file.original_name} | {payment.source_sheet} fila {payment.source_row}"
+            + (f" col. {payment.source_column}" if payment.source_column else ""),
+        }
+        for payment in payments
+    ]
+    return sorted(movements, key=lambda movement: (movement["date"], movement["kind"]))
 
 
 class QueryStringMixin:
@@ -128,10 +200,112 @@ def daily_report_batches():
     return ImportBatch.objects.filter(import_type=ImportBatch.ImportType.REPORTS).select_related("initiated_by").order_by("-created_at", "-pk")
 
 
-def _historical_batch_can_auto_finalize(batch: ImportBatch) -> bool:
-    return batch.files.filter(
-        file_type=ImportedFile.FileType.HISTORICAL,
-    ).exclude(stored_path="").exists()
+def _validation_error_text(exc: ValidationError) -> str:
+    if hasattr(exc, "messages"):
+        return " ".join(str(message) for message in exc.messages)
+    return str(exc)
+
+
+def _add_validation_errors_to_form(form, exc: ValidationError) -> None:
+    if hasattr(exc, "message_dict"):
+        for field_name, messages_for_field in exc.message_dict.items():
+            target = field_name if field_name in form.fields else None
+            for message in messages_for_field:
+                form.add_error(target, message)
+        return
+    for message in getattr(exc, "messages", [str(exc)]):
+        form.add_error(None, message)
+
+
+def _normalize_search_text(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return " ".join(value.casefold().split())
+
+
+def _activate_clients_for_assignment(clients, reason: str) -> None:
+    for client in clients:
+        if client.is_active:
+            continue
+        client.is_active = True
+        client.last_change_reason = reason
+        client.full_clean()
+        client.save(update_fields=["is_active", "last_change_reason", "updated_at"])
+
+
+def _create_assignment_without_novelty(*, unit, primary_client, assignment_number: str, secondary_clients, reason: str):
+    secondary_clients = list(secondary_clients or [])
+    if primary_client in secondary_clients:
+        raise ValidationError({"secondary_client_ids": "El cliente principal no puede repetirse como secundario."})
+    assignment_number = (assignment_number or "").strip()
+    locked_unit = PropertyUnit.objects.select_for_update().get(pk=unit.pk)
+    if FiduciaryAssignment.objects.filter(property_unit=locked_unit, is_active=True).exists():
+        raise ValidationError({"property_unit": "La unidad seleccionada ya tiene un encargo fiduciario activo."})
+    if UnitOwnership.objects.filter(property_unit=locked_unit, is_active=True, is_primary=True, end_date__isnull=True).exists():
+        raise ValidationError({"property_unit": "La unidad seleccionada ya tiene un titular principal vigente."})
+
+    primary_ownership = UnitOwnership(
+        client=primary_client,
+        property_unit=locked_unit,
+        is_primary=True,
+        start_date=timezone.localdate(),
+        last_change_reason=reason,
+    )
+    primary_ownership.full_clean()
+    primary_ownership.save()
+
+    assignment = FiduciaryAssignment(
+        assignment_number=assignment_number,
+        property_unit=locked_unit,
+        start_date=timezone.localdate(),
+        observations=reason,
+        last_change_reason=reason,
+    )
+    assignment.full_clean()
+    assignment.save()
+    FiduciaryAssignmentHolder.objects.create(
+        assignment=assignment,
+        client=primary_client,
+        is_primary=True,
+        start_date=assignment.start_date,
+        last_change_reason=reason,
+    )
+
+    seen_secondary_ids = set()
+    for client in secondary_clients:
+        if client.pk in seen_secondary_ids:
+            raise ValidationError({"secondary_client_ids": "No puede seleccionar el mismo cliente secundario mas de una vez."})
+        seen_secondary_ids.add(client.pk)
+        secondary_ownership, _ = UnitOwnership.objects.get_or_create(
+            client=client,
+            property_unit=locked_unit,
+            is_active=True,
+            defaults={
+                "is_primary": False,
+                "start_date": assignment.start_date,
+                "last_change_reason": reason,
+            },
+        )
+        if secondary_ownership.is_primary:
+            raise ValidationError({"secondary_client_ids": "Un titular principal vigente no puede agregarse como secundario."})
+        FiduciaryAssignmentHolder.objects.create(
+            assignment=assignment,
+            client=client,
+            is_primary=False,
+            start_date=assignment.start_date,
+            last_change_reason=reason,
+        )
+    return assignment
+
+
+def _log_observation_change(user, observation: ImportedHistoricalObservation, reason: str) -> None:
+    LogEntry.objects.log_actions(
+        user_id=user.pk,
+        queryset=ImportedHistoricalObservation.objects.filter(pk=observation.pk),
+        action_flag=CHANGE,
+        change_message=f"MODIFICAR_OBSERVACION | Motivo: {reason}",
+        single_object=True,
+    )
 
 
 class HistoricalImportBatchListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
@@ -167,6 +341,8 @@ class HistoricalImportCreateView(FiduciaryImportRequiredMixin, FormView):
             uploaded_files=uploaded_files,
             grouping_type_hint=form.cleaned_data.get("grouping_type_hint"),
         )
+        if summary.get("counts", {}).get("processing") == 1 and len(summary.get("items", [])) == 1:
+            return redirect(summary["items"][0]["preview_url"])
         self.request.session["fiduciary_upload_summary"] = summary
         return redirect("fiduciary:import_upload_summary")
 
@@ -214,8 +390,8 @@ def _process_historical_uploads(*, request, uploaded_files, grouping_type_hint=N
                     result="duplicate",
                     message=(
                         "Este archivo ya fue cargado anteriormente y no se volvio a procesar. "
-                        f"Archivo original: {existing_file.original_name}. Lote #{existing_file.batch_id}. "
-                        f"Lote asociado: #{existing_file.batch_id}. Estado del lote: {existing_file.batch.get_status_display()}."
+                        f"Archivo original: {existing_file.original_name}. "
+                        f"Estado del lote asociado: {existing_file.batch.get_status_display()}."
                     ),
                     batch_id=existing_file.batch_id,
                     preview_url=reverse("fiduciary:historical_import_preview", args=[existing_file.batch_id]),
@@ -241,15 +417,10 @@ def _process_historical_uploads(*, request, uploaded_files, grouping_type_hint=N
                 update_batch_resolution_state(batch)
                 batch.refresh_from_db()
                 if batch.status == ImportBatch.Status.READY:
-                    finalization = finalize_historical_import(batch_id=batch.pk, user=request.user)
-                    batch.refresh_from_db()
+                    _finalize_historical_import_synchronously(batch_id=batch.pk, user=request.user)
                     item.update(
                         result="auto_finalized",
-                        message=(
-                            "Finalizado automaticamente. "
-                            f"Clientes creados: {finalization.created_clients}. "
-                            f"Pagos creados: {finalization.created_payments}."
-                        ),
+                        message="Importacion historica definitiva completada.",
                         preview_url=reverse("fiduciary:historical_import_preview", args=[batch.pk]),
                     )
                     items.append(item)
@@ -265,8 +436,8 @@ def _process_historical_uploads(*, request, uploaded_files, grouping_type_hint=N
                     result="duplicate",
                     message=(
                         "Este archivo ya fue cargado anteriormente y no se volvio a procesar. "
-                        f"Archivo original: {exc.imported_file.original_name}. Lote #{exc.imported_file.batch_id}. "
-                        f"Lote asociado: #{exc.imported_file.batch_id}. Estado del lote: {exc.imported_file.batch.get_status_display()}."
+                        f"Archivo original: {exc.imported_file.original_name}. "
+                        f"Estado del lote asociado: {exc.imported_file.batch.get_status_display()}."
                     ),
                     batch_id=exc.imported_file.batch_id,
                     preview_url=reverse("fiduciary:historical_import_preview", args=[exc.imported_file.batch_id]),
@@ -316,12 +487,115 @@ def _copy_upload_to_temp(uploaded_file, temp_dir, order: int) -> Path:
     return path
 
 
+def _start_historical_finalization_thread(*, batch_id: int, user_id: int) -> None:
+    _mark_historical_finalization_started(batch_id)
+    thread = threading.Thread(
+        target=_run_historical_finalization_background,
+        kwargs={
+            "batch_id": batch_id,
+            "user_id": user_id,
+        },
+        daemon=True,
+        name=f"historical-finalization-{batch_id}",
+    )
+    thread.start()
+
+
+def _finalize_historical_import_synchronously(*, batch_id: int, user) -> None:
+    batch = ImportBatch.objects.get(pk=batch_id)
+    _validate_historical_finalization_can_start(batch)
+    finalize_historical_import(batch_id=batch_id, user=user)
+
+
+def _mark_historical_finalization_started(batch_id: int) -> None:
+    batch = ImportBatch.objects.get(pk=batch_id)
+    _validate_historical_finalization_can_start(batch)
+    ImportBatch.objects.filter(pk=batch_id, status=ImportBatch.Status.READY).update(
+        status=ImportBatch.Status.PROCESSING,
+        processing_started_at=timezone.now(),
+        summary=json.dumps(
+            {
+                "progress": {
+                    "phase": "preparing_final_import",
+                    "percent": 1,
+                    "processed_rows": 0,
+                    "total_rows": batch.total_rows,
+                }
+            },
+            ensure_ascii=True,
+        ),
+    )
+    ImportedFile.objects.filter(batch_id=batch_id, file_type=ImportedFile.FileType.HISTORICAL).update(
+        status=ImportedFile.Status.PROCESSING
+    )
+
+
+def _run_historical_finalization_background(*, batch_id: int, user_id: int) -> None:
+    close_old_connections()
+    try:
+        user = get_user_model().objects.get(pk=user_id)
+        finalize_historical_import(
+            batch_id=batch_id,
+            user=user,
+            progress_callback=_batch_finalization_progress_callback(batch_id),
+        )
+    except Exception as exc:
+        logger.exception("Historical import finalization worker failed for batch %s.", batch_id)
+        try:
+            _store_background_failure(batch_id, f"No fue posible completar el procesamiento del libro: {exc}")
+        except Exception:
+            logger.exception("Could not mark historical import batch %s as failed after worker error.", batch_id)
+    finally:
+        try:
+            close_old_connections()
+        except Exception:
+            logger.exception("Could not close old database connections after historical finalization worker.")
+
+
+def _batch_finalization_progress_callback(batch_id: int):
+    def callback(progress: dict) -> None:
+        ImportBatch.objects.filter(pk=batch_id).update(
+            processed_rows=progress.get("processed_rows") or 0,
+            total_rows=progress.get("total_rows") or 0,
+            summary=json.dumps({"progress": progress}, ensure_ascii=True),
+        )
+
+    return callback
+
+
+def _store_background_failure(batch_id: int, message: str) -> None:
+    ImportBatch.objects.filter(pk=batch_id).update(
+        status=ImportBatch.Status.FAILED,
+        processing_finished_at=timezone.now(),
+        summary=json.dumps({"progress": {"phase": "failed", "percent": 100, "error": message}}, ensure_ascii=True),
+    )
+    ImportedFile.objects.filter(batch_id=batch_id, file_type=ImportedFile.FileType.HISTORICAL).update(
+        status=ImportedFile.Status.FAILED,
+        result_message=message,
+        processing_finished_at=timezone.now(),
+    )
+
+
+def _validate_historical_finalization_can_start(batch: ImportBatch) -> None:
+    if batch.status != ImportBatch.Status.READY:
+        raise ValidationError("Solo un lote listo puede importarse definitivamente.")
+    if has_unresolved_required_pendings(batch):
+        raise ValidationError("El lote aun tiene pendientes accionables.")
+    if has_blocked_dependencies(batch):
+        raise ValidationError("El lote aun tiene elementos bloqueados por dependencia.")
+    if has_open_blocking_issues(batch):
+        raise ValidationError("El lote contiene incidencias bloqueantes abiertas.")
+    if not has_available_stored_historical_file(batch):
+        raise ValidationError("El archivo original no esta conservado para importacion definitiva.")
+
+
 def _build_upload_summary(title: str, import_type: str, items: list[dict]) -> dict:
     counts = {
         "total": len(items),
         "processed": sum(1 for item in items if item["result"] == "processed"),
         "auto_finalized": sum(1 for item in items if item["result"] == "auto_finalized"),
         "with_pendings": sum(1 for item in items if item["result"] == "with_pendings"),
+        "processing": sum(1 for item in items if item["result"] == "processing"),
         "duplicates": sum(1 for item in items if item["result"] == "duplicate"),
         "invalid": sum(1 for item in items if item["result"] == "invalid"),
         "failed": sum(1 for item in items if item["result"] == "failed"),
@@ -373,7 +647,7 @@ class HistoricalImportPreviewView(FiduciaryReadRequiredMixin, DetailView):
         context["can_import"] = can_import_fiduciary(self.request.user)
         context["can_manage"] = context["can_update"]
         context["imported_file"] = imported_file
-        context["summary"] = _load_import_summary(batch.summary or (imported_file.result_message if imported_file else ""))
+        context["summary"] = _historical_content_summary(batch, imported_file)
         context["sheets"] = imported_file.sheet_results.all() if imported_file else []
         context["issue_groups"] = (
             imported_file.row_issues.values("code", "severity", "sheet_result__sheet_name").annotate(total=Count("id")).order_by("code")
@@ -405,7 +679,78 @@ class HistoricalImportPreviewView(FiduciaryReadRequiredMixin, DetailView):
         context["unknown_count"] = detected.filter(resolution__action=ImportResolution.Action.UNRESOLVED).count()
         context["is_ready"] = batch.status == ImportBatch.Status.READY
         context["can_cancel"] = can_import_fiduciary(self.request.user) and batch.status in CANCELABLE_BATCH_STATUSES
-        context["can_finalize"] = can_import_fiduciary(self.request.user) and batch.status == ImportBatch.Status.READY
+        context["can_finalize"] = can_import_fiduciary(self.request.user) and can_finalize_historical_import_batch(batch)
+        return context
+
+
+class HistoricalImportProgressView(FiduciaryReadRequiredMixin, View):
+    def get(self, request, pk):
+        batch = get_object_or_404(historical_batches(), pk=pk)
+        summary = _load_import_summary(batch.summary)
+        progress = summary.get("progress") if isinstance(summary, dict) else None
+        return JsonResponse(
+            {
+                "batch_id": batch.pk,
+                "status": batch.status,
+                "progress": progress
+                or {
+                    "phase": batch.get_status_display(),
+                    "percent": 100 if batch.status in {ImportBatch.Status.READY, ImportBatch.Status.COMPLETED} else 0,
+                    "processed_rows": batch.processed_rows,
+                    "total_rows": batch.total_rows,
+                },
+            }
+        )
+
+
+class HistoricalImportProgressPageView(FiduciaryReadRequiredMixin, QueryStringMixin, DetailView):
+    model = ImportBatch
+    template_name = "fiduciary/import_progress.html"
+    context_object_name = "batch"
+
+    def get_queryset(self):
+        return historical_batches()
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        context["progress_url"] = reverse("fiduciary:historical_import_progress", args=[self.object.pk])
+        context["preview_url"] = reverse("fiduciary:historical_import_preview", args=[self.object.pk])
+        return context
+
+
+class HistoricalImportIssueDetailView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
+    model = ImportRowIssue
+    template_name = "fiduciary/import_issue_detail.html"
+    context_object_name = "issues"
+    paginate_by = 25
+
+    def dispatch(self, request, *args, **kwargs):
+        self.batch = get_object_or_404(historical_batches(), pk=kwargs["pk"])
+        self.imported_file = self.batch.files.order_by("order", "original_name").first()
+        if not self.imported_file:
+            raise Http404("Archivo importado no encontrado.")
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_queryset(self):
+        queryset = ImportRowIssue.objects.filter(imported_file=self.imported_file).select_related("sheet_result")
+        self.code = self.request.GET.get("code", "")
+        self.severity = self.request.GET.get("severity", "")
+        self.sheet_name = self.request.GET.get("sheet", "")
+        if self.code:
+            queryset = queryset.filter(code=self.code)
+        if self.severity:
+            queryset = queryset.filter(severity=self.severity)
+        if self.sheet_name:
+            queryset = queryset.filter(sheet_result__sheet_name=self.sheet_name)
+        return queryset.order_by("sheet_result__sheet_index", "row_number", "column_letter", "pk")
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        context["batch"] = self.batch
+        context["imported_file"] = self.imported_file
+        context["code"] = self.code
+        context["severity"] = self.severity
+        context["sheet_name"] = self.sheet_name
         return context
 
 
@@ -420,21 +765,13 @@ class HistoricalImportFinalizeView(FiduciaryImportRequiredMixin, DetailView):
     def post(self, request, *args, **kwargs):
         self.object = self.get_object()
         try:
-            result = finalize_historical_import(batch_id=self.object.pk, user=request.user)
+            _finalize_historical_import_synchronously(batch_id=self.object.pk, user=request.user)
         except PermissionDenied:
             raise
         except Exception as exc:
             messages.error(request, str(exc))
             return redirect("fiduciary:historical_import_preview", pk=self.object.pk)
-        messages.success(
-            request,
-            (
-                "Importacion historica definitiva completada. "
-                f"Unidades creadas: {result.created_property_units}. "
-                f"Clientes creados: {result.created_clients}. "
-                f"Pagos creados: {result.created_payments}."
-            ),
-        )
+        messages.success(request, "Importacion historica definitiva completada.")
         return redirect("fiduciary:historical_import_preview", pk=self.object.pk)
 
     def get_context_data(self, **kwargs):
@@ -449,7 +786,7 @@ class HistoricalImportFinalizeView(FiduciaryImportRequiredMixin, DetailView):
             resolution__action=ImportResolution.Action.UNRESOLVED,
         ).count()
         context["historical_novelties_count"] = batch.historical_novelties.count()
-        context["can_finalize"] = batch.status == ImportBatch.Status.READY
+        context["can_finalize"] = can_finalize_historical_import_batch(batch)
         return context
 
 
@@ -470,7 +807,7 @@ class HistoricalImportCancelView(FiduciaryImportRequiredMixin, DetailView):
             return redirect("fiduciary:historical_import_preview", pk=self.object.pk)
         messages.success(
             request,
-            "El intento de importación fue cancelado y sus resultados temporales fueron eliminados.",
+            "El intento de importaciÃ³n fue cancelado y sus resultados temporales fueron eliminados.",
         )
         return redirect("fiduciary:historical_import_list")
 
@@ -548,30 +885,34 @@ class HistoricalImportResolutionView(FiduciaryImportRequiredMixin, FormView):
         _clear_resolution_targets(resolution)
         resolution.resolved_by = self.request.user
         resolution.status = ImportResolution.Status.APPLIED
+        apply_equivalents = self.request.POST.get("apply_equivalents") == "1"
         try:
-            immediate_message = create_immediate_structure_from_resolution(resolution, self.request.user)
+            immediate_message = create_immediate_structure_from_resolution(
+                resolution,
+                self.request.user,
+                apply_equivalents=apply_equivalents,
+            )
         except ImmediateResolutionError as exc:
             form.add_error(None, str(exc))
             return self.form_invalid(form)
         if immediate_message:
             messages.success(self.request, immediate_message)
         else:
-            resolution.save()
-            apply_resolution_to_equivalent_elements(resolution, self.request.user)
+            apply_resolution_to_current_element(resolution, self.request.user)
+            equivalent_count = 0
+            if apply_equivalents:
+                equivalent_count = equivalent_pending_elements(self.element).count()
+                apply_resolution_to_equivalent_elements(resolution, self.request.user)
         reanalyze_pending_resolutions(self.batch, user=self.request.user)
         self.batch.refresh_from_db()
-        if self.batch.status == ImportBatch.Status.READY and _historical_batch_can_auto_finalize(self.batch):
-            try:
-                result = finalize_historical_import(batch_id=self.batch.pk, user=self.request.user)
-                messages.success(
-                    self.request,
-                    f"Todas las resoluciones estan completas. Importacion finalizada automaticamente. Pagos creados: {result.created_payments}.",
-                )
-            except Exception as exc:
-                messages.error(self.request, str(exc))
+        if can_finalize_historical_import_batch(self.batch):
+            messages.success(self.request, "Todas las resoluciones estan completas. El lote esta listo para importacion definitiva.")
             return redirect("fiduciary:historical_import_preview", pk=self.batch.pk)
         if not immediate_message:
-            messages.success(self.request, "Resolucion aplicada a las apariciones equivalentes.")
+            if self.request.POST.get("apply_equivalents") == "1":
+                messages.success(self.request, f"Resolucion aplicada al pendiente actual y a {equivalent_count} pendiente(s) similar(es).")
+            else:
+                messages.success(self.request, "Resolucion aplicada al pendiente actual.")
         return redirect("fiduciary:historical_import_pending", pk=self.batch.pk)
 
     def get_context_data(self, **kwargs):
@@ -582,6 +923,8 @@ class HistoricalImportResolutionView(FiduciaryImportRequiredMixin, FormView):
             DetectedStructureElement.InferredKind.PROJECT,
             DetectedStructureElement.InferredKind.GROUPING_TYPE,
         }
+        context["equivalent_elements"] = list(equivalent_pending_elements(self.element)[:25])
+        context["equivalent_count"] = equivalent_pending_elements(self.element).count()
         return context
 
 
@@ -604,39 +947,70 @@ class HistoricalImportStructuralGroupResolutionView(FiduciaryImportRequiredMixin
         return kwargs
 
     def form_valid(self, form):
+        created_grouping_type = None
         try:
-            updated_units = resolve_structural_group(
-                resolution=self.element.resolution,
-                action=form.cleaned_data["action"],
-                project=form.cleaned_data["project"],
-                grouping_type=form.cleaned_data["grouping_type"],
-                existing_group=form.cleaned_data.get("existing_group"),
-                new_group_name=form.cleaned_data.get("new_group_name"),
-                resolved_by=self.request.user,
-            )
-        except ValueError as exc:
+            with transaction.atomic():
+                grouping_type = form.cleaned_data["grouping_type"]
+                if form.cleaned_data.get("create_grouping_type"):
+                    grouping_type = GroupingType(
+                        code=form.cleaned_data["new_grouping_type_code"].strip(),
+                        name=form.cleaned_data["new_grouping_type_name"].strip(),
+                        description="",
+                        is_active=True,
+                    )
+                    grouping_type.save()
+                    created_grouping_type = grouping_type
+                suggestions = []
+                if form.cleaned_data["action"] == ImportResolution.Action.ASSOCIATE_EXISTING:
+                    suggestions = structural_group_pattern_suggestions(
+                        source_element=self.element,
+                        project=form.cleaned_data["project"],
+                        grouping_type=grouping_type,
+                        selected_group=form.cleaned_data.get("existing_group"),
+                    )
+                elif form.cleaned_data["action"] == ImportResolution.Action.CREATE_NEW:
+                    suggestions = structural_group_pattern_suggestions(
+                        source_element=self.element,
+                        project=form.cleaned_data["project"],
+                        grouping_type=grouping_type,
+                        selected_group=None,
+                        new_group_name=form.cleaned_data.get("new_group_name"),
+                    )
+                updated_units = resolve_structural_group(
+                    resolution=self.element.resolution,
+                    action=form.cleaned_data["action"],
+                    project=form.cleaned_data["project"],
+                    grouping_type=grouping_type,
+                    existing_group=form.cleaned_data.get("existing_group"),
+                    new_group_name=form.cleaned_data.get("new_group_name"),
+                    resolved_by=self.request.user,
+                )
+                if suggestions:
+                    applied = apply_structural_group_pattern_suggestions(suggestions, self.request.user)
+                    updated_units += applied
+        except (ValueError, ValidationError, IntegrityError) as exc:
             form.add_error(None, str(exc))
             return self.form_invalid(form)
+        if created_grouping_type:
+            messages.success(self.request, f"Tipo de agrupacion creado: {created_grouping_type}.")
         messages.success(
             self.request,
-            f"La agrupación fue resuelta y se actualizaron automáticamente {updated_units} unidades relacionadas.",
+            f"La agrupacion fue resuelta y se actualizaron automaticamente {updated_units} unidades relacionadas.",
         )
         self.batch.refresh_from_db()
-        if self.batch.status == ImportBatch.Status.READY and _historical_batch_can_auto_finalize(self.batch):
-            try:
-                result = finalize_historical_import(batch_id=self.batch.pk, user=self.request.user)
-                messages.success(
-                    self.request,
-                    f"Importacion finalizada automaticamente. Pagos creados: {result.created_payments}.",
-                )
-            except Exception as exc:
-                messages.error(self.request, str(exc))
-        return redirect("fiduciary:historical_import_preview", pk=self.batch.pk)
+        if can_finalize_historical_import_batch(self.batch):
+            messages.success(self.request, "Todas las resoluciones estan completas. El lote esta listo para importacion definitiva.")
+            return redirect("fiduciary:historical_import_preview", pk=self.batch.pk)
+        return redirect("fiduciary:historical_import_pending", pk=self.batch.pk)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["batch"] = self.batch
         context["element"] = self.element
+        project_id = (self.element.structural_context or {}).get("project_id")
+        context["suggested_project"] = Project.objects.filter(pk=project_id).first() if project_id else None
+        context["pattern_label"] = structural_group_pattern_label(self.element)
+        context["pattern_elements"] = structural_group_pattern_elements(self.element)
         return context
 
 
@@ -690,6 +1064,26 @@ def _load_import_summary(value: str) -> dict:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _historical_content_summary(batch: ImportBatch, imported_file: ImportedFile | None) -> dict:
+    file_summary = _load_import_summary(imported_file.result_message if imported_file else "")
+    batch_summary = _load_import_summary(batch.summary)
+    content_keys = {
+        "valid_rows",
+        "ignored_rows",
+        "client_appearances",
+        "distinct_assignments",
+        "payment_entries",
+        "payment_columns",
+        "historical_novelties",
+        "issues",
+    }
+    summary = dict(file_summary)
+    for key, value in batch_summary.items():
+        if key in content_keys or key not in summary:
+            summary[key] = value
+    return summary
 
 
 class DailyReportBatchListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
@@ -765,7 +1159,7 @@ def _process_daily_report_uploads(*, request, uploaded_files) -> dict:
             if existing_file:
                 item.update(
                     result="duplicate",
-                    message=f"Ya fue cargado como lote #{existing_file.batch_id}.",
+                    message="Ya fue cargado anteriormente.",
                     batch_id=existing_file.batch_id,
                     preview_url=reverse("fiduciary:daily_report_preview", args=[existing_file.batch_id]),
                 )
@@ -804,7 +1198,7 @@ def _process_daily_report_uploads(*, request, uploaded_files) -> dict:
                 batch.delete()
                 item.update(
                     result="duplicate",
-                    message=f"Ya fue cargado como lote #{exc.imported_file.batch_id}.",
+                    message="Ya fue cargado anteriormente.",
                     batch_id=exc.imported_file.batch_id,
                     preview_url=reverse("fiduciary:daily_report_preview", args=[exc.imported_file.batch_id]),
                 )
@@ -896,11 +1290,20 @@ class DailyReportResolveAssignmentView(FiduciaryImportRequiredMixin, FormView):
         return kwargs
 
     def form_valid(self, form):
+        assignment = form.cleaned_data.get("assignment")
+        financial_entity = form.cleaned_data.get("financial_entity", "")
+        payment_destination = form.cleaned_data.get("payment_destination") or None
+        if assignment and financial_entity:
+            unit = assignment.property_unit
+            if unit.financial_entity != financial_entity:
+                unit.financial_entity = financial_entity
+                unit.save(update_fields=["financial_entity", "updated_at"])
         resolve_daily_report_assignment(
             row=self.row,
-            assignment=form.cleaned_data.get("assignment"),
+            assignment=assignment,
             user=self.request.user,
             note=form.cleaned_data.get("resolution_note", ""),
+            payment_destination=payment_destination,
         )
         self.batch.refresh_from_db()
         if self.batch.status == ImportBatch.Status.READY:
@@ -917,6 +1320,10 @@ class DailyReportResolveAssignmentView(FiduciaryImportRequiredMixin, FormView):
         context = super().get_context_data(**kwargs)
         context["batch"] = self.batch
         context["row"] = self.row
+        assignments = FiduciaryAssignment.objects.select_related("property_unit").order_by("assignment_number")
+        context["assignment_financial_entities"] = {
+            str(assignment.pk): assignment.property_unit.financial_entity or "" for assignment in assignments
+        }
         return context
 
 
@@ -995,6 +1402,8 @@ class ClientListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
             information_status = self.filter_form.cleaned_data.get("information_status")
             status = self.filter_form.cleaned_data.get("status")
             project = self.filter_form.cleaned_data.get("project")
+            grouping_type = self.filter_form.cleaned_data.get("grouping_type")
+            structural_group = self.filter_form.cleaned_data.get("structural_group")
             property_unit = self.filter_form.cleaned_data.get("property_unit")
             if q:
                 queryset = queryset.filter(
@@ -1030,6 +1439,10 @@ class ClientListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
                 queryset = queryset.filter(is_active=False)
             if project:
                 queryset = queryset.filter(unit_ownerships__property_unit__project=project)
+            if grouping_type:
+                queryset = queryset.filter(unit_ownerships__property_unit__structural_group__grouping_type=grouping_type)
+            if structural_group:
+                queryset = queryset.filter(unit_ownerships__property_unit__structural_group=structural_group)
             if property_unit:
                 queryset = queryset.filter(unit_ownerships__property_unit=property_unit)
         return queryset.distinct().order_by("last_names_or_company", "first_names", "document_number")
@@ -1049,17 +1462,20 @@ class ClientDetailView(FiduciaryReadRequiredMixin, DetailView):
         return Client.objects.prefetch_related(
             Prefetch(
                 "unit_ownerships",
-                queryset=UnitOwnership.objects.select_related("property_unit", "property_unit__project").order_by("-is_active", "-start_date"),
+                queryset=UnitOwnership.objects.select_related(
+                    "property_unit",
+                    "property_unit__project",
+                    "property_unit__structural_group",
+                ).order_by("-is_active", "-start_date"),
             ),
             Prefetch(
                 "fiduciary_assignment_holders",
                 queryset=FiduciaryAssignmentHolder.objects.select_related(
-                    "assignment", "assignment__property_unit", "assignment__property_unit__project"
+                    "assignment",
+                    "assignment__property_unit",
+                    "assignment__property_unit__project",
+                    "assignment__property_unit__structural_group",
                 ).order_by("-is_active", "-start_date"),
-            ),
-            Prefetch(
-                "historical_observations",
-                queryset=ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").select_related("property_unit", "assignment").order_by("-created_at", "-pk"),
             ),
         )
 
@@ -1071,8 +1487,47 @@ class ClientDetailView(FiduciaryReadRequiredMixin, DetailView):
         context["novelties"] = OperationalNovelty.objects.filter(
             Q(previous_client=self.object) | Q(new_client=self.object) | Q(historical_client=self.object)
         ).select_related(
-            "property_unit", "previous_assignment", "new_assignment", "historical_assignment", "created_by"
+            "property_unit",
+            "property_unit__structural_group",
+            "previous_assignment",
+            "new_assignment",
+            "historical_assignment",
+            "created_by",
         ).order_by("-created_at", "-pk")
+        novelty_unit_ids = []
+        novelty_assignment_ids = []
+        for novelty in context["novelties"]:
+            if novelty.property_unit_id:
+                novelty_unit_ids.append(novelty.property_unit_id)
+            novelty_assignment_ids.extend(
+                assignment_id
+                for assignment_id in (
+                    novelty.previous_assignment_id,
+                    novelty.new_assignment_id,
+                    novelty.historical_assignment_id,
+                )
+                if assignment_id
+            )
+        observation_filters = (
+            Q(assignment__holders__client=self.object)
+            | Q(client=self.object)
+            | Q(operational_novelty__previous_client=self.object)
+            | Q(operational_novelty__new_client=self.object)
+            | Q(operational_novelty__historical_client=self.object)
+            | Q(source_novelty__operational_novelties__previous_client=self.object)
+            | Q(source_novelty__operational_novelties__new_client=self.object)
+            | Q(source_novelty__operational_novelties__historical_client=self.object)
+        )
+        if novelty_unit_ids and novelty_assignment_ids:
+            observation_filters |= Q(property_unit_id__in=novelty_unit_ids, assignment_id__in=novelty_assignment_ids)
+        context["related_observations"] = (
+            ImportedHistoricalObservation.objects.exclude(origin="historical_novelty")
+            .filter(operational_novelty__isnull=True)
+            .filter(observation_filters)
+            .select_related("property_unit", "property_unit__structural_group", "assignment")
+            .distinct()
+            .order_by("-created_at", "-pk")
+        )
         return context
 
 
@@ -1141,13 +1596,15 @@ class ObservationListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView
         queryset = ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").select_related(
             "project",
             "property_unit",
-            "client",
+            "property_unit__structural_group",
             "assignment",
             "imported_by",
         ).order_by("-created_at", "-pk")
         self.filter_form = ObservationFilterForm(self.request.GET)
         if self.filter_form.is_valid():
             project = self.filter_form.cleaned_data.get("project")
+            grouping_type = self.filter_form.cleaned_data.get("grouping_type")
+            structural_group = self.filter_form.cleaned_data.get("structural_group")
             unit = self.filter_form.cleaned_data.get("property_unit")
             client = self.filter_form.cleaned_data.get("client")
             document = self.filter_form.cleaned_data.get("document")
@@ -1157,17 +1614,24 @@ class ObservationListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView
             date_to = self.filter_form.cleaned_data.get("date_to")
             if project:
                 queryset = queryset.filter(property_unit__project=project)
+            if grouping_type:
+                queryset = queryset.filter(property_unit__structural_group__grouping_type=grouping_type)
+            if structural_group:
+                queryset = queryset.filter(property_unit__structural_group=structural_group)
             if unit:
                 queryset = queryset.filter(property_unit=unit)
             if client:
-                queryset = queryset.filter(client=client)
+                queryset = queryset.filter(
+                    Q(assignment__holders__client=client)
+                    | Q(client=client)
+                )
             if document:
                 normalized = document
                 queryset = queryset.annotate(
                     normalized_document_number=Replace(
                         Replace(
                             Replace(
-                                Replace("client__document_number", Value(" "), Value("")),
+                                Replace("assignment__holders__client__document_number", Value(" "), Value("")),
                                 Value("."),
                                 Value(""),
                             ),
@@ -1177,7 +1641,10 @@ class ObservationListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView
                         Value("-"),
                         Value(""),
                     )
-                ).filter(normalized_document_number__icontains=normalized)
+                ).filter(
+                    Q(normalized_document_number__icontains=normalized)
+                    | Q(client__document_number__icontains=normalized)
+                )
             if assignment_number:
                 queryset = queryset.filter(assignment__assignment_number__icontains=assignment_number)
             if origin:
@@ -1186,7 +1653,7 @@ class ObservationListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView
                 queryset = queryset.filter(created_at__date__gte=date_from)
             if date_to:
                 queryset = queryset.filter(created_at__date__lte=date_to)
-        return queryset
+        return queryset.distinct()
 
     def get_context_data(self, **kwargs):
         context = self.add_common_context(super().get_context_data(**kwargs))
@@ -1237,12 +1704,14 @@ class ObservationUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
     def get_form_kwargs(self):
         kwargs = super().get_form_kwargs()
         kwargs["user"] = self.request.user
+        kwargs["require_change_reason"] = True
         return kwargs
 
     def form_valid(self, form):
         try:
             with transaction.atomic():
                 self.object = form.save()
+                _log_observation_change(self.request.user, self.object, form.cleaned_data["change_reason"])
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
@@ -1282,8 +1751,10 @@ class ObservationContextView(FiduciaryReadRequiredMixin, View):
         unit_id = request.GET.get("unit")
         payload = {"units": [], "clients": [], "assignments": []}
         if project_id:
-            units = PropertyUnit.objects.filter(project_id=project_id, is_active=True).order_by("name", "code")
-            payload["units"] = [{"id": unit.pk, "text": str(unit)} for unit in units]
+            units = with_natural_unit_order(
+                PropertyUnit.objects.filter(project_id=project_id, is_active=True).select_related("structural_group")
+            )
+            payload["units"] = [{"id": unit.pk, "text": property_unit_choice_label(unit)} for unit in units]
         if not unit_id:
             return JsonResponse(payload)
         clients = (
@@ -1298,10 +1769,61 @@ class ObservationContextView(FiduciaryReadRequiredMixin, View):
             .distinct()
             .order_by("last_names_or_company", "first_names", "document_number")
         )
-        assignments = FiduciaryAssignment.objects.filter(property_unit_id=unit_id).order_by("-is_active", "assignment_number")
+        assignments = (
+            FiduciaryAssignment.objects.filter(property_unit_id=unit_id)
+            .prefetch_related("holders__client")
+            .order_by("-is_active", "assignment_number")
+        )
         payload["clients"] = [{"id": client.pk, "text": f"{client.full_name} - {client.document_number or 'Sin documento'}"} for client in clients]
-        payload["assignments"] = [{"id": assignment.pk, "text": assignment.assignment_number} for assignment in assignments]
+        payload["assignments"] = [{"id": assignment.pk, "text": assignment_choice_label(assignment)} for assignment in assignments]
         return JsonResponse(payload)
+
+
+class UnitHierarchyTypesView(FiduciaryReadRequiredMixin, View):
+    def get(self, request):
+        project_id = request.GET.get("project")
+        types = GroupingType.objects.none()
+        if project_id:
+            types = (
+                GroupingType.objects.filter(
+                    is_active=True,
+                    structural_groups__project_id=project_id,
+                    structural_groups__is_active=True,
+                )
+                .distinct()
+                .order_by("name")
+            )
+        return JsonResponse({"results": [{"id": item.pk, "text": item.name} for item in types]})
+
+
+class UnitHierarchyGroupsView(FiduciaryReadRequiredMixin, View):
+    def get(self, request):
+        project_id = request.GET.get("project")
+        grouping_type_id = request.GET.get("grouping_type")
+        groups = StructuralGroup.objects.none()
+        if project_id and grouping_type_id:
+            groups = StructuralGroup.objects.filter(
+                is_active=True,
+                project_id=project_id,
+                grouping_type_id=grouping_type_id,
+            ).order_by("name", "code")
+        return JsonResponse({"results": [{"id": item.pk, "text": str(item)} for item in groups]})
+
+
+class UnitHierarchyUnitsView(FiduciaryReadRequiredMixin, View):
+    def get(self, request):
+        project_id = request.GET.get("project")
+        group_id = request.GET.get("structural_group")
+        units = PropertyUnit.objects.none()
+        if project_id and group_id:
+            units = with_natural_unit_order(
+                PropertyUnit.objects.filter(
+                    is_active=True,
+                    project_id=project_id,
+                    structural_group_id=group_id,
+                ).select_related("structural_group")
+            )
+        return JsonResponse({"results": [{"id": item.pk, "text": property_unit_choice_label(item)} for item in units]})
 
 
 class NoveltyListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
@@ -1314,6 +1836,7 @@ class NoveltyListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
         queryset = OperationalNovelty.objects.select_related(
             "project",
             "property_unit",
+            "property_unit__structural_group",
             "previous_client",
             "new_client",
             "historical_client",
@@ -1325,6 +1848,8 @@ class NoveltyListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
         self.filter_form = NoveltyFilterForm(self.request.GET)
         if self.filter_form.is_valid():
             project = self.filter_form.cleaned_data.get("project")
+            grouping_type = self.filter_form.cleaned_data.get("grouping_type")
+            structural_group = self.filter_form.cleaned_data.get("structural_group")
             unit = self.filter_form.cleaned_data.get("property_unit")
             novelty_type = self.filter_form.cleaned_data.get("novelty_type")
             client = self.filter_form.cleaned_data.get("client")
@@ -1335,6 +1860,10 @@ class NoveltyListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
             date_to = self.filter_form.cleaned_data.get("date_to")
             if project:
                 queryset = queryset.filter(property_unit__project=project)
+            if grouping_type:
+                queryset = queryset.filter(property_unit__structural_group__grouping_type=grouping_type)
+            if structural_group:
+                queryset = queryset.filter(property_unit__structural_group=structural_group)
             if unit:
                 queryset = queryset.filter(property_unit=unit)
             if novelty_type:
@@ -1409,9 +1938,9 @@ class NoveltyDetailView(FiduciaryReadRequiredMixin, QueryStringMixin, DetailView
             if assignment_id
         ]
         filters = Q(pk=novelty.source_observation_id) if novelty.source_observation_id else Q()
-        if client_ids:
+        if not novelty.source_observation_id and client_ids:
             filters |= Q(client_id__in=client_ids)
-        if assignment_ids:
+        if not novelty.source_observation_id and assignment_ids:
             filters |= Q(assignment_id__in=assignment_ids)
         context["related_observations"] = (
             related_observations.filter(filters).select_related("client", "assignment", "imported_by").distinct()
@@ -1441,12 +1970,14 @@ class NoveltyCreateView(FiduciaryManagementRequiredMixin, QueryStringMixin, Form
                 detail=form.cleaned_data.get("detail", ""),
                 user=self.request.user,
                 new_client=form.cleaned_data.get("new_client"),
+                current_client=form.cleaned_data.get("current_client"),
+                current_assignment=form.cleaned_data.get("current_assignment"),
                 new_assignment_number=form.cleaned_data.get("new_assignment_number", ""),
                 secondary_clients=form.cleaned_data.get("secondary_clients"),
                 other_type=form.cleaned_data.get("other_type", ""),
             )
         except ValidationError as exc:
-            form.add_error(None, exc)
+            _add_validation_errors_to_form(form, exc)
             return self.form_invalid(form)
         messages.success(self.request, "Novedad registrada correctamente.")
         return redirect("fiduciary:novelty_detail", pk=result.novelty.pk)
@@ -1454,6 +1985,23 @@ class NoveltyCreateView(FiduciaryManagementRequiredMixin, QueryStringMixin, Form
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["title"] = "Nueva novedad"
+        context["client_search_url"] = reverse("fiduciary:novelty_client_search")
+        context["assignment_clients_url"] = reverse("fiduciary:novelty_assignment_clients")
+        form = context.get("form")
+        selected_ids = []
+        if form and form.is_bound:
+            selected_ids.extend([form.data.get("new_client"), *form.data.getlist("secondary_clients")])
+            selected_ids.extend([form.data.get("current_client")])
+        selected_clients = Client.objects.filter(pk__in=[item for item in selected_ids if str(item).isdigit()])
+        context["selected_clients_json"] = json.dumps(
+            {
+                str(client.pk): {
+                    "id": client.pk,
+                    "text": f"{client.document_number or 'Sin documento'} | {client.full_name} | {client.email or 'Sin correo'}",
+                }
+                for client in selected_clients
+            }
+        )
         return context
 
 
@@ -1542,9 +2090,66 @@ class PaymentListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
             payment.display_client = next((holder.client for holder in holders if holder.is_primary), None) or (
                 holders[0].client if holders else None
             )
+            payment.display_movement_type = _payment_movement_type_label(payment)
         context["filter_form"] = getattr(self, "filter_form", PaymentFilterForm(self.request.GET))
         context["search_performed"] = getattr(self, "search_performed", False)
         return context
+
+
+class PaymentCreateView(FiduciaryCreateRequiredMixin, QueryStringMixin, FormView):
+    form_class = GlobalManualPaymentForm
+    template_name = "fiduciary/payment_form.html"
+
+    def form_valid(self, form):
+        assignment = form.cleaned_data["assignment"]
+        try:
+            _create_manual_payment_for_assignment(assignment, form.cleaned_data, self.request.user)
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Pago registrado correctamente.")
+        return redirect(f"{reverse('fiduciary:payment_list')}?assignment_number={assignment.assignment_number}")
+
+    def get_context_data(self, **kwargs):
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        context["title"] = "Registrar pago"
+        context["global_payment"] = True
+        context["unit_assignment_url"] = reverse("fiduciary:payment_unit_assignment")
+        return context
+
+
+class PaymentUnitAssignmentView(FiduciaryCreateRequiredMixin, View):
+    def get(self, request):
+        unit_id = request.GET.get("unit")
+        if not unit_id:
+            return JsonResponse({"assignment": None, "message": "Seleccione una unidad."})
+        assignments = list(
+            FiduciaryAssignment.objects.filter(property_unit_id=unit_id, is_active=True)
+            .select_related("property_unit", "property_unit__project", "property_unit__structural_group")
+            .order_by("-start_date", "-pk")
+        )
+        payable_assignments = [assignment for assignment in assignments if assignment_can_receive_payment(assignment)]
+        if not payable_assignments:
+            return JsonResponse(
+                {
+                    "assignment": None,
+                    "message": "La unidad seleccionada no tiene un encargo fiduciario activo con titulares vigentes.",
+                }
+            )
+        if len(payable_assignments) > 1:
+            return JsonResponse({"assignment": None, "message": "La unidad seleccionada tiene mas de un encargo activo."})
+        assignment = payable_assignments[0]
+        unit = assignment.property_unit
+        group = f"{unit.structural_group} | " if unit.structural_group_id else ""
+        return JsonResponse(
+            {
+                "assignment": {
+                    "id": assignment.pk,
+                    "number": assignment.assignment_number,
+                    "text": f"{assignment.assignment_number} | {unit.project.name} | {group}{unit.name or unit.code}",
+                }
+            }
+        )
 
 
 class AuditListView(FiduciaryManagementRequiredMixin, QueryStringMixin, ListView):
@@ -1619,120 +2224,102 @@ class AuditDetailView(FiduciaryManagementRequiredMixin, QueryStringMixin, Detail
         return context
 
 
-class UnitOwnershipListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
-    model = UnitOwnership
-    template_name = "fiduciary/ownership_list.html"
-    context_object_name = "ownerships"
-    paginate_by = 10
-
-    def get_queryset(self):
-        return UnitOwnership.objects.select_related("client", "property_unit", "property_unit__project")
+class ExportHomeView(FiduciaryReadRequiredMixin, QueryStringMixin, TemplateView):
+    template_name = "fiduciary/export_home.html"
 
     def get_context_data(self, **kwargs):
-        return self.add_common_context(super().get_context_data(**kwargs))
-
-
-class UnitOwnershipCreateView(FiduciaryCreateRequiredMixin, CreateView):
-    model = UnitOwnership
-    form_class = UnitOwnershipForm
-    template_name = "fiduciary/ownership_form.html"
-    success_url = reverse_lazy("fiduciary:ownership_list")
-
-    def get_initial(self):
-        initial = super().get_initial()
-        if self.request.GET.get("client"):
-            initial["client"] = self.request.GET["client"]
-        if self.request.GET.get("property_unit"):
-            initial["property_unit"] = self.request.GET["property_unit"]
-        return initial
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        context["title"] = "Nueva titularidad"
-        context["back_url"] = "fiduciary:ownership_list"
-        context["client_search_url"] = reverse("fiduciary:client_search")
+        context = self.add_common_context(super().get_context_data(**kwargs))
+        document_form = ExportDocumentFilterForm(self.request.GET)
+        documents = ImportedFile.objects.select_related("batch", "batch__initiated_by").exclude(stored_path="").order_by("-created_at", "-pk")
+        if document_form.is_valid():
+            file_type = document_form.cleaned_data.get("file_type")
+            filename = document_form.cleaned_data.get("filename")
+            date_from = document_form.cleaned_data.get("date_from")
+            date_to = document_form.cleaned_data.get("date_to")
+            if file_type:
+                documents = documents.filter(file_type=file_type)
+            if filename:
+                documents = documents.filter(original_name__icontains=filename)
+            if date_from:
+                documents = documents.filter(created_at__date__gte=date_from)
+            if date_to:
+                documents = documents.filter(created_at__date__lte=date_to)
+        document_rows = []
+        for item in documents[:50]:
+            path = _stored_import_file_path(item)
+            document_rows.append({"file": item, "available": bool(path and path.exists())})
+        context["export_form"] = ExportHistoricalWorkbookForm()
+        context["document_filter_form"] = document_form
+        context["document_rows"] = document_rows
         return context
 
-    def form_valid(self, form):
-        try:
-            result = create_primary_ownership_with_assignment(
-                unit=form.cleaned_data["property_unit"],
-                primary_client=form.cleaned_data["client"],
-                assignment_number=form.cleaned_data["assignment_number"],
-                effective_date=form.cleaned_data["start_date"],
-                reason=form.cleaned_data.get("change_reason", ""),
-                secondary_clients=form.cleaned_data.get("secondary_clients"),
-                novelty_type=form.cleaned_data.get("novelty_type"),
-                other_type=form.cleaned_data.get("other_type", ""),
-                created_by=self.request.user,
-            )
-            self.object = result.ownership
-        except ValidationError as exc:
-            form.add_error(None, exc)
-            return self.form_invalid(form)
-        messages.success(self.request, "Titularidad y encargo fiduciario creados correctamente.")
-        return redirect(self.success_url)
+
+class HistoricalWorkbookExportView(FiduciaryReadRequiredMixin, View):
+    def post(self, request):
+        form = ExportHistoricalWorkbookForm(request.POST)
+        if not form.is_valid():
+            messages.error(request, "Seleccione un proyecto valido para exportar.")
+            return redirect("fiduciary:export_home")
+        exported = export_historical_workbook(form.cleaned_data["project"])
+        response = HttpResponse(
+            exported.content,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{exported.filename}"'
+        return response
+
+
+class UploadedDocumentDownloadView(FiduciaryReadRequiredMixin, View):
+    def get(self, request, pk):
+        imported_file = get_object_or_404(ImportedFile.objects.select_related("batch"), pk=pk)
+        path = _stored_import_file_path(imported_file)
+        if not path or not path.exists():
+            messages.error(request, "Archivo no disponible.")
+            return redirect("fiduciary:export_home")
+        return FileResponse(path.open("rb"), as_attachment=True, filename=imported_file.original_name)
+
+
+def _stored_import_file_path(imported_file: ImportedFile) -> Path | None:
+    if not imported_file.stored_path:
+        return None
+    media_root = Path(settings.MEDIA_ROOT).resolve()
+    path = (media_root / imported_file.stored_path).resolve()
+    try:
+        path.relative_to(media_root)
+    except ValueError:
+        return None
+    return path
+
+
+def _redirect_retired_ownership_module(request, target="fiduciary:assignment_list"):
+    messages.info(request, "La gestion operativa se realiza desde Encargos fiduciarios.")
+    return redirect(target)
+
+
+class UnitOwnershipListView(FiduciaryReadRequiredMixin, View):
+    def get(self, request):
+        return _redirect_retired_ownership_module(request)
+
+
+class UnitOwnershipCreateView(FiduciaryCreateRequiredMixin, View):
+    def get(self, request):
+        return _redirect_retired_ownership_module(request, "fiduciary:assignment_create")
+
+    def post(self, request):
+        return _redirect_retired_ownership_module(request, "fiduciary:assignment_create")
 
 
 class UnitOwnershipFinalizeView(FiduciaryManagementRequiredMixin, View):
+    def get(self, request, pk):
+        return _redirect_retired_ownership_module(request)
+
     def post(self, request, pk):
-        ownership = get_object_or_404(UnitOwnership, pk=pk)
-        form = OwnershipFinalizeForm(request.POST)
-        if not form.is_valid():
-            messages.error(request, "Debe registrar tipo, motivo y fecha de finalizacion.")
-            return redirect("fiduciary:ownership_list")
-        try:
-            finalize_ownership(
-                ownership=ownership,
-                end_date=form.cleaned_data["end_date"],
-                reason=form.cleaned_data["reason"],
-                novelty_type=form.cleaned_data["novelty_type"],
-            )
-        except ValidationError as exc:
-            messages.error(request, " ".join(exc.messages))
-            return redirect("fiduciary:ownership_list")
-        messages.success(request, "Titularidad finalizada correctamente.")
-        return redirect("fiduciary:ownership_list")
+        return _redirect_retired_ownership_module(request)
 
 
-class PrimaryOwnershipChangeView(FiduciaryManagementRequiredMixin, FormView):
-    form_class = PrimaryOwnershipChangeForm
-    template_name = "fiduciary/form.html"
-
+class PrimaryOwnershipChangeView(FiduciaryManagementRequiredMixin, View):
     def dispatch(self, request, *args, **kwargs):
-        self.ownership = get_object_or_404(
-            UnitOwnership.objects.select_related("property_unit", "client"),
-            pk=kwargs["pk"],
-            is_active=True,
-            is_primary=True,
-        )
-        return super().dispatch(request, *args, **kwargs)
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs["unit"] = self.ownership.property_unit
-        return kwargs
-
-    def form_valid(self, form):
-        try:
-            change_primary_ownership(
-                unit=self.ownership.property_unit,
-                new_client=form.cleaned_data["new_client"],
-                effective_date=form.cleaned_data["effective_date"],
-                novelty_type=form.cleaned_data["novelty_type"],
-                reason=form.cleaned_data["reason"],
-            )
-        except ValidationError as exc:
-            form.add_error(None, exc)
-            return self.form_invalid(form)
-        messages.success(self.request, "Cambio de titular principal registrado correctamente.")
-        return redirect("fiduciary:ownership_list")
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        context["title"] = "Cambiar titular principal"
-        context["back_url"] = "fiduciary:ownership_list"
-        return context
+        return _redirect_retired_ownership_module(request)
 
 
 class AssignmentListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
@@ -1774,10 +2361,17 @@ class AssignmentListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView)
                 queryset = queryset.filter(property_unit=unit)
             if client:
                 queryset = queryset.filter(holders__client=client)
+            queryset = queryset.annotate(
+                current_holder_count=Count(
+                    "holders",
+                    filter=Q(holders__is_active=True, holders__end_date__isnull=True),
+                    distinct=True,
+                )
+            )
             if status == "active":
-                queryset = queryset.filter(is_active=True)
+                queryset = queryset.filter(is_active=True, current_holder_count__gt=0)
             elif status == "inactive":
-                queryset = queryset.filter(is_active=False)
+                queryset = queryset.filter(Q(is_active=False) | Q(current_holder_count=0))
             if start_from:
                 queryset = queryset.filter(start_date__gte=start_from)
             if start_to:
@@ -1787,6 +2381,8 @@ class AssignmentListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView)
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["filter_form"] = getattr(self, "filter_form", AssignmentFilterForm(self.request.GET))
+        for assignment in context["assignments"]:
+            assignment.operationally_active = assignment_can_receive_payment(assignment)
         return self.add_common_context(context)
 
 
@@ -1808,7 +2404,7 @@ class AssignmentDetailView(FiduciaryReadRequiredMixin, DetailView):
             ),
             Prefetch(
                 "historical_observations",
-                queryset=ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").select_related("client", "property_unit").order_by("-created_at", "-pk"),
+                queryset=ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").select_related("property_unit").order_by("-created_at", "-pk"),
             ),
         )
 
@@ -1816,103 +2412,208 @@ class AssignmentDetailView(FiduciaryReadRequiredMixin, DetailView):
         context = super().get_context_data(**kwargs)
         payments = list(self.object.payments.all())
         stats = self.object.payments.aggregate(count=Count("id"), total=Sum("amount"))
+        novelties = list(
+            OperationalNovelty.objects.filter(
+                Q(previous_assignment=self.object) | Q(new_assignment=self.object) | Q(historical_assignment=self.object)
+            )
+            .select_related("property_unit", "previous_client", "new_client", "historical_client", "created_by", "imported_file")
+            .order_by("-created_at", "-pk")
+        )
         context["can_create"] = can_create_fiduciary(self.request.user)
         context["can_update"] = can_update_fiduciary(self.request.user)
         context["can_manage"] = context["can_update"]
+        context["assignment_operationally_active"] = assignment_can_receive_payment(self.object)
         context["payments"] = payments
+        context["movements"] = _assignment_movement_rows(payments)
         context["payment_count"] = stats["count"] or 0
         context["payment_total"] = stats["total"] or 0
         context["first_payment"] = payments[0] if payments else None
         context["last_payment"] = payments[-1] if payments else None
-        context["novelties"] = OperationalNovelty.objects.filter(
-            Q(previous_assignment=self.object) | Q(new_assignment=self.object) | Q(historical_assignment=self.object)
-        ).select_related(
-            "property_unit", "previous_client", "new_client", "historical_client", "created_by"
-        ).order_by("-created_at", "-pk")
+        context["financial_entity_form"] = AssignmentFinancialEntityForm(
+            initial={"financial_entity": self.object.property_unit.financial_entity or ""}
+        )
+        context["novelties"] = novelties
         return context
 
 
-class AssignmentCreateView(FiduciaryCreateRequiredMixin, CreateView):
-    model = FiduciaryAssignment
-    form_class = FiduciaryAssignmentForm
-    template_name = "fiduciary/assignment_form.html"
-    success_url = reverse_lazy("fiduciary:assignment_list")
+class AssignmentFinancialEntityUpdateView(FiduciaryUpdateRequiredMixin, View):
+    def post(self, request, pk):
+        assignment = get_object_or_404(
+            FiduciaryAssignment.objects.select_related("property_unit"),
+            pk=pk,
+        )
+        form = AssignmentFinancialEntityForm(request.POST)
+        if not form.is_valid():
+            messages.error(request, "No fue posible actualizar la entidad financiera.")
+            return redirect("fiduciary:assignment_detail", pk=assignment.pk)
+        financial_entity = form.cleaned_data["financial_entity"]
+        unit = assignment.property_unit
+        if financial_entity and unit.financial_entity != financial_entity:
+            unit.financial_entity = financial_entity
+            unit.save(update_fields=["financial_entity", "updated_at"])
+            messages.success(request, "Entidad financiera actualizada correctamente.")
+        elif financial_entity:
+            messages.info(request, "La entidad financiera no tuvo cambios.")
+        else:
+            messages.info(request, "La entidad financiera se conserva sin cambios.")
+        return redirect("fiduciary:assignment_detail", pk=assignment.pk)
+
+
+class AssignmentPaymentCreateView(FiduciaryCreateRequiredMixin, FormView):
+    form_class = ManualPaymentForm
+    template_name = "fiduciary/payment_form.html"
 
     def dispatch(self, request, *args, **kwargs):
-        raise PermissionDenied("Los encargos fiduciarios solo se crean desde Nueva titularidad.")
+        self.assignment = get_object_or_404(
+            FiduciaryAssignment.objects.select_related(
+                "property_unit",
+                "property_unit__project",
+                "property_unit__structural_group",
+            ),
+            pk=kwargs["pk"],
+        )
+        return super().dispatch(request, *args, **kwargs)
 
-    def get_holder_formset(self, unit_id=None):
-        eligible_clients = eligible_assignment_clients(unit_id)
-        if self.request.method == "POST":
-            return SecondaryAssignmentHolderFormSet(
-                self.request.POST,
-                prefix="holders",
-                form_kwargs={"eligible_clients": eligible_clients},
-            )
-        return SecondaryAssignmentHolderFormSet(prefix="holders", form_kwargs={"eligible_clients": eligible_clients})
+    def form_valid(self, form):
+        try:
+            _create_manual_payment_for_assignment(self.assignment, form.cleaned_data, self.request.user)
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Pago registrado correctamente.")
+        return redirect("fiduciary:assignment_detail", pk=self.assignment.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["assignment"] = self.assignment
+        context["title"] = "Registrar pago"
+        return context
+
+
+def _create_manual_payment_for_assignment(assignment: FiduciaryAssignment, data: dict, user) -> Payment:
+    if not assignment_can_receive_payment(assignment):
+        raise ValidationError("No se puede registrar el pago porque el encargo no tiene titulares vigentes.")
+    with transaction.atomic():
+        source_file = _manual_payment_source_file(user)
+        result = create_payment(
+            assignment=assignment,
+            amount=data["amount"],
+            movement_type=Payment.MovementType.ADDITION,
+            source_file=source_file,
+            source_sheet="Manual",
+            source_row=1,
+            date_precision=Payment.DatePrecision.EXACT,
+            exact_date=data["exact_date"],
+            concept=data["concept"],
+            source_header="PAGO MANUAL",
+            destination=data["destination"],
+        )
+        if result.status == "duplicate":
+            raise ValidationError("Ya existe un pago con la misma fecha y valor para este encargo.")
+        if result.status != "created":
+            raise ValidationError(result.errors or ["No fue posible registrar el pago."])
+        return result.payment
+
+
+def _manual_payment_source_file(user) -> ImportedFile:
+    existing = ImportedFile.objects.filter(
+        file_type=ImportedFile.FileType.REPORT,
+        sha256=MANUAL_PAYMENT_SOURCE_SHA,
+    ).first()
+    if existing:
+        return existing
+    now = timezone.now()
+    batch = ImportBatch.objects.create(
+        initiated_by=user,
+        imported_by=user,
+        import_type=ImportBatch.ImportType.REPORTS,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.COMPLETED,
+        imported_at=now,
+        total_files=1,
+        processed_files=1,
+        total_rows=1,
+        processed_rows=1,
+        summary="Fuente tecnica para pagos registrados manualmente desde Encargos fiduciarios.",
+    )
+    return ImportedFile.objects.create(
+        batch=batch,
+        original_name="Pagos manuales",
+        extension=".manual",
+        size_bytes=0,
+        sha256=MANUAL_PAYMENT_SOURCE_SHA,
+        file_type=ImportedFile.FileType.REPORT,
+        status=ImportedFile.Status.COMPLETED,
+        order=1,
+        processing_started_at=now,
+        processing_finished_at=now,
+        total_rows=1,
+        processed_rows=1,
+        result_message="Pago manual registrado.",
+    )
+
+
+class AssignmentCreateView(FiduciaryCreateRequiredMixin, FormView):
+    form_class = NewFiduciaryAssignmentForm
+    template_name = "fiduciary/assignment_create.html"
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["title"] = "Nuevo encargo fiduciario"
         context["back_url"] = "fiduciary:assignment_list"
-        unit_id = self.request.POST.get("property_unit") if self.request.method == "POST" else None
+        context["client_search_url"] = reverse("fiduciary:client_search")
+        context["client_create_url"] = reverse("fiduciary:client_create")
         form = context.get("form")
-        if form and form.is_bound and form.data.get("property_unit"):
-            unit_id = form.data.get("property_unit")
-        context["holder_formset"] = context.get("holder_formset") or self.get_holder_formset(unit_id)
-        context["temporary_assignment_notice"] = (
-            "Herramienta temporal de validacion. En el flujo definitivo los encargos fiduciarios "
-            "seran registrados mediante importacion de archivos."
+        context["requires_date_confirmation"] = bool(getattr(form, "requires_date_confirmation", False))
+        primary_id = form.data.get("primary_client_id") if form and form.is_bound else ""
+        secondary_ids = (form.data.get("secondary_client_ids") if form and form.is_bound else "") or ""
+        selected_ids = [item for item in [primary_id, *secondary_ids.split(",")] if str(item).strip().isdigit()]
+        selected_clients = Client.objects.filter(pk__in=selected_ids).order_by("last_names_or_company", "first_names")
+        context["selected_clients_json"] = json.dumps(
+            {
+                str(client.pk): {
+                    "id": client.pk,
+                    "text": f"{client.full_name} | {client.document_number or 'Sin documento'} | {client.email or 'Sin correo'}",
+                }
+                for client in selected_clients
+            }
         )
-        context["direct_units_value"] = DIRECT_UNITS_VALUE
         return context
 
     def form_valid(self, form):
-        holder_formset = self.get_holder_formset(form.cleaned_data.get("property_unit").pk)
-        if not holder_formset.is_valid():
-            return self.form_invalid(form, holder_formset)
-        try:
-            secondary_clients = validate_assignment_holder_formset(
-                holder_formset,
-                form.cleaned_data.get("property_unit"),
-                form.cleaned_data.get("primary_client"),
-            )
-        except Exception as exc:
-            holder_formset.non_form_errors_value = str(exc)
-            form.add_error(None, exc)
-            return self.form_invalid(form, holder_formset)
         try:
             with transaction.atomic():
-                self.object = form.save(commit=False)
-                form.apply_reason(self.object)
-                self.object.full_clean()
-                self.object.save()
-                FiduciaryAssignmentHolder.objects.create(
-                    assignment=self.object,
-                    client=form.cleaned_data["primary_client"],
-                    is_primary=True,
-                    start_date=self.object.start_date,
-                    last_change_reason=self.object.last_change_reason,
+                selected_clients = [form.cleaned_data["primary_client_id"], *form.cleaned_data["secondary_client_ids"]]
+                _activate_clients_for_assignment(selected_clients, "Reactivacion por nuevo encargo fiduciario.")
+                assignment = _create_assignment_without_novelty(
+                    unit=form.cleaned_data["property_unit"],
+                    primary_client=form.cleaned_data["primary_client_id"],
+                    assignment_number=form.cleaned_data["assignment_number"],
+                    secondary_clients=form.cleaned_data["secondary_client_ids"],
+                    reason="Registro de nuevo encargo fiduciario.",
                 )
-                for client in secondary_clients:
-                    FiduciaryAssignmentHolder.objects.create(
-                        assignment=self.object,
-                        client=client,
-                        is_primary=False,
-                        start_date=self.object.start_date,
-                        last_change_reason=self.object.last_change_reason,
-                    )
-        except (ValidationError, IntegrityError) as exc:
-            form.add_error(None, exc)
-            return self.form_invalid(form, holder_formset)
+                assignment.adhesion_contract_date = form.cleaned_data.get("adhesion_contract_date")
+                assignment.promise_date = form.cleaned_data.get("promise_date")
+                assignment.promised_delivery_date = form.cleaned_data.get("promised_delivery_date")
+                assignment.actual_delivery_date = form.cleaned_data.get("actual_delivery_date")
+                assignment.full_clean()
+                assignment.save(
+                    update_fields=[
+                        "adhesion_contract_date",
+                        "promise_date",
+                        "promised_delivery_date",
+                        "actual_delivery_date",
+                        "updated_at",
+                    ]
+                )
+        except ValidationError as exc:
+            _add_validation_errors_to_form(form, exc)
+            return self.form_invalid(form)
+        except IntegrityError as exc:
+            form.add_error(None, "La operacion no pudo completarse porque viola una regla de negocio vigente.")
+            return self.form_invalid(form)
         messages.success(self.request, "Encargo fiduciario creado correctamente.")
-        return redirect(self.success_url)
-
-    def form_invalid(self, form, holder_formset=None):
-        if holder_formset is None:
-            holder_formset = self.get_holder_formset(self.request.POST.get("property_unit"))
-        messages.error(self.request, "No fue posible crear el encargo. Revise los titulares seleccionados.")
-        return self.render_to_response(self.get_context_data(form=form, holder_formset=holder_formset))
+        return redirect("fiduciary:assignment_detail", pk=assignment.pk)
 
 
 class AssignmentContextTypesView(FiduciaryCreateRequiredMixin, View):
@@ -1965,7 +2666,19 @@ class AssignmentContextUnitsView(FiduciaryCreateRequiredMixin, View):
                 project_id=project_id,
                 structural_group_id=group_id,
             )
-        return JsonResponse({"results": [{"id": item.pk, "text": str(item)} for item in units.order_by("name", "code")]})
+        unit_rows = []
+        for item in with_natural_unit_order(units.select_related("project", "structural_group")):
+            available = unit_can_receive_new_assignment(item)
+            label = property_unit_choice_label(item)
+            unit_rows.append(
+                {
+                    "id": item.pk,
+                    "text": label if available else f"{label} (no disponible)",
+                    "available": available,
+                    "disabled": not available,
+                }
+            )
+        return JsonResponse({"results": unit_rows})
 
 
 class AssignmentContextHoldersView(FiduciaryCreateRequiredMixin, View):
@@ -1979,23 +2692,144 @@ class ClientSearchView(FiduciaryCreateRequiredMixin, View):
     def get(self, request):
         criterion = request.GET.get("criterion")
         query = (request.GET.get("q") or "").strip()
-        clients = Client.objects.none()
+        exclude_ids = {
+            int(item)
+            for item in request.GET.getlist("exclude")
+            if str(item).strip().isdigit()
+        }
+        clients = []
         if query:
-            base = Client.objects.filter(is_active=True)
+            base = Client.objects.all()
+            if exclude_ids:
+                base = base.exclude(pk__in=exclude_ids)
             if criterion == "document":
-                clients = base.filter(document_number=query)
+                normalized_query = normalize_document_query(query)
+                clients = [
+                    client
+                    for client in base.order_by("last_names_or_company", "first_names")[:500]
+                    if normalized_query in normalize_document_query(client.document_number or "")
+                ][:10]
             elif criterion == "email":
-                clients = base.filter(email__icontains=query)
+                email_query = query.strip().lower()
+                clients = list(base.filter(email__icontains=email_query).order_by("last_names_or_company", "first_names")[:10])
             else:
-                clients = base.filter(Q(first_names__icontains=query) | Q(last_names_or_company__icontains=query))
+                normalized_tokens = _normalize_search_text(query).split()
+                normalized_query = _normalize_search_text(query)
+                clients = [
+                    client
+                    for client in base.order_by("last_names_or_company", "first_names")[:1000]
+                    if normalized_query in _normalize_search_text(client.full_name)
+                    or all(token in _normalize_search_text(client.full_name) for token in normalized_tokens)
+                ][:10]
         results = [
             {
                 "id": client.pk,
                 "text": f"{client.full_name} | {client.document_number or 'Sin documento'} | {client.email or 'Sin correo'}",
+                "is_active": client.is_active,
+                "status": "Activo" if client.is_active else "Inactivo",
             }
-            for client in clients.order_by("last_names_or_company", "first_names")[:10]
+            for client in clients
         ]
         return JsonResponse({"results": results})
+
+
+def _assignment_holder_rows(assignment):
+    holders = assignment.holders.filter(is_active=True).select_related("client").order_by("-is_primary", "client__last_names_or_company", "client__first_names")
+    return [
+        {
+            "id": holder.client_id,
+            "text": f"{holder.client.document_number or 'Sin documento'} | {holder.client.full_name} | {holder.client.email or 'Sin correo'}",
+            "role": "primary" if holder.is_primary else "secondary",
+            "role_label": "Principal" if holder.is_primary else "Secundario",
+        }
+        for holder in holders
+    ]
+
+
+def _search_clients_for_picker(*, criterion, query, exclude_ids=None, base_queryset=None):
+    exclude_ids = set(exclude_ids or [])
+    query = (query or "").strip()
+    if not query:
+        return []
+    base = base_queryset if base_queryset is not None else Client.objects.filter(is_active=True)
+    if exclude_ids:
+        base = base.exclude(pk__in=exclude_ids)
+    if criterion == "document":
+        normalized_query = normalize_document_query(query)
+        return [
+            client
+            for client in base.order_by("last_names_or_company", "first_names")[:500]
+            if normalized_query in normalize_document_query(client.document_number or "")
+        ][:10]
+    if criterion == "email":
+        return list(base.filter(email__icontains=query.strip().lower()).order_by("last_names_or_company", "first_names")[:10])
+    normalized_tokens = _normalize_search_text(query).split()
+    normalized_query = _normalize_search_text(query)
+    return [
+        client
+        for client in base.order_by("last_names_or_company", "first_names")[:1000]
+        if normalized_query in _normalize_search_text(client.full_name)
+        or all(token in _normalize_search_text(client.full_name) for token in normalized_tokens)
+    ][:10]
+
+
+class NoveltyAssignmentClientsView(FiduciaryCreateRequiredMixin, View):
+    def get(self, request):
+        assignment_id = request.GET.get("assignment")
+        assignment = FiduciaryAssignment.objects.filter(pk=assignment_id, is_active=True).prefetch_related("holders__client").first()
+        if not assignment:
+            return JsonResponse({"results": []})
+        return JsonResponse({"results": _assignment_holder_rows(assignment)})
+
+
+class NoveltyClientSearchView(FiduciaryCreateRequiredMixin, View):
+    def get(self, request):
+        assignment_id = request.GET.get("assignment")
+        criterion = request.GET.get("criterion")
+        query = (request.GET.get("q") or "").strip()
+        scope = request.GET.get("scope") or "current"
+        exclude_ids = {
+            int(item)
+            for item in request.GET.getlist("exclude")
+            if str(item).strip().isdigit()
+        }
+        assignment = FiduciaryAssignment.objects.filter(pk=assignment_id, is_active=True).prefetch_related("holders__client").first()
+        if scope in {"new_holder", "new_secondary"}:
+            if scope == "new_secondary" and assignment:
+                exclude_ids.update(assignment.holders.filter(is_active=True).values_list("client_id", flat=True))
+            clients = _search_clients_for_picker(criterion=criterion, query=query, exclude_ids=exclude_ids)
+            results = [
+                {
+                    "id": client.pk,
+                    "text": f"{client.full_name} | {client.document_number or 'Sin documento'} | {client.email or 'Sin correo'}",
+                    "is_active": client.is_active,
+                    "status": "Activo" if client.is_active else "Inactivo",
+                }
+                for client in clients
+            ]
+            return JsonResponse({"results": results})
+        if not assignment or not query:
+            return JsonResponse({"results": []})
+        rows = []
+        normalized_query = _normalize_search_text(query)
+        normalized_document = normalize_document_query(query)
+        for row in _assignment_holder_rows(assignment):
+            if row["id"] in exclude_ids:
+                continue
+            client_text = _normalize_search_text(row["text"])
+            client = Client.objects.get(pk=row["id"])
+            if criterion == "document":
+                matches = normalized_document in normalize_document_query(client.document_number or "")
+            elif criterion == "email":
+                matches = query.lower() in (client.email or "").lower()
+            else:
+                tokens = normalized_query.split()
+                matches = normalized_query in client_text or all(token in client_text for token in tokens)
+            if matches:
+                rows.append({**row, "status": row["role_label"]})
+            if len(rows) >= 10:
+                break
+        return JsonResponse({"results": rows})
 
 
 class AssignmentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
@@ -2006,7 +2840,7 @@ class AssignmentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context["title"] = "Editar encargo fiduciario"
+        context["title"] = "Actualizar informacion contractual"
         context["back_url"] = "fiduciary:assignment_list"
         return context
 
@@ -2016,8 +2850,8 @@ class AssignmentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
-        messages.success(self.request, "Encargo fiduciario actualizado correctamente.")
-        return redirect(self.success_url)
+        messages.success(self.request, "Informacion contractual actualizada correctamente.")
+        return redirect("fiduciary:assignment_detail", pk=self.object.pk)
 
 
 class AssignmentCloseView(FiduciaryManagementRequiredMixin, View):
@@ -2083,13 +2917,16 @@ class AssignmentChangeView(FiduciaryManagementRequiredMixin, FormView):
         return context
 
 
-class AssignmentHolderCreateView(FiduciaryCreateRequiredMixin, CreateView):
-    model = FiduciaryAssignmentHolder
-    form_class = AssignmentHolderForm
-    template_name = "fiduciary/ownership_form.html"
+class AssignmentSecondaryCreateView(FiduciaryCreateRequiredMixin, FormView):
+    form_class = AddSecondaryAssignmentHolderForm
+    template_name = "fiduciary/assignment_add_secondary.html"
 
     def dispatch(self, request, *args, **kwargs):
-        self.assignment = get_object_or_404(FiduciaryAssignment, pk=kwargs["assignment_pk"])
+        self.assignment = get_object_or_404(
+            FiduciaryAssignment.objects.select_related("property_unit", "property_unit__project"),
+            pk=kwargs["assignment_pk"],
+            is_active=True,
+        )
         return super().dispatch(request, *args, **kwargs)
 
     def get_form_kwargs(self):
@@ -2099,16 +2936,86 @@ class AssignmentHolderCreateView(FiduciaryCreateRequiredMixin, CreateView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context["title"] = "Agregar titular al encargo"
-        context["back_url"] = "fiduciary:assignment_list"
+        context["assignment"] = self.assignment
+        context["title"] = "Añadir cliente secundario"
+        context["back_url"] = "fiduciary:assignment_detail"
         context["client_search_url"] = reverse("fiduciary:client_search")
+        context["client_create_url"] = reverse("fiduciary:client_create")
         return context
 
     def form_valid(self, form):
-        with transaction.atomic():
-            self.object = form.save()
-        messages.success(self.request, "Titular agregado correctamente.")
+        client = form.cleaned_data["client_id"]
+        reason = f"INCLUSION {client.full_name}"
+        effective_date = timezone.localdate()
+        try:
+            with transaction.atomic():
+                _activate_clients_for_assignment([client], "Reactivacion por inclusion como cliente secundario.")
+                unit = PropertyUnit.objects.select_for_update().get(pk=self.assignment.property_unit_id)
+                ownership, _ = UnitOwnership.objects.get_or_create(
+                    client=client,
+                    property_unit=unit,
+                    is_active=True,
+                    defaults={
+                        "is_primary": False,
+                        "start_date": effective_date,
+                        "last_change_reason": reason,
+                    },
+                )
+                if ownership.is_primary:
+                    raise ValidationError("Un titular principal vigente no puede agregarse como secundario.")
+                FiduciaryAssignmentHolder.objects.create(
+                    assignment=self.assignment,
+                    client=client,
+                    is_primary=False,
+                    start_date=effective_date,
+                    last_change_reason=reason,
+                )
+                novelty = OperationalNovelty(
+                    project=unit.project,
+                    property_unit=unit,
+                    novelty_type=OperationalNovelty.NoveltyType.OTHER,
+                    other_type="INCLUSION",
+                    origin=OperationalNovelty.Origin.MANUAL,
+                    status=OperationalNovelty.Status.APPLIED,
+                    effective_date=effective_date,
+                    new_client=client,
+                    new_assignment=self.assignment,
+                    historical_assignment=self.assignment,
+                    summary="INCLUSION",
+                    detail=reason,
+                    created_by=self.request.user,
+                )
+                novelty.full_clean()
+                novelty.save()
+                observation = ImportedHistoricalObservation(
+                    project=unit.project,
+                    property_unit=unit,
+                    client=client,
+                    assignment=self.assignment,
+                    origin=ImportedHistoricalObservation.Origin.MANUAL,
+                    status=ImportedHistoricalObservation.Status.IMPORTED,
+                    summary="INCLUSION",
+                    detail=reason,
+                    dedupe_key=uuid.uuid4().hex,
+                    imported_by=self.request.user,
+                )
+                observation.full_clean()
+                observation.save()
+        except ValidationError as exc:
+            form.add_error(None, _validation_error_text(exc))
+            return self.form_invalid(form)
+        except IntegrityError:
+            form.add_error(None, "La operacion no pudo completarse porque viola una regla de negocio vigente.")
+            return self.form_invalid(form)
+        messages.success(self.request, "Cliente secundario añadido con novedad de INCLUSION.")
         return redirect("fiduciary:assignment_detail", pk=self.assignment.pk)
+
+
+class AssignmentHolderCreateView(FiduciaryCreateRequiredMixin, View):
+    def dispatch(self, request, *args, **kwargs):
+        assignment = get_object_or_404(FiduciaryAssignment, pk=kwargs["assignment_pk"])
+        messages.info(request, "Use la accion Añadir cliente secundario desde el encargo.")
+        return redirect("fiduciary:assignment_secondary_create", assignment_pk=assignment.pk)
 
 
 class AssignmentHolderFinalizeView(FiduciaryManagementRequiredMixin, View):

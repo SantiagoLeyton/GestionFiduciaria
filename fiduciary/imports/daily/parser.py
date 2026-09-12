@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from fiduciary.imports.historical.normalize import normalize_text
+from fiduciary.imports.header_resolver import HeaderCandidate, HeaderResolver, header_candidates_from_sheet
 from fiduciary.imports.historical.readers import WorkbookReader
 
 
@@ -55,6 +55,15 @@ class ParsedDailyReport:
 
 class DailyReportParser:
     REQUIRED_FIELDS = {"assignment_number", "payment_date", "amount"}
+    EXPECTED_HEADERS = {
+        "assignment_number": "ENCARGO FIDUCIARIO",
+        "payment_date": "FECHA PAGO",
+        "amount": "VALOR",
+        "withdrawal": "RETIRO",
+        "payer_name": "PAGADOR",
+        "payer_document": "IDENTIFICACION",
+        "concept": "CONCEPTO",
+    }
     HEADER_ALIASES = {
         "assignment_number": {
             "n encargo",
@@ -62,16 +71,16 @@ class DailyReportParser:
             "numero encargo",
             "numero de encargo",
             "encargo",
-            "encargo fiduciario",
             "n encargo fiduciario",
         },
-        "payment_date": {"fecha mov", "fecha movimiento", "fecha de movimiento", "fecha pago", "fecha de pago"},
-        "amount": {"adicion", "adicion pago", "valor", "valor pago", "valor recibido"},
+        "payment_date": {"fecha mov", "fecha movimiento", "fecha de movimiento", "fecha de pago"},
+        "amount": {"adicion", "adicion pago", "valor pago", "valor recibido"},
         "withdrawal": {"retiro", "valor retiro"},
-        "payer_name": {"adquiriente", "pagador", "cliente", "nombre cliente", "nombre pagador"},
-        "payer_document": {"identificacion", "documento", "documento cliente", "identificacion pagador"},
+        "payer_name": {"adquiriente", "cliente", "nombre cliente", "nombre pagador"},
+        "payer_document": {"documento", "documento cliente", "identificacion pagador"},
         "concept": {"concepto", "descripcion", "detalle"},
     }
+    HEADER_RESOLVER = HeaderResolver(expected_headers=EXPECTED_HEADERS, aliases=HEADER_ALIASES)
 
     def __init__(self, path):
         self.path = Path(path)
@@ -108,14 +117,13 @@ class DailyReportParser:
         max_row = min(sheet.used_rows, 20)
         for row_number in range(1, max_row + 1):
             matches: dict[str, list[int]] = {}
-            for column in range(1, sheet.used_columns + 1):
-                cell = sheet.cell(row_number, column)
-                normalized = normalize_text(cell.value if cell else "")
-                if not normalized:
-                    continue
-                field = self._field_for_header(normalized)
-                if field:
-                    matches.setdefault(field, []).append(column)
+            headers = header_candidates_from_sheet(sheet, row_number)
+            for field in self.EXPECTED_HEADERS:
+                resolution = self.HEADER_RESOLVER.resolve(field, headers, sheet_name=sheet.name)
+                if resolution.ambiguous:
+                    matches.setdefault(field, []).extend(candidate.column_index for candidate in resolution.candidates)
+                elif resolution.found:
+                    matches.setdefault(field, []).append(resolution.column_index)
             score = len(self.REQUIRED_FIELDS.intersection(matches))
             if best is None or score > best[0]:
                 best = (score, row_number)
@@ -135,8 +143,9 @@ class DailyReportParser:
         return best[1], columns, issues
 
     def _field_for_header(self, normalized: str) -> str | None:
-        for field, aliases in self.HEADER_ALIASES.items():
-            if normalized in aliases:
+        for field in self.EXPECTED_HEADERS:
+            candidate = HeaderCandidate(header=normalized, normalized_header=normalized, column_index=0, column_letter="")
+            if self.HEADER_RESOLVER.resolve(field, [candidate]).found:
                 return field
         return None
 

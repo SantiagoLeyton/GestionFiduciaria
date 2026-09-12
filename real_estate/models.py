@@ -99,6 +99,15 @@ class StructuralGroup(ActiveEntity):
 class PropertyUnit(ActiveEntity):
     code = models.CharField("codigo", max_length=50, blank=True)
     name = models.CharField("nombre", max_length=150, blank=True)
+    area = models.DecimalField("area", max_digits=10, decimal_places=2, blank=True, null=True)
+    property_value = models.DecimalField(
+        "valor inmueble",
+        max_digits=16,
+        decimal_places=2,
+        blank=True,
+        null=True,
+    )
+    financial_entity = models.CharField("entidad financiera", max_length=150, blank=True, null=True)
     project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name="property_units")
     structural_group = models.ForeignKey(
         StructuralGroup,
@@ -127,6 +136,8 @@ class PropertyUnit(ActiveEntity):
 
     def clean(self):
         super().clean()
+        if self.financial_entity is not None:
+            self.financial_entity = self.financial_entity.strip()
         if not self.code and not self.name:
             raise ValidationError("Debe registrar codigo, nombre o ambos.")
         if self.structural_group and self.structural_group.project_id != self.project_id:

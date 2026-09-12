@@ -44,6 +44,16 @@ def test_authenticated_user_visiting_login_is_redirected_home(client, commercial
 
 
 @pytest.mark.django_db
+def test_sidebar_shows_current_version(client, accounting_admin_user):
+    client.force_login(accounting_admin_user)
+
+    response = client.get(reverse("fiduciary:client_list"))
+
+    assert response.status_code == 200
+    assert "v1.2.0" in response.content.decode()
+
+
+@pytest.mark.django_db
 def test_login_rejects_invalid_credentials(client):
     response = client.post(
         reverse("login"),

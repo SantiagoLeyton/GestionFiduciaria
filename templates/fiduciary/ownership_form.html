@@ -34,7 +34,7 @@
         </div>
         <div class="list-group mt-3" id="client-search-results"></div>
       </section>
-      <form class="form-panel" method="post" novalidate>
+      <form class="form-panel" method="post" novalidate data-unit-hierarchy>
         {% csrf_token %}
         {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
         <div class="form-grid">
@@ -59,6 +59,7 @@
     </section>
   </main>
 </div>
+{% include "fiduciary/includes/unit_hierarchy_script.html" %}
 <script>
   document.addEventListener("DOMContentLoaded", function () {
     const url = "{{ client_search_url }}";
@@ -87,6 +88,12 @@
         selected.textContent = names.length ? "Seleccionados: " + names.join(", ") : "Sin secundarios seleccionados";
       }
       search.addEventListener("input", refreshSecondary);
+      search.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          refreshSecondary();
+        }
+      });
       secondarySelect.addEventListener("change", refreshSecondary);
       refreshSecondary();
     }
@@ -125,6 +132,12 @@
             results.innerHTML = '<div class="text-muted">No se encontraron clientes. Puede crear un cliente nuevo desde el modulo Clientes.</div>';
           }
         });
+    });
+    q.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        button.click();
+      }
     });
   });
 </script>

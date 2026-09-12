@@ -21,8 +21,8 @@
         {% if element.structural_context.missing_grouping_type %}
           <span><strong>Tipo de pendiente:</strong> Clasificar nivel estructural</span>
           {% if element.structural_context.project_name %}<span><strong>Proyecto:</strong> {{ element.structural_context.project_name }}</span>{% endif %}
-          {% if element.structural_context.grouping_name %}<span><strong>Agrupacion detectada:</strong> {{ element.structural_context.grouping_name }}</span>{% endif %}
-          <span><strong>Resolucion requerida:</strong> Seleccionar o preparar el tipo de agrupacion correspondiente.</span>
+          {% if element.structural_context.grouping_name %}<span><strong>Agrupación detectada:</strong> {{ element.structural_context.grouping_name }}</span>{% endif %}
+          <span><strong>Resolución requerida:</strong> Seleccionar o preparar el tipo de agrupación correspondiente.</span>
           <div class="alert alert-info mt-2 mb-0">{{ element.structural_context.explanation }}</div>
         {% else %}
           <span><strong>Valor:</strong> {{ element.raw_value }}</span>
@@ -43,15 +43,34 @@
             </div>
           {% endfor %}
         </div>
+        {% if equivalent_count %}
+          <div class="alert alert-warning mt-3">
+            Esta solución puede aplicarse a {{ equivalent_count }} pendiente{{ equivalent_count|pluralize }} similar{{ equivalent_count|pluralize:"es" }} de este lote/proyecto.
+            <div class="mt-2">
+              <label class="form-check">
+                <input class="form-check-input" type="checkbox" name="apply_equivalents" value="1">
+                <span class="form-check-label">Aplicar también a pendientes similares</span>
+              </label>
+            </div>
+            <details class="mt-2">
+              <summary>Ver pendientes afectados</summary>
+              <ul class="mb-0 mt-2">
+                {% for item in equivalent_elements %}
+                  <li>{{ item.get_inferred_kind_display }}: {{ item.raw_value }}{% if item.structural_context.project_name %} | Proyecto: {{ item.structural_context.project_name }}{% endif %}{% if item.structural_context.grouping_name %} | Agrupación: {{ item.structural_context.grouping_name }}{% endif %}</li>
+                {% endfor %}
+              </ul>
+            </details>
+          </div>
+        {% endif %}
         <div class="alert alert-info mt-3">
           {% if creates_immediately %}
-            Al aplicar esta resolucion, el registro sera creado inmediatamente y quedara disponible para continuar con la resolucion de los pendientes del lote.
+            Al aplicar esta resolución, el registro será creado inmediatamente y quedará disponible para continuar con la resolución de los pendientes del lote.
           {% else %}
-            Esta decision no crea datos definitivos. Solo prepara la resolucion para la importacion historica de una fase posterior.
+            Esta decisión no crea datos definitivos. Solo prepara la resolución para la importación histórica de una fase posterior.
           {% endif %}
         </div>
         <div class="form-actions">
-          <button class="btn btn-success" type="submit">Aplicar resolucion</button>
+          <button class="btn btn-success" type="submit">Aplicar resolución</button>
           <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_pending' batch.pk %}">Cancelar</a>
         </div>
       </form>

@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+
+{% block title %}Nuevo encargo fiduciario | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Nuevo encargo fiduciario</h1>
+          <p>Seleccione la unidad, el titular principal y los secundarios del encargo.</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_list' %}">Volver</a>
+      </div>
+
+      <form class="form-panel" method="post" novalidate data-unit-hierarchy id="new-assignment-form">
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="alert alert-warning">{{ form.non_field_errors }}</div>{% endif %}
+        {% if requires_date_confirmation %}
+          <div class="alert alert-warning">
+            No has colocado ninguna fecha. ¿Aun asi quieres guardar?
+            <div class="actions-cell mt-2">
+              <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_create' %}">Volver / Cancelar</a>
+              <button class="btn btn-sm btn-success" type="submit" name="confirm_without_dates" value="true">Guardar de todas formas</button>
+            </div>
+          </div>
+        {% endif %}
+
+        <section class="data-section">
+          <h2>Unidad</h2>
+          <div class="form-grid">
+            <div><label class="form-label" for="{{ form.project.id_for_label }}">{{ form.project.label }}</label>{{ form.project }}{{ form.project.errors }}</div>
+            <div><label class="form-label" for="{{ form.grouping_type.id_for_label }}">{{ form.grouping_type.label }}</label>{{ form.grouping_type }}{{ form.grouping_type.errors }}</div>
+            <div><label class="form-label" for="{{ form.structural_group.id_for_label }}">{{ form.structural_group.label }}</label>{{ form.structural_group }}{{ form.structural_group.errors }}</div>
+            <div><label class="form-label" for="{{ form.property_unit.id_for_label }}">{{ form.property_unit.label }}</label>{{ form.property_unit }}{{ form.property_unit.errors }}<div class="form-text">Las unidades no disponibles se muestran para consulta, pero no pueden guardarse.</div></div>
+          </div>
+        </section>
+
+        <section class="data-section">
+          <h2>Encargo</h2>
+          <div class="form-grid">
+            <div><label class="form-label" for="{{ form.assignment_number.id_for_label }}">{{ form.assignment_number.label }}</label>{{ form.assignment_number }}{{ form.assignment_number.errors }}</div>
+            <div><label class="form-label" for="{{ form.adhesion_contract_date.id_for_label }}">{{ form.adhesion_contract_date.label }}</label>{{ form.adhesion_contract_date }}{{ form.adhesion_contract_date.errors }}</div>
+            <div><label class="form-label" for="{{ form.promise_date.id_for_label }}">{{ form.promise_date.label }}</label>{{ form.promise_date }}{{ form.promise_date.errors }}</div>
+            <div><label class="form-label" for="{{ form.promised_delivery_date.id_for_label }}">{{ form.promised_delivery_date.label }}</label>{{ form.promised_delivery_date }}{{ form.promised_delivery_date.errors }}</div>
+            <div><label class="form-label" for="{{ form.actual_delivery_date.id_for_label }}">{{ form.actual_delivery_date.label }}</label>{{ form.actual_delivery_date }}{{ form.actual_delivery_date.errors }}</div>
+          </div>
+        </section>
+
+        <section class="data-section">
+          <div class="section-header">
+            <h2>Cliente principal</h2>
+            <a class="btn btn-sm btn-outline-secondary" href="{{ client_create_url }}">¿Aun no has registrado al cliente? Registralo</a>
+          </div>
+          {{ form.primary_client_id }}{{ form.primary_client_id.errors }}
+          <div class="row g-2 align-items-end" data-client-picker data-target="id_primary_client_id" data-mode="single">
+            <div class="col-md-3">
+              <label class="form-label">Buscar por</label>
+              <select class="form-select" data-client-criterion>
+                <option value="document">Identificacion</option>
+                <option value="name">Nombre</option>
+                <option value="email">Correo</option>
+              </select>
+            </div>
+            <div class="col-md-6"><label class="form-label">Valor</label><input class="form-control" type="search" data-client-query></div>
+            <div class="col-md-3"><button class="btn btn-outline-success w-100" type="button" data-client-search>Buscar</button></div>
+            <div class="col-12"><div class="list-group mt-2" data-client-results></div><div class="form-text" data-client-selection>Sin cliente principal seleccionado.</div></div>
+          </div>
+        </section>
+
+        <section class="data-section">
+          <h2>Clientes secundarios opcionales</h2>
+          {{ form.secondary_client_ids }}{{ form.secondary_client_ids.errors }}
+          <div class="row g-2 align-items-end" data-client-picker data-target="id_secondary_client_ids" data-mode="multiple">
+            <div class="col-md-3">
+              <label class="form-label">Buscar por</label>
+              <select class="form-select" data-client-criterion>
+                <option value="document">Identificacion</option>
+                <option value="name">Nombre</option>
+                <option value="email">Correo</option>
+              </select>
+            </div>
+            <div class="col-md-6"><label class="form-label">Valor</label><input class="form-control" type="search" data-client-query></div>
+            <div class="col-md-3"><button class="btn btn-outline-success w-100" type="button" data-client-search>Buscar</button></div>
+            <div class="col-12"><div class="list-group mt-2" data-client-results></div><div class="form-text" data-client-selection>Sin secundarios seleccionados.</div></div>
+          </div>
+        </section>
+
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Guardar</button>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_list' %}">Cancelar</a>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+{% include "fiduciary/includes/unit_hierarchy_script.html" %}
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const clientSearchUrl = "{{ client_search_url }}";
+  const initialClients = JSON.parse('{{ selected_clients_json|escapejs }}' || "{}");
+
+  document.querySelectorAll("[data-client-picker]").forEach((picker) => {
+    const target = document.getElementById(picker.dataset.target);
+    const mode = picker.dataset.mode || "single";
+    const criterion = picker.querySelector("[data-client-criterion]");
+    const query = picker.querySelector("[data-client-query]");
+    const button = picker.querySelector("[data-client-search]");
+    const results = picker.querySelector("[data-client-results]");
+    const selection = picker.querySelector("[data-client-selection]");
+    const selected = new Map();
+
+    function removeClient(id) {
+      selected.delete(String(id));
+      syncSelection();
+    }
+
+    function syncSelection() {
+      if (!target) return;
+      if (mode === "single") {
+        const first = selected.values().next().value;
+        target.value = first ? first.id : "";
+        selection.textContent = first ? "Seleccionado: " + first.text : "Sin cliente principal seleccionado.";
+        return;
+      }
+      target.value = Array.from(selected.keys()).join(",");
+      const labels = Array.from(selected.values()).map((item) => item.text);
+      selection.innerHTML = "";
+      if (!labels.length) {
+        selection.textContent = "Sin secundarios seleccionados.";
+        return;
+      }
+      Array.from(selected.values()).forEach((item) => {
+        const pill = document.createElement("span");
+        pill.className = "badge text-bg-light border me-2 mb-2";
+        pill.textContent = item.text + " ";
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "btn btn-sm btn-link p-0";
+        remove.textContent = "Retirar";
+        remove.addEventListener("click", function () { removeClient(item.id); });
+        pill.appendChild(remove);
+        selection.appendChild(pill);
+      });
+    }
+
+    function addClient(item) {
+      if (mode === "single") selected.clear();
+      selected.set(String(item.id), item);
+      syncSelection();
+    }
+
+    button.addEventListener("click", function () {
+      results.innerHTML = "";
+      const params = new URLSearchParams({criterion: criterion.value, q: query.value});
+      fetch(clientSearchUrl + "?" + params.toString(), {headers: {"X-Requested-With": "XMLHttpRequest"}})
+        .then((response) => response.json())
+        .then((data) => {
+          (data.results || []).forEach((item) => {
+            const row = document.createElement("div");
+            row.className = "list-group-item d-flex justify-content-between align-items-center gap-3";
+            const label = document.createElement("span");
+            label.textContent = item.text + " | " + item.status;
+            const option = document.createElement("button");
+            option.type = "button";
+            option.className = "btn btn-sm btn-outline-success";
+            option.textContent = mode === "single" ? "Seleccionar" : "Añadir";
+            option.addEventListener("click", function () { addClient(item); });
+            row.appendChild(label);
+            row.appendChild(option);
+            results.appendChild(row);
+          });
+          if (!results.children.length) {
+            results.innerHTML = '<div class="text-muted">No se encontraron clientes.</div>';
+          }
+        });
+    });
+    query.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        button.click();
+      }
+    });
+    if (target && target.value) {
+      target.value.split(",").forEach((id) => {
+        const item = initialClients[String(id).trim()];
+        if (item) selected.set(String(item.id), item);
+      });
+    }
+    syncSelection();
+  });
+});
+</script>
+{% endblock %}

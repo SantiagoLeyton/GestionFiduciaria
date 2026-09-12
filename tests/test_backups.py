@@ -25,6 +25,7 @@ from core.services.backups import (
     MANIFEST_NAME,
     BackupError,
     BackupResult,
+    apply_drive_retention_policy,
     active_pre_restore,
     apply_retention_policy,
     create_backup,
@@ -38,7 +39,19 @@ from core.services.backups import (
     sync_pending_backups,
     validate_backup_record,
 )
-from core.services.google_drive_backups import DriveBackupError, DriveRemoteFile, DriveUnavailable
+from core.services.backup_scheduler import (
+    daily_backup_check_is_due,
+    run_pending_backup_check_once,
+    scheduler_should_start,
+    start_backup_scheduler,
+    stop_backup_scheduler,
+)
+from core.services.google_drive_backups import (
+    DriveBackupError,
+    DriveRemoteFile,
+    DriveUnavailable,
+    GoogleDriveBackupClient,
+)
 
 
 class Completed:
@@ -124,6 +137,8 @@ class FakeDriveClient:
         self.find_calls = 0
         self.upload_calls = 0
         self.delete_calls = []
+        self.remote_files = []
+        self.downloads = {}
 
     def has_connectivity(self):
         if not self.configured:
@@ -140,25 +155,77 @@ class FakeDriveClient:
         if stored:
             if stored["checksum"] != checksum:
                 raise DriveBackupError("Existe una copia remota con checksum diferente.")
-            return DriveRemoteFile(file_id=stored["file_id"], checksum_sha256=checksum)
+            return DriveRemoteFile(file_id=stored["file_id"], checksum_sha256=checksum, backup_id=str(backup_id))
         if self.exists_after_upload_failures and self.upload_calls >= self.exists_after_upload_calls:
             self.existing[str(backup_id)] = {"file_id": f"drive-{backup_id}", "checksum": checksum}
-            return DriveRemoteFile(file_id=f"drive-{backup_id}", checksum_sha256=checksum)
+            return DriveRemoteFile(file_id=f"drive-{backup_id}", checksum_sha256=checksum, backup_id=str(backup_id))
         if self.checksum_mismatch:
             raise DriveBackupError("Existe una copia remota con checksum diferente.")
         return None
 
-    def upload_backup(self, *, file_path, file_name, backup_id, checksum):
+    def upload_backup(self, *, file_path, file_name, backup_id, checksum, backup_type=BackupRecord.BackupType.MANUAL):
         self.upload_calls += 1
         if self.upload_calls <= self.upload_failures:
             raise DriveUnavailable("Timeout al subir a Google Drive")
         self.existing[str(backup_id)] = {"file_id": f"drive-{backup_id}", "checksum": checksum}
-        return DriveRemoteFile(file_id=f"drive-{backup_id}", checksum_sha256=checksum)
+        remote = DriveRemoteFile(
+            file_id=f"drive-{backup_id}",
+            checksum_sha256=checksum,
+            backup_id=str(backup_id),
+            name=file_name,
+            created_time=timezone.now().isoformat(),
+            size=Path(file_path).stat().st_size,
+            backup_type=backup_type,
+        )
+        self.remote_files.append(remote)
+        self.downloads[remote.file_id] = Path(file_path).read_bytes()
+        return remote
 
     def delete_file(self, file_id):
         self.delete_calls.append(file_id)
         if self.delete_fails:
             raise DriveUnavailable("No fue posible eliminar remoto")
+
+    def list_managed_backups(self):
+        return list(self.remote_files)
+
+    def get_file_metadata(self, file_id):
+        for item in self.remote_files:
+            if item.file_id == file_id:
+                return item
+        raise DriveBackupError("No existe remoto")
+
+    def download_file(self, file_id, destination):
+        if file_id not in self.downloads:
+            raise DriveUnavailable("No fue posible descargar remoto")
+        Path(destination).write_bytes(self.downloads[file_id])
+        return Path(destination)
+
+
+class FakeDriveApiExecute:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def execute(self, num_retries=0):
+        return self.payload
+
+
+class FakeDriveApiFiles:
+    def __init__(self, payload):
+        self.payload = payload
+        self.list_calls = []
+
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        return FakeDriveApiExecute(self.payload)
+
+
+class FakeDriveApiService:
+    def __init__(self, payload):
+        self.files_resource = FakeDriveApiFiles(payload)
+
+    def files(self):
+        return self.files_resource
 
 
 def make_zip(path, *, dump=b"dump", manifest_overrides=None, checksum_override=None, extra=False):
@@ -372,6 +439,8 @@ def test_backup_local_success_when_drive_has_no_connectivity(tmp_path, accountin
     assert Path(record.file_path).exists()
     assert record.drive_sync_status == BackupRecord.DriveSyncStatus.PENDING
     assert drive_client.upload_calls == 0
+    assert "local creada correctamente" in result.message
+    assert "Google Drive:" in result.message
 
 
 @pytest.mark.django_db
@@ -446,16 +515,19 @@ def test_drive_sync_three_failures_keep_local_success_failed_remote(tmp_path, ac
     drive_client = FakeDriveClient(upload_failures=3)
 
     with override_settings(BACKUP_STORAGE_PATH=str(tmp_path)):
-        record = create_backup(
+        result = create_backup(
             backup_type=BackupRecord.BackupType.MANUAL,
             user=accounting_admin_user,
             runner=successful_runner(b"failed-drive"),
             drive_client=drive_client,
-        ).record
+        )
+    record = result.record
 
     assert record.status == BackupRecord.Status.SUCCESS
     assert record.drive_sync_status == BackupRecord.DriveSyncStatus.FAILED
     assert drive_client.upload_calls == 3
+    assert "local creada correctamente" in result.message
+    assert "Google Drive:" in result.message
 
 
 @pytest.mark.django_db
@@ -996,6 +1068,31 @@ def test_restore_does_not_run_when_pre_restore_fails(tmp_path, accounting_admin_
 
 
 @pytest.mark.django_db
+def test_restore_invalid_pg_restore_format_aborts_before_pre_restore(tmp_path, accounting_admin_user, monkeypatch):
+    restore_calls = []
+
+    def invalid_restore_archive(_zip_path):
+        raise BackupError("El dump no es compatible o no puede ser leido por pg_restore.")
+
+    monkeypatch.setattr(backup_service, "_validate_restore_archive", invalid_restore_archive)
+    monkeypatch.setattr(backup_service, "_run_pg_restore", lambda *args, **kwargs: restore_calls.append(args))
+
+    with override_settings(BACKUP_STORAGE_PATH=str(tmp_path)):
+        record = make_backup_record(tmp_path, file_name="invalid_restore_format.zip")
+        with pytest.raises(BackupError, match="dump no es compatible"):
+            restore_backup(
+                record=record,
+                user=accounting_admin_user,
+                dump_runner=successful_runner(b"pre-restore"),
+                restore_runner=None,
+                post_check=lambda: None,
+            )
+
+    assert restore_calls == []
+    assert BackupRecord.objects.filter(backup_type=BackupRecord.BackupType.PRE_RESTORE).count() == 0
+
+
+@pytest.mark.django_db
 def test_new_pre_restore_replaces_previous_only_after_new_one_is_valid(tmp_path, accounting_admin_user):
     with override_settings(BACKUP_STORAGE_PATH=str(tmp_path)):
         old = make_backup_record(
@@ -1020,19 +1117,114 @@ def test_new_pre_restore_replaces_previous_only_after_new_one_is_valid(tmp_path,
 
 @pytest.mark.django_db
 def test_restore_failure_keeps_pre_restore_available(tmp_path, accounting_admin_user):
+    def failing_restore_runner(command, env, capture_output, text, check):
+        result = Completed(returncode=1)
+        result.stderr = "pg_restore: error: input file appears to be a text format dump"
+        return result
+
     with override_settings(BACKUP_STORAGE_PATH=str(tmp_path)):
         record = make_backup_record(tmp_path)
-        with pytest.raises(BackupError):
+        with pytest.raises(BackupError, match="text format dump"):
             restore_backup(
                 record=record,
                 user=accounting_admin_user,
                 dump_runner=successful_runner(b"before-failure"),
-                restore_runner=failing_runner,
+                restore_runner=failing_restore_runner,
                 post_check=lambda: None,
             )
 
     assert active_pre_restore() is not None
     assert Path(active_pre_restore().file_path).exists()
+
+
+@pytest.mark.django_db
+def test_restore_download_from_drive_must_match_remote_size_and_checksum_before_pg_restore(tmp_path, accounting_admin_user):
+    calls = []
+
+    def restore_runner(command, env, capture_output, text, check):
+        calls.append(command)
+        return Completed()
+
+    with override_settings(BACKUP_STORAGE_PATH=str(tmp_path)):
+        record = make_backup_record(
+            tmp_path,
+            file_name="remote_only.zip",
+            drive_sync_status=BackupRecord.DriveSyncStatus.SYNCED,
+            drive_file_id="drive-file",
+        )
+        original_bytes = Path(record.file_path).read_bytes()
+        Path(record.file_path).unlink()
+        drive_client = FakeDriveClient()
+        drive_client.remote_files = [
+            DriveRemoteFile(
+                file_id="drive-file",
+                checksum_sha256=record.checksum_sha256,
+                backup_id=str(record.backup_uid),
+                name=record.file_name,
+                created_time=timezone.now().isoformat(),
+                size=len(original_bytes),
+                backup_type=record.backup_type,
+            )
+        ]
+        drive_client.downloads["drive-file"] = original_bytes[:10]
+
+        with pytest.raises(BackupError, match="tamano remoto"):
+            restore_backup(
+                record=record,
+                user=accounting_admin_user,
+                dump_runner=successful_runner(b"pre-restore"),
+                restore_runner=restore_runner,
+                post_check=lambda: None,
+                drive_client=drive_client,
+            )
+
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_restore_can_download_valid_synced_backup_from_drive_before_pg_restore(tmp_path, accounting_admin_user):
+    calls = []
+
+    def restore_runner(command, env, capture_output, text, check):
+        calls.append(command)
+        return Completed()
+
+    with override_settings(BACKUP_STORAGE_PATH=str(tmp_path)):
+        record = make_backup_record(
+            tmp_path,
+            file_name="remote_valid.zip",
+            drive_sync_status=BackupRecord.DriveSyncStatus.SYNCED,
+            drive_file_id="drive-valid",
+        )
+        original_bytes = Path(record.file_path).read_bytes()
+        Path(record.file_path).unlink()
+        drive_client = FakeDriveClient()
+        drive_client.remote_files = [
+            DriveRemoteFile(
+                file_id="drive-valid",
+                checksum_sha256=record.checksum_sha256,
+                backup_id=str(record.backup_uid),
+                name=record.file_name,
+                created_time=timezone.now().isoformat(),
+                size=len(original_bytes),
+                backup_type=record.backup_type,
+            )
+        ]
+        drive_client.downloads["drive-valid"] = original_bytes
+
+        result = restore_backup(
+            record=record,
+            user=accounting_admin_user,
+            dump_runner=successful_runner(b"pre-restore"),
+            restore_runner=restore_runner,
+            post_check=lambda: None,
+            drive_client=drive_client,
+        )
+
+    record.refresh_from_db()
+    assert result.restored is True
+    assert Path(record.file_path).exists()
+    assert calls
 
 
 @pytest.mark.django_db
@@ -1127,6 +1319,124 @@ def test_pre_restore_does_not_participate_in_ordinary_retention(tmp_path, accoun
     pre_restore.refresh_from_db()
     assert pre_restore.status == BackupRecord.Status.SUCCESS
     assert BackupRecord.objects.filter(backup_type__in=[BackupRecord.BackupType.MANUAL, BackupRecord.BackupType.AUTOMATIC], status=BackupRecord.Status.SUCCESS).count() == 4
+
+
+def test_drive_retention_keeps_four_most_recent_managed_ordinary_files():
+    drive_client = FakeDriveClient()
+    drive_client.remote_files = [
+        DriveRemoteFile(
+            file_id=f"remote-{index}",
+            checksum_sha256=str(index) * 64,
+            backup_id=f"backup-{index}",
+            name=f"Backup_{index}.zip",
+            created_time=f"2026-01-0{index + 1}T00:00:00Z",
+            backup_type=BackupRecord.BackupType.MANUAL,
+        )
+        for index in range(5)
+    ]
+
+    removed = apply_drive_retention_policy(limit=4, drive_client=drive_client)
+
+    assert removed == ["remote-0"]
+    assert drive_client.delete_calls == ["remote-0"]
+
+
+def test_drive_retention_ignores_pre_restore_remote_files():
+    drive_client = FakeDriveClient()
+    drive_client.remote_files = [
+        DriveRemoteFile(
+            file_id=f"ordinary-{index}",
+            checksum_sha256=str(index) * 64,
+            backup_id=f"ordinary-{index}",
+            name=f"Backup_{index}.zip",
+            created_time=f"2026-01-0{index + 1}T00:00:00Z",
+            backup_type=BackupRecord.BackupType.MANUAL,
+        )
+        for index in range(4)
+    ]
+    drive_client.remote_files.append(
+        DriveRemoteFile(
+            file_id="pre-restore",
+            checksum_sha256="p" * 64,
+            backup_id="pre-restore",
+            name="PRE_RESTORE.zip",
+            created_time="2026-01-06T00:00:00Z",
+            backup_type=BackupRecord.BackupType.PRE_RESTORE,
+        )
+    )
+
+    removed = apply_drive_retention_policy(limit=4, drive_client=drive_client)
+
+    assert removed == []
+    assert drive_client.delete_calls == []
+
+
+def test_drive_client_lists_legacy_managed_backups_without_application_property():
+    payload = {
+        "files": [
+            {
+                "id": "legacy-ordinary",
+                "name": "Backup_legacy.zip",
+                "createdTime": "2026-01-01T00:00:00Z",
+                "size": "100",
+                "appProperties": {
+                    "backup_id": "legacy-id",
+                    "checksum_sha256": "a" * 64,
+                },
+            },
+            {
+                "id": "modern-ordinary",
+                "name": "Backup_modern.zip",
+                "createdTime": "2026-01-02T00:00:00Z",
+                "size": "100",
+                "appProperties": {
+                    "application": "Gestion Fiduciaria",
+                    "backup_id": "modern-id",
+                    "checksum_sha256": "b" * 64,
+                    "backup_type": BackupRecord.BackupType.MANUAL,
+                },
+            },
+            {
+                "id": "typed-legacy-ordinary",
+                "name": "Backup_typed_legacy.zip",
+                "createdTime": "2026-01-02T12:00:00Z",
+                "size": "100",
+                "appProperties": {
+                    "backup_id": "typed-legacy-id",
+                    "checksum_sha256": "d" * 64,
+                    "backup_type": "ordinary",
+                },
+            },
+            {
+                "id": "pre-restore",
+                "name": "PRE_RESTORE.zip",
+                "createdTime": "2026-01-03T00:00:00Z",
+                "size": "100",
+                "appProperties": {
+                    "backup_id": "pre-id",
+                    "checksum_sha256": "c" * 64,
+                    "backup_type": BackupRecord.BackupType.PRE_RESTORE,
+                },
+            },
+            {
+                "id": "foreign",
+                "name": "manual.zip",
+                "createdTime": "2026-01-04T00:00:00Z",
+                "size": "100",
+                "appProperties": {},
+            },
+        ]
+    }
+    service = FakeDriveApiService(payload)
+    client = GoogleDriveBackupClient()
+    client._service = service
+    client._folder_id = "folder-id"
+
+    with override_settings(GOOGLE_DRIVE_BACKUP_ENABLED=True, GOOGLE_DRIVE_TOKEN_FILE="token.json"):
+        files = client.list_managed_backups()
+
+    assert [item.file_id for item in files] == ["legacy-ordinary", "modern-ordinary", "typed-legacy-ordinary"]
+    assert "appProperties has" not in service.files_resource.list_calls[0]["q"]
 
 
 @pytest.mark.django_db
@@ -1305,6 +1615,67 @@ def test_pg_restore_absolute_path_and_missing_tool_error_is_controlled(tmp_path,
             )
 
 
+def test_postgresql_tool_resolution_uses_standard_windows_install_paths(tmp_path, monkeypatch):
+    pg_root = tmp_path / "PostgreSQL" / "17" / "bin"
+    pg_root.mkdir(parents=True)
+    executable = pg_root / "pg_dump.exe"
+    executable.write_text("fake", encoding="utf-8")
+    monkeypatch.setattr(backup_service.shutil, "which", lambda _name: None)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+
+    assert backup_service._resolve_executable("pg_dump", "pg_dump") == str(executable)
+
+
+@pytest.mark.django_db
+def test_run_pg_restore_default_runner_initializes_env_before_validation_and_subprocess(tmp_path, monkeypatch, settings):
+    seen = {}
+    monkeypatch.setenv("GF_BACKUP_ENV_MARKER", "inherited")
+    monkeypatch.setitem(settings.DATABASES["default"], "PASSWORD", "super-secret")
+    monkeypatch.setattr(backup_service, "_resolve_executable", lambda executable, name: "pg_restore")
+    record = make_backup_record(tmp_path)
+
+    def validate_dump(executable, dump_path, env):
+        seen["validate_env"] = env
+        seen["validate_executable"] = executable
+
+    def restore_runner(command, env, capture_output, text, check):
+        seen["command"] = command
+        seen["env"] = env
+        return Completed()
+
+    monkeypatch.setattr(backup_service, "_validate_pg_restore_dump", validate_dump)
+    monkeypatch.setattr(backup_service.subprocess, "run", restore_runner)
+
+    backup_service._run_pg_restore(Path(record.file_path))
+
+    assert seen["validate_executable"] == "pg_restore"
+    assert seen["validate_env"]["GF_BACKUP_ENV_MARKER"] == "inherited"
+    assert seen["validate_env"]["PGPASSWORD"] == "super-secret"
+    assert seen["env"]["GF_BACKUP_ENV_MARKER"] == "inherited"
+    assert seen["env"]["PGPASSWORD"] == "super-secret"
+    assert "super-secret" not in " ".join(str(part) for part in seen["command"])
+
+
+@pytest.mark.django_db
+def test_run_pg_restore_failure_uses_controlled_error_without_password(tmp_path, monkeypatch, settings):
+    monkeypatch.setitem(settings.DATABASES["default"], "PASSWORD", "super-secret")
+    record = make_backup_record(tmp_path)
+
+    def restore_runner(command, env, capture_output, text, check):
+        result = Completed(returncode=1)
+        result.stderr = "pg_restore: error: restore failed"
+        return result
+
+    with pytest.raises(BackupError) as excinfo:
+        backup_service._run_pg_restore(Path(record.file_path), runner=restore_runner)
+
+    message = str(excinfo.value)
+    assert "No fue posible restaurar el respaldo con pg_restore." in message
+    assert "restore failed" in message
+    assert "super-secret" not in message
+
+
 @pytest.mark.django_db
 def test_pg_restore_missing_tool_does_not_return_500_in_view(client, accounting_admin_user, tmp_path, monkeypatch):
     with override_settings(BACKUP_STORAGE_PATH=str(tmp_path)):
@@ -1361,7 +1732,7 @@ def test_backup_settings_time_persistence_and_permissions(client, accounting_adm
     content = client.get(reverse("backup_list")).content.decode()
     assert "19:30" in content
     assert "Pendiente de configuración" in content
-    assert "La tarea diaria del servidor debe configurarse externamente." in content
+    assert "La tarea diaria del servidor debe configurarse externamente." not in content
 
     client.force_login(commercial_user)
     assert client.post(reverse("backup_settings"), {"daily_check_time": "20:00"}).status_code == 403
@@ -1471,7 +1842,7 @@ def test_daily_backup_command_does_not_repeat_after_same_day_check(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_daily_backup_command_time_change_applies_next_day(monkeypatch):
+def test_daily_backup_command_time_change_applies_same_day_after_user_update(monkeypatch):
     from core.management.commands import run_daily_backup_check as command_module
 
     settings_obj = BackupSettings.get_solo()
@@ -1479,6 +1850,9 @@ def test_daily_backup_command_time_change_applies_next_day(monkeypatch):
     settings_obj.last_auto_check_at = timezone.make_aware(datetime(2026, 8, 18, 18, 5))
     settings_obj.last_auto_check_result = BackupSettings.LastCheckResult.BACKUP_CREATED
     settings_obj.save(update_fields=["daily_check_time", "last_auto_check_at", "last_auto_check_result"])
+    BackupSettings.objects.filter(pk=settings_obj.pk).update(
+        updated_at=timezone.make_aware(datetime(2026, 8, 18, 19, 55))
+    )
     calls = []
     monkeypatch.setattr(
         command_module,
@@ -1487,10 +1861,6 @@ def test_daily_backup_command_time_change_applies_next_day(monkeypatch):
     )
 
     monkeypatch.setattr(command_module.timezone, "now", lambda: timezone.make_aware(datetime(2026, 8, 18, 20, 0)))
-    call_command("run_daily_backup_check")
-    assert calls == []
-
-    monkeypatch.setattr(command_module.timezone, "now", lambda: timezone.make_aware(datetime(2026, 8, 19, 20, 0)))
     call_command("run_daily_backup_check")
     assert calls == ["run"]
 
@@ -1515,6 +1885,129 @@ def test_daily_backup_command_retries_after_failed_check(monkeypatch):
     call_command("run_daily_backup_check")
 
     assert calls == ["run"]
+
+
+@pytest.mark.django_db
+def test_embedded_backup_scheduler_due_logic_uses_local_time_and_reloads_settings(monkeypatch):
+    settings_obj = BackupSettings.get_solo()
+    settings_obj.daily_check_time = time(11, 47)
+    settings_obj.save(update_fields=["daily_check_time"])
+
+    before_due = timezone.make_aware(datetime(2026, 9, 11, 11, 46))
+    due_late = timezone.make_aware(datetime(2026, 9, 11, 11, 49))
+
+    assert daily_backup_check_is_due(settings_obj, now=before_due)[0] is False
+    assert daily_backup_check_is_due(settings_obj, now=due_late)[0] is True
+
+    settings_obj.last_auto_check_at = due_late
+    settings_obj.last_auto_check_result = BackupSettings.LastCheckResult.NO_CHANGES
+    settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result"])
+    assert daily_backup_check_is_due(settings_obj, now=timezone.make_aware(datetime(2026, 9, 11, 12, 0)))[0] is False
+
+    settings_obj.daily_check_time = time(12, 30)
+    settings_obj.last_auto_check_at = None
+    settings_obj.save(update_fields=["daily_check_time", "last_auto_check_at"])
+    settings_obj.refresh_from_db()
+    assert daily_backup_check_is_due(settings_obj, now=timezone.make_aware(datetime(2026, 9, 11, 12, 0)))[0] is False
+    assert daily_backup_check_is_due(settings_obj, now=timezone.make_aware(datetime(2026, 9, 11, 12, 31)))[0] is True
+
+
+@pytest.mark.django_db
+def test_daily_backup_due_runs_again_when_user_changes_time_after_same_day_check():
+    settings_obj = BackupSettings.get_solo()
+    settings_obj.daily_check_time = time(11, 56)
+    settings_obj.last_auto_check_at = timezone.make_aware(datetime(2026, 9, 11, 10, 13))
+    settings_obj.last_auto_check_result = BackupSettings.LastCheckResult.BACKUP_CREATED
+    settings_obj.save(update_fields=["daily_check_time", "last_auto_check_at", "last_auto_check_result"])
+    BackupSettings.objects.filter(pk=settings_obj.pk).update(
+        updated_at=timezone.make_aware(datetime(2026, 9, 11, 11, 55))
+    )
+    settings_obj.refresh_from_db()
+
+    due, _message = daily_backup_check_is_due(
+        settings_obj,
+        now=timezone.make_aware(datetime(2026, 9, 11, 11, 58)),
+    )
+
+    assert due is True
+
+
+@pytest.mark.django_db
+def test_embedded_backup_scheduler_creates_skips_and_records_failure(tmp_path, monkeypatch):
+    marker = timezone.make_aware(datetime(2026, 9, 11, 11, 55))
+    monkeypatch.setattr(backup_service, "current_change_marker", lambda: marker)
+    settings_obj = BackupSettings.get_solo()
+    settings_obj.daily_check_time = time(0, 0)
+    settings_obj.save(update_fields=["daily_check_time"])
+
+    with override_settings(BACKUP_STORAGE_PATH=str(tmp_path)):
+        created = run_pending_backup_check_once(
+            now=timezone.make_aware(datetime(2026, 9, 11, 12, 0)),
+            runner=successful_runner(b"auto"),
+        )
+        BackupRecord.objects.filter(pk=created.record.pk).update(
+            created_at=timezone.now() - timezone.timedelta(days=1),
+            last_change_at=marker,
+        )
+        settings_obj.last_auto_check_at = timezone.now() - timezone.timedelta(days=1)
+        settings_obj.last_auto_check_result = BackupSettings.LastCheckResult.BACKUP_CREATED
+        settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result"])
+        skipped = run_pending_backup_check_once(
+            now=timezone.make_aware(datetime(2026, 9, 12, 12, 0)),
+            runner=successful_runner(b"ignored"),
+        )
+        monkeypatch.setattr(backup_service, "current_change_marker", lambda: marker + timezone.timedelta(minutes=1))
+        settings_obj.last_auto_check_at = timezone.now() - timezone.timedelta(days=1)
+        settings_obj.last_auto_check_result = BackupSettings.LastCheckResult.NO_CHANGES
+        settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result"])
+        failed = run_pending_backup_check_once(
+            now=timezone.make_aware(datetime(2026, 9, 13, 12, 0)),
+            runner=failing_runner,
+        )
+
+    assert created.created is True
+    assert Path(created.record.file_path).exists()
+    assert skipped.created is False
+    assert "No se detectaron cambios" in skipped.message
+    assert failed.created is False
+    settings_obj.refresh_from_db()
+    assert settings_obj.last_auto_check_result == BackupSettings.LastCheckResult.FAILED
+    assert BackupRecord.objects.filter(backup_type=BackupRecord.BackupType.AUTOMATIC, status=BackupRecord.Status.SUCCESS).count() == 1
+    assert BackupRecord.objects.filter(backup_type=BackupRecord.BackupType.AUTOMATIC, status=BackupRecord.Status.FAILED).count() == 1
+
+
+def test_scheduler_start_rules_cover_gfservermanager_and_avoid_duplicates(settings, monkeypatch):
+    from core.services import backup_scheduler
+
+    settings.BACKUP_AUTO_SCHEDULER_ENABLED = True
+    assert scheduler_should_start(argv=["GFServerManager.exe"], environ={}) is True
+    assert scheduler_should_start(argv=["python.exe", "-m", "waitress", "--host=0.0.0.0", "config.wsgi:application"], environ={}) is True
+    assert scheduler_should_start(argv=["manage.py", "runserver"], environ={}) is False
+    assert scheduler_should_start(argv=["manage.py", "runserver", "--noreload"], environ={}) is True
+    assert scheduler_should_start(argv=["manage.py", "runserver"], environ={"RUN_MAIN": "true"}) is True
+    assert scheduler_should_start(argv=["manage.py", "check"], environ={}) is False
+    assert scheduler_should_start(argv=["pytest"], environ={}) is False
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def is_alive(self):
+            return self.started
+
+    monkeypatch.setattr(backup_scheduler.threading, "Thread", FakeThread)
+    backup_scheduler._scheduler_thread = None
+    thread_one = start_backup_scheduler(interval_seconds=300)
+    thread_two = start_backup_scheduler(interval_seconds=300)
+    try:
+        assert thread_one is thread_two
+        assert thread_one.started is True
+    finally:
+        stop_backup_scheduler()
+        backup_scheduler._scheduler_thread = None
 
 
 @pytest.mark.django_db

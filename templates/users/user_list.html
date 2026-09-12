@@ -80,20 +80,22 @@
                       <div class="d-flex flex-wrap gap-2">
                         <a class="btn btn-sm btn-outline-success" href="{% url 'user_update' managed_user.pk %}">Editar</a>
                         {% if managed_user.is_active %}
-                          <form method="post" action="{% url 'user_status' managed_user.pk 'deactivate' %}">
-                            {% csrf_token %}
-                            <button class="btn btn-sm btn-outline-secondary" type="submit" {% if managed_user.pk == request.user.pk %}disabled{% endif %}>Inactivar</button>
-                          </form>
+                          {% if managed_user.pk == request.user.pk %}
+                            <button class="btn btn-sm btn-outline-secondary" type="button" disabled>Inactivar</button>
+                          {% else %}
+                            <a class="btn btn-sm btn-outline-secondary" href="{% url 'user_status' managed_user.pk 'deactivate' %}">Inactivar</a>
+                          {% endif %}
                         {% else %}
                           <form method="post" action="{% url 'user_status' managed_user.pk 'activate' %}">
                             {% csrf_token %}
                             <button class="btn btn-sm btn-outline-secondary" type="submit">Activar</button>
                           </form>
                         {% endif %}
-                        <form method="post" action="{% url 'user_delete' managed_user.pk %}">
-                          {% csrf_token %}
-                          <button class="btn btn-sm btn-outline-danger" type="submit" {% if managed_user.pk == request.user.pk %}disabled{% endif %}>Eliminar</button>
-                        </form>
+                        {% if managed_user.pk == request.user.pk %}
+                          <button class="btn btn-sm btn-outline-danger" type="button" disabled>Eliminar</button>
+                        {% else %}
+                          <a class="btn btn-sm btn-outline-danger" href="{% url 'user_delete' managed_user.pk %}">Eliminar</a>
+                        {% endif %}
                       </div>
                     {% else %}
                       <span class="text-muted">Sin acciones</span>

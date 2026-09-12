@@ -1,6 +1,6 @@
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -25,21 +25,41 @@ class RawSheet:
     cells: dict[tuple[int, int], CellData]
     hidden_columns: set[int]
     hidden_rows: set[int]
+    _used_rows: int = field(init=False, repr=False)
+    _used_columns: int = field(init=False, repr=False)
+    _cells_by_row: dict[int, list[CellData]] = field(init=False, repr=False)
+    _non_empty_rows: frozenset[int] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_used_rows", max((row for row, _ in self.cells), default=0))
+        object.__setattr__(self, "_used_columns", max((column for _, column in self.cells), default=0))
+        cells_by_row: dict[int, list[CellData]] = {}
+        non_empty_rows = set()
+        for (row, _), cell in self.cells.items():
+            cells_by_row.setdefault(row, []).append(cell)
+            if cell.value not in ("", None):
+                non_empty_rows.add(row)
+        for row_cells in cells_by_row.values():
+            row_cells.sort(key=lambda cell: cell.column)
+        object.__setattr__(self, "_cells_by_row", cells_by_row)
+        object.__setattr__(self, "_non_empty_rows", frozenset(non_empty_rows))
 
     @property
     def used_rows(self) -> int:
-        if not self.cells:
-            return 0
-        return max(row for row, _ in self.cells)
+        return self._used_rows
 
     @property
     def used_columns(self) -> int:
-        if not self.cells:
-            return 0
-        return max(column for _, column in self.cells)
+        return self._used_columns
 
     def cell(self, row: int, column: int) -> CellData | None:
         return self.cells.get((row, column))
+
+    def row_cells(self, row: int) -> list[CellData]:
+        return self._cells_by_row.get(row, [])
+
+    def is_row_empty(self, row: int) -> bool:
+        return row not in self._non_empty_rows
 
 
 @dataclass(frozen=True)
@@ -140,6 +160,10 @@ class XlsxWorkbookReader:
         dimension = dimension_node.attrib.get("ref") if dimension_node is not None else None
         hidden_columns = self._hidden_columns(root)
         hidden_rows = self._hidden_rows(root)
+        shared_formulas = {}
+        for formula_node in root.findall(".//main:f", NS):
+            if formula_node.attrib.get("t") == "shared" and formula_node.attrib.get("si") and formula_node.text:
+                shared_formulas[formula_node.attrib["si"]] = formula_node.text
         cells = {}
         for cell_node in root.findall(".//main:c", NS):
             reference = cell_node.attrib.get("r", "")
@@ -151,7 +175,9 @@ class XlsxWorkbookReader:
             column = excel_column_index(column_letter)
             formula_node = cell_node.find("main:f", NS)
             value_node = cell_node.find("main:v", NS)
-            formula = (formula_node.text or "") if formula_node is not None else None
+            formula = None
+            if formula_node is not None:
+                formula = formula_node.text or shared_formulas.get(formula_node.attrib.get("si"), "")
             style_id = int(cell_node.attrib.get("s", "0")) if cell_node.attrib.get("s", "0").isdigit() else 0
             is_date = style_id in date_style_ids
             value = self._cell_value(cell_node, value_node, shared_strings, is_date)

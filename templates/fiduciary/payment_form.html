@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>{{ title }}</h1>
+          {% if global_payment %}
+            <p>Localice el encargo fiduciario y registre el pago manual.</p>
+          {% else %}
+            <p>Encargo {{ assignment.assignment_number }} | {{ assignment.property_unit.project.name }} | {{ assignment.property_unit }}</p>
+          {% endif %}
+        </div>
+        {% if global_payment %}
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:payment_list' %}">Volver</a>
+        {% else %}
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Volver</a>
+        {% endif %}
+      </div>
+
+      <form class="form-panel" method="post" novalidate {% if global_payment %}data-unit-hierarchy{% endif %}>
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+        {% if global_payment %}
+          <section class="data-section">
+            <h2>Localizar encargo</h2>
+            <div class="form-grid">
+              <div>
+                <label class="form-label" for="{{ form.assignment_number.id_for_label }}">{{ form.assignment_number.label }}</label>
+                {{ form.assignment_number }}
+                {{ form.assignment_number.errors }}
+              </div>
+            </div>
+            <div class="form-grid mt-3">
+              <div>
+                <label class="form-label" for="{{ form.project.id_for_label }}">{{ form.project.label }}</label>
+                {{ form.project }}
+                {{ form.project.errors }}
+              </div>
+              <div>
+                <label class="form-label" for="{{ form.grouping_type.id_for_label }}">{{ form.grouping_type.label }}</label>
+                {{ form.grouping_type }}
+                {{ form.grouping_type.errors }}
+              </div>
+              <div>
+                <label class="form-label" for="{{ form.structural_group.id_for_label }}">{{ form.structural_group.label }}</label>
+                {{ form.structural_group }}
+                {{ form.structural_group.errors }}
+              </div>
+              <div>
+                <label class="form-label" for="{{ form.property_unit.id_for_label }}">{{ form.property_unit.label }}</label>
+                {{ form.property_unit }}
+                {{ form.property_unit.errors }}
+              </div>
+            </div>
+            <p class="text-muted mt-2" data-active-assignment-preview>Seleccione una unidad para ver su encargo activo.</p>
+          </section>
+        {% endif %}
+
+        <section class="data-section mt-3">
+          <h2>Datos del pago</h2>
+          <div class="form-grid">
+            {% for field in form %}
+              {% if field.name == "exact_date" or field.name == "amount" or field.name == "concept" or field.name == "destination" %}
+            <div>
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {{ field.errors }}
+            </div>
+              {% endif %}
+            {% endfor %}
+          </div>
+        </section>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Guardar</button>
+          {% if global_payment %}
+            <a class="btn btn-outline-secondary" href="{% url 'fiduciary:payment_list' %}">Cancelar</a>
+          {% else %}
+            <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Cancelar</a>
+          {% endif %}
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+{% if global_payment %}
+  {% include "fiduciary/includes/unit_hierarchy_script.html" %}
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      const unitSelect = document.querySelector("[data-unit-hierarchy-field='property-unit']");
+      const preview = document.querySelector("[data-active-assignment-preview]");
+      const endpoint = "{{ unit_assignment_url }}";
+      if (!unitSelect || !preview) return;
+
+      async function refreshAssignmentPreview() {
+        if (!unitSelect.value) {
+          preview.textContent = "Seleccione una unidad para ver su encargo activo.";
+          return;
+        }
+        const url = new URL(endpoint, window.location.origin);
+        url.searchParams.set("unit", unitSelect.value);
+        const response = await fetch(url, {headers: {"X-Requested-With": "XMLHttpRequest"}});
+        if (!response.ok) {
+          preview.textContent = "No fue posible consultar el encargo activo.";
+          return;
+        }
+        const payload = await response.json();
+        preview.textContent = payload.assignment ? `Encargo seleccionado: ${payload.assignment.text}` : (payload.message || "La unidad no tiene un encargo activo.");
+      }
+
+      unitSelect.addEventListener("change", refreshAssignmentPreview);
+      unitSelect.addEventListener("unit-hierarchy:changed", refreshAssignmentPreview);
+      refreshAssignmentPreview();
+    });
+  </script>
+{% endif %}
+{% endblock %}

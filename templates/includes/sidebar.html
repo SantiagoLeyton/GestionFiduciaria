@@ -14,17 +14,17 @@
     <a class="nav-link {% if url_name == 'structural_group_list' or url_name == 'structural_group_create' or url_name == 'structural_group_update' or url_name == 'structural_group_status' %}active{% endif %}" href="{% url 'real_estate:structural_group_list' %}">Agrupaciones</a>
     <a class="nav-link {% if url_name == 'property_unit_list' or url_name == 'property_unit_create' or url_name == 'property_unit_update' or url_name == 'property_unit_status' or url_name == 'property_unit_history' %}active{% endif %}" href="{% url 'real_estate:property_unit_list' %}">Unidades</a>
     <a class="nav-link {% if url_name == 'client_list' or url_name == 'client_create' or url_name == 'client_detail' or url_name == 'client_update' or url_name == 'client_status' or url_name == 'client_search' %}active{% endif %}" href="{% url 'fiduciary:client_list' %}">Clientes</a>
-    <a class="nav-link {% if url_name == 'ownership_list' or url_name == 'ownership_create' or url_name == 'ownership_finalize' or url_name == 'ownership_change_primary' %}active{% endif %}" href="{% url 'fiduciary:ownership_list' %}">Titularidades</a>
-    <a class="nav-link {% if url_name == 'assignment_list' or url_name == 'assignment_create' or url_name == 'assignment_update' or url_name == 'assignment_close' or url_name == 'assignment_detail' or url_name == 'assignment_change' or url_name == 'holder_create' or url_name == 'holder_finalize' %}active{% endif %}" href="{% url 'fiduciary:assignment_list' %}">Encargos fiduciarios</a>
+    <a class="nav-link {% if url_name == 'assignment_list' or url_name == 'assignment_create' or url_name == 'assignment_update' or url_name == 'assignment_close' or url_name == 'assignment_detail' or url_name == 'assignment_change' or url_name == 'assignment_secondary_create' or url_name == 'holder_create' or url_name == 'holder_finalize' %}active{% endif %}" href="{% url 'fiduciary:assignment_list' %}">Encargos fiduciarios</a>
     <a class="nav-link {% if url_name == 'observation_list' or url_name == 'observation_create' or url_name == 'observation_detail' or url_name == 'observation_update' %}active{% endif %}" href="{% url 'fiduciary:observation_list' %}">Observaciones</a>
     <a class="nav-link {% if url_name == 'novelty_list' or url_name == 'novelty_create' or url_name == 'novelty_detail' %}active{% endif %}" href="{% url 'fiduciary:novelty_list' %}">Novedades</a>
     <a class="nav-link {% if url_name == 'payment_list' %}active{% endif %}" href="{% url 'fiduciary:payment_list' %}">Pagos</a>
+    <a class="nav-link {% if url_name == 'export_home' or url_name == 'export_historical_workbook' or url_name == 'export_document_download' %}active{% endif %}" href="{% url 'fiduciary:export_home' %}">Exportacion</a>
     {% if request.user.is_accounting_admin or request.user.is_superuser %}
       <a class="nav-link {% if url_name == 'audit_list' or url_name == 'audit_detail' %}active{% endif %}" href="{% url 'fiduciary:audit_list' %}">Auditoría</a>
       <a class="nav-link {% if url_name == 'user_list' or url_name == 'user_create' or url_name == 'user_update' or url_name == 'user_status' or url_name == 'user_delete' %}active{% endif %}" href="{% url 'user_list' %}">Gestión de cuentas</a>
       <a class="nav-link {% if url_name == 'backup_list' or url_name == 'backup_confirm' or url_name == 'backup_create' %}active{% endif %}" href="{% url 'backup_list' %}">Copias de seguridad</a>
     {% endif %}
   </nav>
-  <div class="sidebar-footer">v1.0.0 - 2026</div>
+  <div class="sidebar-footer">v1.2.0 - 2026</div>
 </aside>
 {% endwith %}

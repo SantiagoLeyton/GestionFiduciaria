@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 
 from fiduciary.models import (
     DetectedStructureElement,
@@ -67,7 +68,27 @@ def cancel_import_batch(*, batch: ImportBatch, cancelled_by) -> ImportCancellati
         sheet_results_deleted = ImportedSheetResult.objects.filter(imported_file_id__in=file_ids).delete()[0]
         files_deleted = ImportedFile.objects.filter(id__in=file_ids).delete()[0]
         batch_id = locked_batch.pk
-        locked_batch.delete()
+        if locked_batch.import_type == ImportBatch.ImportType.HISTORICAL:
+            locked_batch.status = ImportBatch.Status.CANCELLED
+            locked_batch.processing_finished_at = timezone.now()
+            locked_batch.summary = "Importacion cancelada por el usuario antes de la materializacion definitiva."
+            locked_batch.processed_files = 0
+            locked_batch.total_rows = 0
+            locked_batch.processed_rows = 0
+            locked_batch.issue_count = 0
+            locked_batch.save(
+                update_fields=[
+                    "status",
+                    "processing_finished_at",
+                    "summary",
+                    "processed_files",
+                    "total_rows",
+                    "processed_rows",
+                    "issue_count",
+                ]
+            )
+        else:
+            locked_batch.delete()
 
     return ImportCancellationResult(
         batch_id=batch_id,
@@ -85,7 +106,16 @@ def cancel_import_batch(*, batch: ImportBatch, cancelled_by) -> ImportCancellati
 def _ensure_no_definitive_entities(batch: ImportBatch, file_ids: list[int]) -> None:
     if Payment.objects.filter(source_file_id__in=file_ids).exists():
         raise ValidationError("No es seguro cancelar un lote que ya tiene pagos asociados.")
-    if ImportAppliedRecord.objects.filter(batch=batch).exists():
+    applied_records = ImportAppliedRecord.objects.filter(batch=batch)
+    if batch.import_type == ImportBatch.ImportType.HISTORICAL:
+        applied_records = applied_records.exclude(
+            entity_kind__in=[
+                ImportAppliedRecord.EntityKind.PROJECT,
+                ImportAppliedRecord.EntityKind.GROUPING_TYPE,
+            ],
+            action=ImportAppliedRecord.Action.CREATED,
+        )
+    if applied_records.exists():
         raise ValidationError("No es seguro cancelar un lote que ya tiene trazabilidad definitiva asociada.")
     if ImportNovelty.objects.filter(batch=batch, payment__isnull=False).exists():
         raise ValidationError("No es seguro cancelar un lote que ya tiene novedades asociadas a pagos.")

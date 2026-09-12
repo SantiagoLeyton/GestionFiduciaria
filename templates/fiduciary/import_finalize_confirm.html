@@ -29,17 +29,61 @@
           <div class="col-md-3"><strong>Novedades preservadas</strong><div>{{ historical_novelties_count }}</div></div>
         </div>
         {% if can_finalize %}
-          <form method="post">
+          <form method="post" data-historical-finalize-form>
             {% csrf_token %}
-            <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}">Volver</a>
-            <button class="btn btn-primary" type="submit">Si, ejecutar importacion definitiva</button>
+            <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}" data-finalize-back-link>Volver</a>
+            <button class="btn btn-primary" type="submit" data-finalize-submit>Si, ejecutar importacion definitiva</button>
           </form>
         {% else %}
           <div class="alert alert-warning">Este lote no esta en un estado importable.</div>
           <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}">Volver</a>
         {% endif %}
       </section>
+
+      <section
+        class="data-section d-none"
+        data-finalize-waiting-screen
+        aria-live="assertive"
+        aria-busy="true"
+        style="position: fixed; inset: 0; z-index: 1080; margin: 0; border-radius: 0; display: grid; place-items: center; background: rgba(246, 248, 247, 0.96);"
+      >
+        <div style="width: min(520px, calc(100vw - 32px));">
+          <div class="section-header"><h2>Importando informacion...</h2><span>En proceso</span></div>
+          <div class="progress mb-3" role="progressbar" aria-label="Importacion historica en proceso">
+            <div class="progress-bar progress-bar-striped progress-bar-animated bg-success" style="width: 100%">Procesando</div>
+          </div>
+          <p class="mb-1"><strong>Etapa actual:</strong> Ejecutando importacion definitiva.</p>
+          <p class="text-muted mb-0">Este proceso puede tardar varios minutos. No cierre ni interrumpa esta ventana hasta que aparezca el resultado.</p>
+        </div>
+      </section>
     </section>
   </main>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (() => {
+    const form = document.querySelector("[data-historical-finalize-form]");
+    if (!form) return;
+    const waitingScreen = document.querySelector("[data-finalize-waiting-screen]");
+    const submitButton = form.querySelector("[data-finalize-submit]");
+    const backLink = form.querySelector("[data-finalize-back-link]");
+    let submitted = false;
+
+    form.addEventListener("submit", (event) => {
+      if (submitted) {
+        event.preventDefault();
+        return;
+      }
+      submitted = true;
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = "Importando...";
+      }
+      if (backLink) backLink.classList.add("disabled");
+      if (waitingScreen) waitingScreen.classList.remove("d-none");
+    });
+  })();
+</script>
 {% endblock %}

@@ -11,7 +11,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 from django.views.generic import CreateView, ListView, UpdateView, View
 
-from .forms_admin import ManagedUserCreateForm, ManagedUserUpdateForm, UserSearchForm
+from .forms_admin import ManagedUserCreateForm, ManagedUserUpdateForm, UserActionReasonForm, UserSearchForm
 from .forms import LoginForm
 from .permissions import UserManagementRequiredMixin, UserReadRequiredMixin
 
@@ -107,6 +107,45 @@ class ManagedUserCreateView(UserManagementRequiredMixin, CreateView):
         return kwargs
 
     def form_valid(self, form):
+        reused_user = getattr(form, "deleted_user_for_reuse", None)
+        if reused_user:
+            user = reused_user
+            user.first_name = form.cleaned_data["first_name"]
+            user.last_name = form.cleaned_data["last_name"]
+            user.email = form.cleaned_data["email"]
+            user.role = form.cleaned_data["role"]
+            user.is_active = form.cleaned_data["is_active"]
+            user.is_deleted = False
+            user.deleted_at = None
+            user.username = _generate_internal_username(user.email, exclude_pk=user.pk)
+            user.set_password(get_random_string(48))
+            user.groups.clear()
+            user.user_permissions.clear()
+            user.save(
+                update_fields=[
+                    "first_name",
+                    "last_name",
+                    "email",
+                    "role",
+                    "is_active",
+                    "is_deleted",
+                    "deleted_at",
+                    "username",
+                    "password",
+                ]
+            )
+            self.object = user
+            _log_user_action(
+                self.request.user,
+                self.object,
+                ADDITION,
+                "Cuenta recreada desde Gestion de cuentas reutilizando correo de usuario eliminado logicamente.",
+            )
+            messages.success(
+                self.request,
+                "Cuenta creada correctamente. El usuario debe utilizar la recuperacion de contrasena para definir su clave.",
+            )
+            return redirect(self.success_url)
         user = form.save(commit=False)
         user.username = _generate_internal_username(user.email)
         user.set_password(get_random_string(48))
@@ -144,6 +183,27 @@ class ManagedUserUpdateView(UserManagementRequiredMixin, UpdateView):
 
 class ManagedUserStatusView(UserManagementRequiredMixin, View):
     allowed_actions = {"activate", "deactivate"}
+    template_name = "users/user_action_confirm.html"
+
+    def get(self, request, pk, action):
+        if action != "deactivate":
+            raise PermissionDenied
+        user = get_object_or_404(User, pk=pk, is_deleted=False)
+        if user.pk == request.user.pk:
+            messages.error(request, "No puede inactivar su propia cuenta desde esta pantalla.")
+            return redirect("user_list")
+        return render(
+            request,
+            self.template_name,
+            {
+                "form": UserActionReasonForm(),
+                "managed_user": user,
+                "title": "Inactivar usuario",
+                "message": "El usuario no podra iniciar sesion mientras permanezca inactivo.",
+                "confirm_label": "Inactivar",
+                "confirm_class": "btn-outline-secondary",
+            },
+        )
 
     def post(self, request, pk, action):
         if action not in self.allowed_actions:
@@ -152,23 +212,85 @@ class ManagedUserStatusView(UserManagementRequiredMixin, View):
         if user.pk == request.user.pk and action == "deactivate":
             messages.error(request, "No puede inactivar su propia cuenta desde esta pantalla.")
             return redirect("user_list")
+        if action == "deactivate":
+            form = UserActionReasonForm(request.POST)
+            if not form.is_valid():
+                return render(
+                    request,
+                    self.template_name,
+                    {
+                        "form": form,
+                        "managed_user": user,
+                        "title": "Inactivar usuario",
+                        "message": "El usuario no podra iniciar sesion mientras permanezca inactivo.",
+                        "confirm_label": "Inactivar",
+                        "confirm_class": "btn-outline-secondary",
+                    },
+                    status=400,
+                )
+            reason = form.cleaned_data["reason"]
+        else:
+            reason = ""
         user.is_active = action == "activate"
         user.save(update_fields=["is_active"])
         label = "activada" if user.is_active else "inactivada"
-        _log_user_action(request.user, user, CHANGE, f"Cuenta {label} desde Gestion de cuentas.")
+        if action == "deactivate":
+            _log_user_action(request.user, user, CHANGE, f"INACTIVAR_USUARIO | Cuenta {label} desde Gestion de cuentas. Motivo: {reason}")
+        else:
+            _log_user_action(request.user, user, CHANGE, f"Cuenta {label} desde Gestion de cuentas.")
         messages.success(request, f"Cuenta {label} correctamente.")
         return redirect("user_list")
 
 
 class ManagedUserDeleteView(UserManagementRequiredMixin, View):
+    template_name = "users/user_action_confirm.html"
+
+    def get(self, request, pk):
+        user = get_object_or_404(User, pk=pk, is_deleted=False)
+        if user.pk == request.user.pk:
+            messages.error(request, "No puede eliminar logicamente su propia cuenta desde esta pantalla.")
+            return redirect("user_list")
+        return render(
+            request,
+            self.template_name,
+            {
+                "form": UserActionReasonForm(),
+                "managed_user": user,
+                "title": "Eliminar usuario",
+                "message": "La cuenta sera eliminada logicamente y dejara de estar disponible. La informacion historica y de auditoria debe conservarse.",
+                "confirm_label": "Eliminar",
+                "confirm_class": "btn-outline-danger",
+            },
+        )
+
     def post(self, request, pk):
         user = get_object_or_404(User, pk=pk, is_deleted=False)
         if user.pk == request.user.pk:
             messages.error(request, "No puede eliminar logicamente su propia cuenta desde esta pantalla.")
             return redirect("user_list")
+        form = UserActionReasonForm(request.POST)
+        if not form.is_valid():
+            return render(
+                request,
+                self.template_name,
+                {
+                    "form": form,
+                    "managed_user": user,
+                    "title": "Eliminar usuario",
+                    "message": "La cuenta sera eliminada logicamente y dejara de estar disponible. La informacion historica y de auditoria debe conservarse.",
+                    "confirm_label": "Eliminar",
+                    "confirm_class": "btn-outline-danger",
+                },
+                status=400,
+            )
         user.mark_deleted()
         user.save(update_fields=["is_deleted", "is_active", "deleted_at"])
-        _log_user_action(request.user, user, DELETION, "Cuenta eliminada logicamente desde Gestion de cuentas.")
+        _log_user_action(
+            request.user,
+            user,
+            DELETION,
+            f"ELIMINAR_USUARIO | Cuenta eliminada logicamente desde Gestion de cuentas. Motivo: {form.cleaned_data['reason']}",
+        )
         messages.success(request, "Cuenta eliminada logicamente. El historial asociado se conserva.")
         return redirect("user_list")
 
@@ -176,13 +298,16 @@ class ManagedUserDeleteView(UserManagementRequiredMixin, View):
 BlockedUserManagementView = ManagedUserCreateView
 
 
-def _generate_internal_username(email):
+def _generate_internal_username(email, *, exclude_pk=None):
     base = (email.split("@", 1)[0] or "usuario").lower()
     base = "".join(character if character.isalnum() or character in "._+-" else "_" for character in base)
     base = base[:120] or "usuario"
     candidate = base
     suffix = 1
-    while User.objects.filter(username__iexact=candidate).exists():
+    queryset = User.objects.all()
+    if exclude_pk:
+        queryset = queryset.exclude(pk=exclude_pk)
+    while queryset.filter(username__iexact=candidate).exists():
         suffix += 1
         candidate = f"{base[:120]}_{suffix}"
     return candidate

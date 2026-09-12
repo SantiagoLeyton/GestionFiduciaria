@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}Exportacion | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Exportacion</h1>
+          <p>Descargue informacion reconstruida desde Gestion Fiduciaria y documentos fuente cargados.</p>
+        </div>
+      </div>
+
+      <section class="data-section">
+        <h2>Libro historico</h2>
+        <form class="filter-panel" method="post" action="{% url 'fiduciary:export_historical_workbook' %}">
+          {% csrf_token %}
+          <div>
+            <label class="form-label" for="{{ export_form.project.id_for_label }}">{{ export_form.project.label }}</label>
+            {{ export_form.project }}
+          </div>
+          <div class="filter-actions"><button class="btn btn-success" type="submit">Exportar libro historico</button></div>
+        </form>
+      </section>
+
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Documentos cargados</h2>
+        </div>
+        <form class="filter-panel" method="get">
+          <div>
+            <label class="form-label" for="{{ document_filter_form.file_type.id_for_label }}">{{ document_filter_form.file_type.label }}</label>
+            {{ document_filter_form.file_type }}
+          </div>
+          <div>
+            <label class="form-label" for="{{ document_filter_form.filename.id_for_label }}">{{ document_filter_form.filename.label }}</label>
+            {{ document_filter_form.filename }}
+          </div>
+          <div>
+            <label class="form-label" for="{{ document_filter_form.date_from.id_for_label }}">{{ document_filter_form.date_from.label }}</label>
+            {{ document_filter_form.date_from }}
+          </div>
+          <div>
+            <label class="form-label" for="{{ document_filter_form.date_to.id_for_label }}">{{ document_filter_form.date_to.label }}</label>
+            {{ document_filter_form.date_to }}
+          </div>
+          <div class="filter-actions"><button class="btn btn-outline-success" type="submit">Filtrar</button><a class="btn btn-outline-secondary" href="{% url 'fiduciary:export_home' %}">Limpiar</a></div>
+        </form>
+        <div class="table-responsive">
+          <table class="table data-table">
+            <thead><tr><th>Tipo</th><th>Archivo</th><th>Fecha de carga</th><th>Usuario</th><th>Estado</th><th>Accion</th></tr></thead>
+            <tbody>
+              {% for row in document_rows %}
+                <tr>
+                  <td>{{ row.file.get_file_type_display }}</td>
+                  <td>{{ row.file.original_name }}</td>
+                  <td>{{ row.file.created_at|date:"d/m/Y H:i" }}</td>
+                  <td>{% if row.file.batch.initiated_by %}{{ row.file.batch.initiated_by.get_username }}{% else %}-{% endif %}</td>
+                  <td>{% if row.available %}Disponible{% else %}Archivo no disponible{% endif %}</td>
+                  <td>
+                    {% if row.available %}
+                      <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:export_document_download' row.file.pk %}">Descargar</a>
+                    {% else %}
+                      <span class="text-muted">Archivo no disponible</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="6">No hay documentos cargados almacenados.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

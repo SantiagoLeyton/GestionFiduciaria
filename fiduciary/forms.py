@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 from django import forms
 from django.core.exceptions import ValidationError
@@ -6,8 +7,15 @@ from django.db.models import Q
 from django.forms import formset_factory
 
 from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
+from real_estate.querysets import with_natural_unit_order
 
-from .domain_services import ASSIGNMENT_CHANGE_WITHOUT_NEW_ASSIGNMENT, NOVELTY_TYPE_CHOICES, validate_active_assignment_available, validate_unit_primary_available
+from .domain_services import (
+    ASSIGNMENT_CHANGE_WITHOUT_NEW_ASSIGNMENT,
+    MANUAL_INCLUSION_TYPE,
+    NOVELTY_TYPE_CHOICES,
+    validate_active_assignment_available,
+    validate_unit_primary_available,
+)
 from .models import (
     Client,
     DailyReportRow,
@@ -29,6 +37,29 @@ from users.models import User
 DIRECT_UNITS_VALUE = "__direct__"
 MAX_IMPORT_FILES = 25
 MAX_IMPORT_FILE_SIZE_BYTES = 25 * 1024 * 1024
+
+
+def short_client_name(client: Client | None) -> str:
+    if not client:
+        return "Sin titular"
+    first = (client.first_names or "").split()
+    last = (client.last_names_or_company or "").split()
+    parts = []
+    if first:
+        parts.append(first[0].title())
+    if last:
+        parts.append(last[0].title())
+    return " ".join(parts) if parts else "Sin titular"
+
+
+def assignment_choice_label(assignment: FiduciaryAssignment) -> str:
+    holder = assignment.active_primary_holder
+    return f"{assignment.assignment_number} — {short_client_name(holder.client if holder else None)}"
+
+
+class AssignmentChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, obj):
+        return assignment_choice_label(obj)
 
 
 class MultipleFileInput(forms.ClearableFileInput):
@@ -85,23 +116,30 @@ class ClientFilterForm(forms.Form):
         label="Proyecto",
         required=False,
         queryset=Project.objects.none(),
-        widget=forms.Select(attrs={"class": "form-select"}),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "project"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}),
+    )
+    structural_group = forms.ModelChoiceField(
+        label="Agrupacion",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}),
     )
     property_unit = forms.ModelChoiceField(
         label="Unidad",
         required=False,
         queryset=PropertyUnit.objects.none(),
-        widget=forms.Select(attrs={"class": "form-select"}),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}),
     )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["project"].queryset = Project.objects.order_by("name")
-        units = PropertyUnit.objects.select_related("project").order_by("project__name", "name", "code")
-        project_id = self.data.get("project") if self.is_bound else None
-        if project_id:
-            units = units.filter(project_id=project_id)
-        self.fields["property_unit"].queryset = units
+        configure_unit_hierarchy_fields(self)
 
     def clean_q(self):
         return self.cleaned_data["q"].strip()
@@ -115,6 +153,307 @@ def normalize_document_query(value: str) -> str:
     for separator in (" ", ".", ",", "-"):
         cleaned = cleaned.replace(separator, "")
     return cleaned
+
+
+def property_unit_choice_label(unit: PropertyUnit) -> str:
+    unit_label = unit.name or unit.code
+    group = getattr(unit, "structural_group", None)
+    if group:
+        group_label = group.code or group.name
+        return f"{group_label} - {unit_label}"
+    return unit_label
+
+
+def use_property_unit_choice_labels(field) -> None:
+    field.label_from_instance = property_unit_choice_label
+
+
+def configure_unit_hierarchy_fields(form, *, active_only: bool = False, initial_unit: PropertyUnit | None = None) -> None:
+    data = form.data if form.is_bound else None
+    unit = initial_unit
+    if not unit:
+        unit_id = data.get("property_unit") if data else form.initial.get("property_unit")
+        if unit_id:
+            unit = PropertyUnit.objects.filter(pk=unit_id).select_related(
+                "project", "structural_group", "structural_group__grouping_type"
+            ).first()
+
+    project_id = data.get("project") if data else (unit.project_id if unit else None)
+    grouping_type_id = data.get("grouping_type") if data else (
+        unit.structural_group.grouping_type_id if unit and unit.structural_group_id else None
+    )
+    structural_group_id = data.get("structural_group") if data else (unit.structural_group_id if unit else None)
+
+    if "project" in form.fields:
+        projects = Project.objects.order_by("name")
+        if active_only:
+            projects = projects.filter(is_active=True)
+        form.fields["project"].queryset = projects
+    if "grouping_type" in form.fields:
+        types = GroupingType.objects.none()
+        if project_id:
+            types = GroupingType.objects.filter(structural_groups__project_id=project_id).distinct().order_by("name")
+            if active_only:
+                types = types.filter(is_active=True, structural_groups__is_active=True)
+        form.fields["grouping_type"].queryset = types
+    if "structural_group" in form.fields and isinstance(form.fields["structural_group"], forms.ModelChoiceField):
+        groups = StructuralGroup.objects.none()
+        if project_id and grouping_type_id:
+            groups = StructuralGroup.objects.filter(project_id=project_id, grouping_type_id=grouping_type_id).select_related(
+                "project", "grouping_type"
+            ).order_by("name", "code")
+            if active_only:
+                groups = groups.filter(is_active=True)
+        form.fields["structural_group"].queryset = groups
+    if "property_unit" in form.fields:
+        units = PropertyUnit.objects.none()
+        if project_id and structural_group_id:
+            units = PropertyUnit.objects.filter(project_id=project_id, structural_group_id=structural_group_id).select_related(
+                "project", "structural_group"
+            )
+            if active_only:
+                units = units.filter(is_active=True)
+        elif unit:
+            units = PropertyUnit.objects.filter(pk=unit.pk).select_related("project", "structural_group")
+        form.fields["property_unit"].queryset = with_natural_unit_order(units)
+        use_property_unit_choice_labels(form.fields["property_unit"])
+        if not project_id:
+            form.fields["property_unit"].widget.attrs["disabled"] = "disabled"
+    if "grouping_type" in form.fields and not project_id:
+        form.fields["grouping_type"].widget.attrs["disabled"] = "disabled"
+    if "structural_group" in form.fields and not grouping_type_id:
+        form.fields["structural_group"].widget.attrs["disabled"] = "disabled"
+    if "property_unit" in form.fields and not structural_group_id:
+        form.fields["property_unit"].widget.attrs["disabled"] = "disabled"
+
+
+def unit_can_receive_new_assignment(unit: PropertyUnit) -> bool:
+    if not unit or not unit.is_active:
+        return False
+    has_active_primary = UnitOwnership.objects.filter(
+        property_unit=unit,
+        is_active=True,
+        is_primary=True,
+        end_date__isnull=True,
+    ).exists()
+    return not has_active_primary
+
+
+def assignment_has_current_holder(assignment: FiduciaryAssignment | None) -> bool:
+    if not assignment or not assignment.pk:
+        return False
+    return assignment.holders.filter(is_active=True, end_date__isnull=True).exists()
+
+
+def assignment_can_receive_payment(assignment: FiduciaryAssignment | None) -> bool:
+    return bool(assignment and assignment.is_active and assignment_has_current_holder(assignment))
+
+
+class NewFiduciaryAssignmentForm(forms.Form):
+    project = forms.ModelChoiceField(
+        label="Proyecto",
+        queryset=Project.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "project"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}),
+    )
+    structural_group = forms.ModelChoiceField(
+        label="Agrupacion",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}),
+    )
+    property_unit = forms.ModelChoiceField(
+        label="Unidad",
+        queryset=PropertyUnit.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}),
+    )
+    assignment_number = forms.CharField(
+        label="Numero del nuevo encargo fiduciario",
+        widget=forms.TextInput(attrs={"class": "form-control"}),
+    )
+    primary_client_id = forms.IntegerField(widget=forms.HiddenInput())
+    secondary_client_ids = forms.CharField(required=False, widget=forms.HiddenInput())
+    adhesion_contract_date = forms.DateField(
+        label="Contrato de adhesion",
+        required=False,
+        widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+    )
+    promise_date = forms.DateField(
+        label="Promesa",
+        required=False,
+        widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+    )
+    promised_delivery_date = forms.DateField(
+        label="Entrega segun promesa",
+        required=False,
+        widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+    )
+    actual_delivery_date = forms.DateField(
+        label="Entrega real",
+        required=False,
+        widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+    )
+    confirm_without_dates = forms.BooleanField(required=False, widget=forms.HiddenInput())
+
+    def __init__(self, *args, **kwargs):
+        self.requires_date_confirmation = False
+        super().__init__(*args, **kwargs)
+        configure_unit_hierarchy_fields(self, active_only=True)
+
+    def clean_assignment_number(self):
+        value = (self.cleaned_data.get("assignment_number") or "").strip()
+        if not value:
+            raise ValidationError("Registre el numero del nuevo encargo fiduciario.")
+        if FiduciaryAssignment.objects.filter(assignment_number=value).exists():
+            raise ValidationError("Ya existe un encargo fiduciario con ese numero.")
+        return value
+
+    def clean_primary_client_id(self):
+        client_id = self.cleaned_data.get("primary_client_id")
+        client = Client.objects.filter(pk=client_id).first()
+        if not client:
+            raise ValidationError("Seleccione un cliente principal valido.")
+        return client
+
+    def clean_secondary_client_ids(self):
+        raw = (self.cleaned_data.get("secondary_client_ids") or "").strip()
+        if not raw:
+            return []
+        ids = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if not item.isdigit():
+                raise ValidationError("La seleccion de secundarios no es valida.")
+            ids.append(int(item))
+        clients = list(Client.objects.filter(pk__in=ids))
+        clients_by_id = {client.pk: client for client in clients}
+        if len(clients_by_id) != len(set(ids)):
+            raise ValidationError("Todos los clientes secundarios deben existir.")
+        ordered = []
+        seen = set()
+        for client_id in ids:
+            if client_id in seen:
+                raise ValidationError("No puede seleccionar el mismo cliente secundario mas de una vez.")
+            seen.add(client_id)
+            ordered.append(clients_by_id[client_id])
+        return ordered
+
+    def clean(self):
+        cleaned = super().clean()
+        unit = cleaned.get("property_unit")
+        project = cleaned.get("project")
+        grouping_type = cleaned.get("grouping_type")
+        group = cleaned.get("structural_group")
+        primary = cleaned.get("primary_client_id")
+        secondaries = cleaned.get("secondary_client_ids") or []
+        if unit and project and unit.project_id != project.pk:
+            self.add_error("property_unit", "La unidad no pertenece al proyecto seleccionado.")
+        if unit and group and unit.structural_group_id != group.pk:
+            self.add_error("property_unit", "La unidad no pertenece a la agrupacion seleccionada.")
+        if unit and grouping_type and unit.structural_group_id and unit.structural_group.grouping_type_id != grouping_type.pk:
+            self.add_error("property_unit", "La unidad no corresponde al tipo de agrupacion indicado.")
+        if unit and not unit_can_receive_new_assignment(unit):
+            self.add_error("property_unit", "La unidad seleccionada no esta disponible para un nuevo encargo activo.")
+        if primary and primary in secondaries:
+            self.add_error("secondary_client_ids", "El cliente principal no puede repetirse como secundario.")
+        has_any_date = any(
+            cleaned.get(field)
+            for field in (
+                "adhesion_contract_date",
+                "promise_date",
+                "promised_delivery_date",
+                "actual_delivery_date",
+            )
+        )
+        if not has_any_date and not cleaned.get("confirm_without_dates"):
+            self.requires_date_confirmation = True
+            self.add_error(None, "No has colocado ninguna fecha. ¿Aun asi quieres guardar?")
+        return cleaned
+
+
+class AddSecondaryAssignmentHolderForm(forms.Form):
+    client_id = forms.IntegerField(widget=forms.HiddenInput())
+
+    def __init__(self, *args, assignment=None, **kwargs):
+        self.assignment = assignment
+        super().__init__(*args, **kwargs)
+
+    def clean_client_id(self):
+        client_id = self.cleaned_data.get("client_id")
+        client = Client.objects.filter(pk=client_id).first()
+        if not client:
+            raise ValidationError("Seleccione un cliente secundario valido.")
+        return client
+
+    def clean(self):
+        cleaned = super().clean()
+        client = cleaned.get("client_id")
+        if not self.assignment or not client:
+            return cleaned
+        if self.assignment.holders.filter(client=client, is_active=True).exists():
+            self.add_error("client_id", "El cliente ya esta asociado como titular vigente de este encargo.")
+        if self.assignment.holders.filter(client=client, is_active=True, is_primary=True).exists():
+            self.add_error("client_id", "El titular principal no puede agregarse como secundario.")
+        active_primary = UnitOwnership.objects.filter(
+            property_unit=self.assignment.property_unit,
+            client=client,
+            is_active=True,
+            is_primary=True,
+            end_date__isnull=True,
+        ).exists()
+        if active_primary:
+            self.add_error("client_id", "Un titular principal vigente no puede agregarse como secundario.")
+        return cleaned
+
+
+class ExportHistoricalWorkbookForm(forms.Form):
+    project = forms.ModelChoiceField(
+        label="Proyecto",
+        queryset=Project.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["project"].queryset = Project.objects.order_by("name")
+
+
+class ExportDocumentFilterForm(forms.Form):
+    file_type = forms.ChoiceField(
+        label="Tipo",
+        required=False,
+        choices=[
+            ("", "Todos"),
+            (ImportedFile.FileType.HISTORICAL, "Libros historicos"),
+            (ImportedFile.FileType.REPORT, "Reportes fiduciarios"),
+        ],
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    filename = forms.CharField(
+        label="Nombre del archivo",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "form-control", "placeholder": "KSMP"}),
+    )
+    date_from = forms.DateField(
+        label="Desde",
+        required=False,
+        widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+    )
+    date_to = forms.DateField(
+        label="Hasta",
+        required=False,
+        widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+    )
+
+    def clean_filename(self):
+        return (self.cleaned_data.get("filename") or "").strip()
 
 
 class ClientForm(forms.ModelForm):
@@ -155,6 +494,10 @@ class ClientForm(forms.ModelForm):
         cleaned = super().clean()
         cleaned["information_status"] = Client.InformationStatus.COMPLETE
         cleaned["source_origin"] = Client.SourceOrigin.MANUAL
+        if not (cleaned.get("first_names") or "").strip():
+            self.add_error("first_names", "Registre el nombre del cliente.")
+        if not (cleaned.get("last_names_or_company") or "").strip():
+            self.add_error("last_names_or_company", "Registre el apellido del cliente.")
         if cleaned.get("document_type") == Client.DocumentType.UNKNOWN:
             self.add_error("document_type", "Seleccione un tipo de documento valido.")
         if not (cleaned.get("document_number") or "").strip():
@@ -171,6 +514,8 @@ class ClientForm(forms.ModelForm):
             choice for choice in Client.DocumentType.choices if choice[0] != Client.DocumentType.UNKNOWN
         ]
         self.fields["document_number"].required = True
+        self.fields["first_names"].required = True
+        self.fields["last_names_or_company"].required = True
 
     def save(self, commit=True):
         instance = super().save(commit=False)
@@ -199,6 +544,24 @@ class StatusReasonForm(forms.Form):
 
 
 class UnitOwnershipForm(ChangeReasonMixin, forms.ModelForm):
+    project = forms.ModelChoiceField(
+        label="Proyecto",
+        required=False,
+        queryset=Project.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "project"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}),
+    )
+    structural_group = forms.ModelChoiceField(
+        label="Agrupacion",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}),
+    )
     novelty_type = forms.ChoiceField(
         label="Tipo de novedad",
         choices=[
@@ -232,10 +595,10 @@ class UnitOwnershipForm(ChangeReasonMixin, forms.ModelForm):
 
     class Meta:
         model = UnitOwnership
-        fields = ("client", "property_unit", "start_date")
+        fields = ("client", "project", "grouping_type", "structural_group", "property_unit", "start_date")
         widgets = {
             "client": forms.Select(attrs={"class": "form-select"}),
-            "property_unit": forms.Select(attrs={"class": "form-select"}),
+            "property_unit": forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}),
             "start_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
         }
 
@@ -246,9 +609,10 @@ class UnitOwnershipForm(ChangeReasonMixin, forms.ModelForm):
             self.fields["client"].queryset = Client.objects.filter(is_active=True, pk=client_id)
         else:
             self.fields["client"].queryset = Client.objects.none()
-        self.fields["property_unit"].queryset = PropertyUnit.objects.filter(is_active=True).order_by(
-            "project__name", "name", "code"
-        )
+        initial_unit = None
+        if self.instance.pk:
+            initial_unit = self.instance.property_unit
+        configure_unit_hierarchy_fields(self, active_only=True, initial_unit=initial_unit)
         self.fields["secondary_clients"].queryset = Client.objects.filter(is_active=True).order_by(
             "last_names_or_company", "first_names"
         )
@@ -274,6 +638,16 @@ class UnitOwnershipForm(ChangeReasonMixin, forms.ModelForm):
                 duplicate = duplicate.exclude(pk=self.instance.pk)
             if duplicate.exists():
                 self.add_error("client", "El cliente ya tiene una titularidad vigente sobre esta unidad.")
+        if unit:
+            project = cleaned.get("project")
+            grouping_type = cleaned.get("grouping_type")
+            structural_group = cleaned.get("structural_group")
+            if project and unit.project_id != project.pk:
+                self.add_error("property_unit", "La unidad no pertenece al proyecto seleccionado.")
+            if structural_group and unit.structural_group_id != structural_group.pk:
+                self.add_error("property_unit", "La unidad no pertenece a la agrupacion seleccionada.")
+            if grouping_type and unit.structural_group_id and unit.structural_group.grouping_type_id != grouping_type.pk:
+                self.add_error("property_unit", "La unidad no corresponde al tipo de agrupacion seleccionado.")
         if len({client.pk for client in secondary_clients}) != len(secondary_clients):
             self.add_error("secondary_clients", "No puede seleccionar el mismo cliente secundario mas de una vez.")
         return cleaned
@@ -342,20 +716,14 @@ class AssignmentFilterForm(forms.Form):
         project_id = self.data.get("project") if self.is_bound else None
         grouping_type_id = self.data.get("grouping_type") if self.is_bound else None
         group_id = self.data.get("structural_group") if self.is_bound else None
-        self.fields["project"].queryset = Project.objects.order_by("name")
-        self.fields["grouping_type"].queryset = GroupingType.objects.order_by("name")
-        groups = StructuralGroup.objects.order_by("project__name", "name", "code")
-        units = PropertyUnit.objects.order_by("project__name", "name", "code")
-        if project_id:
-            groups = groups.filter(project_id=project_id)
-            units = units.filter(project_id=project_id)
-        if grouping_type_id:
-            groups = groups.filter(grouping_type_id=grouping_type_id)
-            units = units.filter(structural_group__grouping_type_id=grouping_type_id)
-        if group_id:
-            units = units.filter(structural_group_id=group_id)
-        self.fields["structural_group"].queryset = groups
-        self.fields["property_unit"].queryset = units
+        for field_name, role in (
+            ("project", "project"),
+            ("grouping_type", "grouping-type"),
+            ("structural_group", "structural-group"),
+            ("property_unit", "property-unit"),
+        ):
+            self.fields[field_name].widget.attrs["data-unit-hierarchy-field"] = role
+        configure_unit_hierarchy_fields(self)
         self.fields["client"].queryset = Client.objects.order_by("last_names_or_company", "first_names")
 
     def clean_q(self):
@@ -367,13 +735,25 @@ class ObservationFilterForm(forms.Form):
         label="Proyecto",
         required=False,
         queryset=Project.objects.none(),
-        widget=forms.Select(attrs={"class": "form-select"}),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "project"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}),
+    )
+    structural_group = forms.ModelChoiceField(
+        label="Agrupacion",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}),
     )
     property_unit = forms.ModelChoiceField(
         label="Unidad",
         required=False,
         queryset=PropertyUnit.objects.none(),
-        widget=forms.Select(attrs={"class": "form-select"}),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}),
     )
     client = forms.ModelChoiceField(
         label="Cliente",
@@ -402,12 +782,7 @@ class ObservationFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        project_id = self.data.get("project") if self.is_bound else None
-        self.fields["project"].queryset = Project.objects.order_by("name")
-        units = PropertyUnit.objects.select_related("project").order_by("project__name", "name", "code")
-        if project_id:
-            units = units.filter(project_id=project_id)
-        self.fields["property_unit"].queryset = units
+        configure_unit_hierarchy_fields(self)
         self.fields["client"].queryset = Client.objects.order_by("last_names_or_company", "first_names", "document_number")
 
     def clean_document(self):
@@ -418,25 +793,45 @@ class ObservationFilterForm(forms.Form):
 
 
 class ObservationForm(forms.ModelForm):
+    change_reason = forms.CharField(
+        label="Motivo",
+        required=False,
+        widget=forms.Textarea(attrs={"class": "form-control", "rows": 3}),
+    )
     project = forms.ModelChoiceField(
         label="Proyecto",
         queryset=Project.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "project"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}),
+    )
+    structural_group = forms.ModelChoiceField(
+        label="Agrupacion",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}),
+    )
+    assignment = AssignmentChoiceField(
+        label="Encargo relacionado",
+        queryset=FiduciaryAssignment.objects.none(),
         widget=forms.Select(attrs={"class": "form-select"}),
     )
 
     class Meta:
         model = ImportedHistoricalObservation
-        fields = ("project", "property_unit", "client", "assignment", "summary", "detail")
+        fields = ("project", "grouping_type", "structural_group", "property_unit", "assignment", "summary", "detail")
         widgets = {
-            "property_unit": forms.Select(attrs={"class": "form-select"}),
-            "client": forms.Select(attrs={"class": "form-select"}),
+            "property_unit": forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}),
             "assignment": forms.Select(attrs={"class": "form-select"}),
             "summary": forms.TextInput(attrs={"class": "form-control"}),
             "detail": forms.Textarea(attrs={"class": "form-control", "rows": 4}),
         }
         labels = {
             "property_unit": "Unidad",
-            "client": "Cliente relacionado",
             "assignment": "Encargo relacionado",
             "summary": "Resumen",
             "detail": "Detalle",
@@ -444,35 +839,27 @@ class ObservationForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         self.user = kwargs.pop("user", None)
+        self.require_change_reason = kwargs.pop("require_change_reason", False)
         super().__init__(*args, **kwargs)
         data = self.data if self.is_bound else None
-        project_id = data.get("project") if data else getattr(self.instance.property_unit, "project_id", None)
+        initial_unit = self.instance.property_unit if self.instance.pk else None
+        project_id = data.get("project") if data else getattr(initial_unit, "project_id", None)
         unit_id = data.get("property_unit") if data else self.instance.property_unit_id
-        self.fields["project"].queryset = Project.objects.filter(is_active=True).order_by("name")
-        units = PropertyUnit.objects.filter(is_active=True).select_related("project").order_by("project__name", "name", "code")
-        if project_id:
-            units = units.filter(project_id=project_id)
-        self.fields["property_unit"].queryset = units
-        self.fields["client"].required = False
-        self.fields["assignment"].required = False
-        self.fields["client"].queryset = Client.objects.none()
+        configure_unit_hierarchy_fields(self, active_only=True, initial_unit=initial_unit)
         self.fields["assignment"].queryset = FiduciaryAssignment.objects.none()
         if unit_id:
-            self.fields["client"].queryset = (
-                Client.objects.filter(
-                    Q(unit_ownerships__property_unit_id=unit_id)
-                    | Q(fiduciary_assignment_holders__assignment__property_unit_id=unit_id)
-                    | Q(historical_observations__property_unit_id=unit_id)
-                )
-                .distinct()
-                .order_by("last_names_or_company", "first_names", "document_number")
-            )
-            self.fields["assignment"].queryset = FiduciaryAssignment.objects.filter(property_unit_id=unit_id).order_by(
-                "-is_active", "assignment_number"
+            self.fields["assignment"].queryset = (
+                FiduciaryAssignment.objects.filter(property_unit_id=unit_id)
+                .prefetch_related("holders__client")
+                .order_by("-is_active", "assignment_number")
             )
         if self.instance.pk and self.instance.origin != ImportedHistoricalObservation.Origin.MANUAL:
             for field in self.fields.values():
                 field.disabled = True
+        if not self.require_change_reason:
+            self.fields.pop("change_reason")
+        else:
+            self.fields["change_reason"].required = True
 
     def clean_detail(self):
         return self.cleaned_data["detail"].strip()
@@ -480,22 +867,21 @@ class ObservationForm(forms.ModelForm):
     def clean_summary(self):
         return (self.cleaned_data.get("summary") or "").strip()
 
+    def clean_change_reason(self):
+        reason = (self.cleaned_data.get("change_reason") or "").strip()
+        if self.require_change_reason and not reason:
+            raise ValidationError("Registre el motivo de la modificacion.")
+        return reason
+
     def clean(self):
         cleaned = super().clean()
         project = cleaned.get("project")
         unit = cleaned.get("property_unit")
-        client = cleaned.get("client")
         assignment = cleaned.get("assignment")
         if unit and project and unit.project_id != project.pk:
             self.add_error("property_unit", "La unidad no pertenece al proyecto seleccionado.")
         if assignment and unit and assignment.property_unit_id != unit.pk:
             self.add_error("assignment", "El encargo no pertenece a la unidad seleccionada.")
-        if client and unit:
-            related = UnitOwnership.objects.filter(client=client, property_unit=unit).exists()
-            related = related or FiduciaryAssignmentHolder.objects.filter(client=client, assignment__property_unit=unit).exists()
-            related = related or ImportedHistoricalObservation.objects.filter(client=client, property_unit=unit).exclude(pk=self.instance.pk).exists()
-            if not related:
-                self.add_error("client", "El cliente no pertenece al historial de la unidad seleccionada.")
         return cleaned
 
     def save(self, commit=True):
@@ -503,6 +889,7 @@ class ObservationForm(forms.ModelForm):
         instance.origin = ImportedHistoricalObservation.Origin.MANUAL
         instance.status = ImportedHistoricalObservation.Status.IMPORTED
         instance.project = instance.property_unit.project
+        instance.client = None
         if self.user and not instance.pk:
             instance.imported_by = self.user
         if self.user and instance.pk:
@@ -517,8 +904,10 @@ class ObservationForm(forms.ModelForm):
 
 
 class NoveltyFilterForm(forms.Form):
-    project = forms.ModelChoiceField(label="Proyecto", required=False, queryset=Project.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
-    property_unit = forms.ModelChoiceField(label="Unidad", required=False, queryset=PropertyUnit.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
+    project = forms.ModelChoiceField(label="Proyecto", required=False, queryset=Project.objects.none(), widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "project"}))
+    grouping_type = forms.ModelChoiceField(label="Tipo de agrupacion", required=False, queryset=GroupingType.objects.none(), widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}))
+    structural_group = forms.ModelChoiceField(label="Agrupacion", required=False, queryset=StructuralGroup.objects.none(), widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}))
+    property_unit = forms.ModelChoiceField(label="Unidad", required=False, queryset=PropertyUnit.objects.none(), widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}))
     novelty_type = forms.ChoiceField(
         label="Tipo",
         required=False,
@@ -539,12 +928,7 @@ class NoveltyFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        project_id = self.data.get("project") if self.is_bound else None
-        self.fields["project"].queryset = Project.objects.order_by("name")
-        units = PropertyUnit.objects.select_related("project").order_by("project__name", "name", "code")
-        if project_id:
-            units = units.filter(project_id=project_id)
-        self.fields["property_unit"].queryset = units
+        configure_unit_hierarchy_fields(self)
         self.fields["client"].queryset = Client.objects.order_by("last_names_or_company", "first_names", "document_number")
 
     def clean_document(self):
@@ -555,10 +939,10 @@ class NoveltyFilterForm(forms.Form):
 
 
 class PaymentFilterForm(forms.Form):
-    project = forms.ModelChoiceField(label="Proyecto", required=False, queryset=Project.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
-    grouping_type = forms.ModelChoiceField(label="Tipo de agrupacion", required=False, queryset=GroupingType.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
-    structural_group = forms.ModelChoiceField(label="Agrupacion", required=False, queryset=StructuralGroup.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
-    property_unit = forms.ModelChoiceField(label="Unidad", required=False, queryset=PropertyUnit.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
+    project = forms.ModelChoiceField(label="Proyecto", required=False, queryset=Project.objects.none(), widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "project"}))
+    grouping_type = forms.ModelChoiceField(label="Tipo de agrupacion", required=False, queryset=GroupingType.objects.none(), widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}))
+    structural_group = forms.ModelChoiceField(label="Agrupacion", required=False, queryset=StructuralGroup.objects.none(), widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}))
+    property_unit = forms.ModelChoiceField(label="Unidad", required=False, queryset=PropertyUnit.objects.none(), widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}))
     client = forms.ModelChoiceField(label="Cliente", required=False, queryset=Client.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
     document = forms.CharField(label="Documento", required=False, widget=forms.TextInput(attrs={"class": "form-control"}))
     assignment_number = forms.CharField(label="Encargo fiduciario", required=False, widget=forms.TextInput(attrs={"class": "form-control"}))
@@ -567,23 +951,7 @@ class PaymentFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        project_id = self.data.get("project") if self.is_bound else None
-        grouping_type_id = self.data.get("grouping_type") if self.is_bound else None
-        structural_group_id = self.data.get("structural_group") if self.is_bound else None
-        self.fields["project"].queryset = Project.objects.order_by("name")
-        self.fields["grouping_type"].queryset = GroupingType.objects.order_by("name")
-        groups = StructuralGroup.objects.select_related("project", "grouping_type").order_by("project__name", "name", "code")
-        units = PropertyUnit.objects.select_related("project", "structural_group").order_by("project__name", "name", "code")
-        if project_id:
-            groups = groups.filter(project_id=project_id)
-            units = units.filter(project_id=project_id)
-        if grouping_type_id:
-            groups = groups.filter(grouping_type_id=grouping_type_id)
-            units = units.filter(structural_group__grouping_type_id=grouping_type_id)
-        if structural_group_id:
-            units = units.filter(structural_group_id=structural_group_id)
-        self.fields["structural_group"].queryset = groups
-        self.fields["property_unit"].queryset = units
+        configure_unit_hierarchy_fields(self)
         self.fields["client"].queryset = Client.objects.order_by("last_names_or_company", "first_names", "document_number")
 
     def has_criteria(self):
@@ -596,6 +964,139 @@ class PaymentFilterForm(forms.Form):
 
     def clean_assignment_number(self):
         return self.cleaned_data.get("assignment_number", "").strip()
+
+
+class ManualPaymentForm(forms.Form):
+    exact_date = forms.DateField(
+        label="Fecha",
+        widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+    )
+    amount = forms.DecimalField(
+        label="Valor",
+        min_value=Decimal("0.01"),
+        max_digits=18,
+        decimal_places=2,
+        widget=forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "min": "0.01"}),
+    )
+    concept = forms.CharField(
+        label="Concepto",
+        max_length=180,
+        widget=forms.TextInput(attrs={"class": "form-control"}),
+    )
+    destination = forms.ChoiceField(
+        label="Recibido por",
+        choices=Payment.Destination.choices,
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    def clean_concept(self):
+        return " ".join((self.cleaned_data.get("concept") or "").split())
+
+
+class GlobalManualPaymentForm(ManualPaymentForm):
+    assignment_number = forms.CharField(
+        label="Numero de encargo fiduciario",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "form-control", "placeholder": "Numero exacto del encargo"}),
+    )
+    project = forms.ModelChoiceField(
+        label="Proyecto",
+        required=False,
+        queryset=Project.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "project"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}),
+    )
+    structural_group = forms.ModelChoiceField(
+        label="Agrupacion",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}),
+    )
+    property_unit = forms.ModelChoiceField(
+        label="Unidad",
+        required=False,
+        queryset=PropertyUnit.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}),
+    )
+
+    field_order = [
+        "assignment_number",
+        "project",
+        "grouping_type",
+        "structural_group",
+        "property_unit",
+        "exact_date",
+        "amount",
+        "concept",
+        "destination",
+    ]
+
+    def __init__(self, *args, **kwargs):
+        self.resolved_assignment = None
+        super().__init__(*args, **kwargs)
+        configure_unit_hierarchy_fields(self, active_only=True)
+        self.order_fields(self.field_order)
+
+    def clean_assignment_number(self):
+        return " ".join((self.cleaned_data.get("assignment_number") or "").split())
+
+    def clean(self):
+        cleaned = super().clean()
+        assignment_number = cleaned.get("assignment_number")
+        unit = cleaned.get("property_unit")
+        project = cleaned.get("project")
+        grouping_type = cleaned.get("grouping_type")
+        group = cleaned.get("structural_group")
+        assignment = None
+
+        if assignment_number:
+            matches = list(FiduciaryAssignment.objects.filter(assignment_number__iexact=assignment_number).order_by("pk")[:2])
+            if not matches:
+                self.add_error("assignment_number", "No existe un encargo fiduciario con ese numero.")
+            elif len(matches) > 1:
+                self.add_error("assignment_number", "El numero de encargo no permite una seleccion inequivoca.")
+            elif not assignment_can_receive_payment(matches[0]):
+                self.add_error(
+                    "assignment_number",
+                    "No se puede registrar el pago porque el encargo no tiene titulares vigentes.",
+                )
+            else:
+                assignment = matches[0]
+
+        if unit and project and unit.project_id != project.pk:
+            self.add_error("property_unit", "La unidad no pertenece al proyecto seleccionado.")
+        if unit and group and unit.structural_group_id != group.pk:
+            self.add_error("property_unit", "La unidad no pertenece a la agrupacion seleccionada.")
+        if unit and grouping_type and unit.structural_group_id and unit.structural_group.grouping_type_id != grouping_type.pk:
+            self.add_error("property_unit", "La unidad no corresponde al tipo de agrupacion indicado.")
+        if unit:
+            active_assignments = list(
+                FiduciaryAssignment.objects.filter(property_unit=unit, is_active=True).order_by("-start_date", "-pk")
+            )
+            payable_assignments = [item for item in active_assignments if assignment_can_receive_payment(item)]
+            if not payable_assignments:
+                self.add_error(
+                    "property_unit",
+                    "La unidad seleccionada no tiene un encargo fiduciario activo con titulares vigentes.",
+                )
+            elif len(payable_assignments) > 1:
+                self.add_error("property_unit", "La unidad seleccionada tiene mas de un encargo activo.")
+            elif assignment and assignment.pk != payable_assignments[0].pk:
+                self.add_error("property_unit", "La unidad seleccionada no corresponde al encargo indicado.")
+            else:
+                assignment = payable_assignments[0]
+
+        if not assignment_number and not unit:
+            raise ValidationError("Busque el encargo por numero o seleccione una unidad.")
+        if assignment:
+            self.resolved_assignment = assignment
+            cleaned["assignment"] = assignment
+        return cleaned
 
 
 class AuditFilterForm(forms.Form):
@@ -619,11 +1120,56 @@ class AuditFilterForm(forms.Form):
 
 
 class OperationalNoveltyForm(forms.ModelForm):
+    MANUAL_NOVELTY_TYPE_CHOICES = NOVELTY_TYPE_CHOICES + [(MANUAL_INCLUSION_TYPE, "Inclusion")]
+    PRINCIPAL_ALLOWED_TYPES = {
+        OperationalNovelty.NoveltyType.CESSION,
+        OperationalNovelty.NoveltyType.WITHDRAWAL,
+        OperationalNovelty.NoveltyType.SUBSTITUTION,
+        OperationalNovelty.NoveltyType.ADMINISTRATIVE_CORRECTION,
+        OperationalNovelty.NoveltyType.OTHER,
+        MANUAL_INCLUSION_TYPE,
+    }
+    SECONDARY_ALLOWED_TYPES = {
+        OperationalNovelty.NoveltyType.EXCLUSION,
+        OperationalNovelty.NoveltyType.WITHDRAWAL,
+        OperationalNovelty.NoveltyType.SUBSTITUTION,
+        OperationalNovelty.NoveltyType.ADMINISTRATIVE_CORRECTION,
+        OperationalNovelty.NoveltyType.OTHER,
+    }
     project = forms.ModelChoiceField(label="Proyecto", queryset=Project.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}),
+    )
+    structural_group = forms.ModelChoiceField(
+        label="Agrupacion",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}),
+    )
     new_assignment_number = forms.CharField(
         label="Nuevo numero de encargo",
         required=False,
         widget=forms.TextInput(attrs={"class": "form-control"}),
+    )
+    current_assignment = AssignmentChoiceField(
+        label="Encargo actual",
+        required=False,
+        queryset=FiduciaryAssignment.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    current_client = forms.ModelChoiceField(
+        label="Cliente de la novedad",
+        required=False,
+        queryset=Client.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    novelty_type = forms.ChoiceField(
+        label="Tipo de novedad",
+        choices=MANUAL_NOVELTY_TYPE_CHOICES,
+        widget=forms.Select(attrs={"class": "form-select", "data-novelty-type": "true"}),
     )
     secondary_clients = forms.ModelMultipleChoiceField(
         label="Clientes secundarios asociados",
@@ -636,7 +1182,11 @@ class OperationalNoveltyForm(forms.ModelForm):
         model = OperationalNovelty
         fields = (
             "project",
+            "grouping_type",
+            "structural_group",
             "property_unit",
+            "current_assignment",
+            "current_client",
             "novelty_type",
             "other_type",
             "effective_date",
@@ -645,7 +1195,7 @@ class OperationalNoveltyForm(forms.ModelForm):
             "detail",
         )
         widgets = {
-            "property_unit": forms.Select(attrs={"class": "form-select"}),
+            "property_unit": forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}),
             "novelty_type": forms.Select(attrs={"class": "form-select", "data-novelty-type": "true"}),
             "other_type": forms.TextInput(attrs={"class": "form-control", "data-other-type": "true"}),
             "effective_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
@@ -667,16 +1217,66 @@ class OperationalNoveltyForm(forms.ModelForm):
         self.user = kwargs.pop("user", None)
         super().__init__(*args, **kwargs)
         data = self.data if self.is_bound else None
-        project_id = data.get("project") if data else None
-        unit_id = data.get("property_unit") if data else None
-        self.fields["project"].queryset = Project.objects.filter(is_active=True).order_by("name")
-        units = PropertyUnit.objects.filter(is_active=True).order_by("project__name", "name", "code")
-        if project_id:
-            units = units.filter(project_id=project_id)
-        self.fields["property_unit"].queryset = units
+        unit_id = data.get("property_unit") if data else self.initial.get("property_unit")
+        self.fields["project"].widget.attrs["data-unit-hierarchy-field"] = "project"
+        configure_unit_hierarchy_fields(self, active_only=True)
+        self.fields["novelty_type"].choices = self.MANUAL_NOVELTY_TYPE_CHOICES
         self.fields["new_client"].required = False
-        self.fields["new_client"].queryset = Client.objects.filter(is_active=True).order_by("last_names_or_company", "first_names")
-        self.fields["secondary_clients"].queryset = Client.objects.filter(is_active=True).order_by("last_names_or_company", "first_names")
+        selected_new_client = data.get("new_client") if data else self.initial.get("new_client")
+        selected_assignment = data.get("current_assignment") if data else self.initial.get("current_assignment")
+        selected_current_client = data.get("current_client") if data else self.initial.get("current_client")
+        if data and hasattr(data, "getlist"):
+            selected_secondary_clients = data.getlist("secondary_clients")
+        elif data:
+            raw_secondary = data.get("secondary_clients", [])
+            selected_secondary_clients = raw_secondary if isinstance(raw_secondary, (list, tuple)) else [raw_secondary]
+        else:
+            selected_secondary_clients = self.initial.get("secondary_clients", [])
+        self.fields["new_client"].queryset = (
+            Client.objects.filter(is_active=True, pk=selected_new_client).order_by("last_names_or_company", "first_names")
+            if selected_new_client
+            else Client.objects.none()
+        )
+        self.fields["secondary_clients"].queryset = (
+            Client.objects.filter(is_active=True, pk__in=selected_secondary_clients).order_by("last_names_or_company", "first_names")
+            if selected_secondary_clients
+            else Client.objects.none()
+        )
+        if unit_id:
+            assignments = FiduciaryAssignment.objects.filter(property_unit_id=unit_id, is_active=True).prefetch_related("holders__client")
+            self.fields["current_assignment"].queryset = assignments.order_by("-start_date", "-pk")
+        if selected_assignment:
+            current_client_filter = Q(
+                fiduciary_assignment_holders__assignment_id=selected_assignment,
+                fiduciary_assignment_holders__is_active=True,
+            )
+            if str(selected_current_client or "").isdigit():
+                current_client_filter |= Q(pk=selected_current_client)
+            current_clients = Client.objects.filter(current_client_filter, is_active=True).distinct().order_by(
+                "last_names_or_company", "first_names"
+            )
+            self.fields["current_client"].queryset = current_clients
+        elif selected_current_client:
+            self.fields["current_client"].queryset = Client.objects.filter(pk=selected_current_client)
+
+    def clean_detail(self):
+        detail = (self.cleaned_data.get("detail") or "").strip()
+        if not detail:
+            raise ValidationError("Registre el detalle de la novedad.")
+        return detail
+
+    def _post_clean(self):
+        requested_type = getattr(self, "cleaned_data", {}).get("novelty_type")
+        if requested_type == MANUAL_INCLUSION_TYPE:
+            self.cleaned_data["novelty_type"] = OperationalNovelty.NoveltyType.OTHER
+            self.cleaned_data["other_type"] = "INCLUSION"
+            super()._post_clean()
+            self.cleaned_data["novelty_type"] = MANUAL_INCLUSION_TYPE
+            self.cleaned_data["other_type"] = "INCLUSION"
+            self.instance.novelty_type = OperationalNovelty.NoveltyType.OTHER
+            self.instance.other_type = "INCLUSION"
+            return
+        super()._post_clean()
 
     def clean(self):
         cleaned = super().clean()
@@ -689,14 +1289,42 @@ class OperationalNoveltyForm(forms.ModelForm):
         new_assignment = (cleaned.get("new_assignment_number") or "").strip()
         cleaned["new_assignment_number"] = new_assignment
         secondary_clients = list(cleaned.get("secondary_clients") or [])
+        current_assignment = cleaned.get("current_assignment")
+        current_client = cleaned.get("current_client")
         if unit and project and unit.project_id != project.pk:
             self.add_error("property_unit", "La unidad no pertenece al proyecto seleccionado.")
+        if not current_assignment:
+            self.add_error("current_assignment", "Seleccione el encargo fiduciario.")
+        elif unit and current_assignment.property_unit_id != unit.pk:
+            self.add_error("current_assignment", "El encargo no pertenece a la unidad seleccionada.")
+        current_holder = None
+        if current_assignment and current_client:
+            current_holder = current_assignment.holders.filter(client=current_client, is_active=True).first()
+            if not current_holder:
+                self.add_error("current_client", "El cliente seleccionado no pertenece al encargo actual.")
+
+        if not current_client:
+            self.add_error("current_client", "Seleccione el cliente de la novedad.")
+        elif current_holder is None and unit and not has_active_unit_ownership(current_client, unit):
+            self.add_error("current_client", "El cliente no es titular vigente de la unidad seleccionada.")
+        if novelty_type == OperationalNovelty.NoveltyType.HISTORICAL:
+            self.add_error("novelty_type", "Importacion historica no es una novedad manual.")
+        if current_holder:
+            if novelty_type == OperationalNovelty.NoveltyType.CESSION and not current_holder.is_primary:
+                self.add_error("novelty_type", "La cesion solo esta permitida para el titular principal del encargo.")
+            elif novelty_type == OperationalNovelty.NoveltyType.EXCLUSION and current_holder.is_primary:
+                self.add_error("novelty_type", "La exclusion solo esta permitida para clientes secundarios.")
+            if current_holder.is_primary and novelty_type not in self.PRINCIPAL_ALLOWED_TYPES:
+                self.add_error("novelty_type", "El tipo seleccionado no esta permitido para el titular principal.")
+            if not current_holder.is_primary and novelty_type not in self.SECONDARY_ALLOWED_TYPES:
+                self.add_error("novelty_type", "El tipo seleccionado no esta permitido para un cliente secundario.")
         if novelty_type in {
             OperationalNovelty.NoveltyType.CESSION,
             OperationalNovelty.NoveltyType.WITHDRAWAL,
             OperationalNovelty.NoveltyType.EXCLUSION,
             OperationalNovelty.NoveltyType.SUBSTITUTION,
             OperationalNovelty.NoveltyType.ADMINISTRATIVE_CORRECTION,
+            MANUAL_INCLUSION_TYPE,
         } and not cleaned.get("effective_date"):
             self.add_error("effective_date", "Indique la fecha efectiva de la novedad.")
         if novelty_type == OperationalNovelty.NoveltyType.OTHER and not other_type:
@@ -705,11 +1333,34 @@ class OperationalNoveltyForm(forms.ModelForm):
             if not new_client:
                 self.add_error("new_client", "Seleccione el nuevo titular principal.")
             if not new_assignment:
-                self.add_error("new_assignment", "Registre el nuevo numero de encargo.")
+                self.add_error("new_assignment_number", "Registre el nuevo numero de encargo.")
+            if new_client and current_client and new_client.pk == current_client.pk:
+                self.add_error("new_client", "El nuevo titular debe ser diferente al titular actual.")
+        if novelty_type == MANUAL_INCLUSION_TYPE:
+            primary_holder = (
+                current_assignment.holders.filter(is_active=True, is_primary=True).select_related("client").first()
+                if current_assignment
+                else None
+            )
+            if not primary_holder:
+                self.add_error("current_assignment", "El encargo no tiene titular principal vigente.")
+            if not secondary_clients:
+                self.add_error("secondary_clients", "Seleccione el nuevo cliente secundario.")
+            for secondary_client in secondary_clients:
+                if primary_holder and secondary_client.pk == primary_holder.client_id:
+                    self.add_error("secondary_clients", "El titular principal no puede agregarse como secundario.")
+                    break
+                if current_assignment and current_assignment.holders.filter(client=secondary_client, is_active=True).exists():
+                    self.add_error("secondary_clients", "El cliente ya esta asociado como titular vigente de este encargo.")
+                    break
         if new_client and new_client in secondary_clients:
             self.add_error("secondary_clients", "El titular principal no debe repetirse como secundario.")
+        if current_client and current_client in secondary_clients:
+            self.add_error("secondary_clients", "El titular actual no debe repetirse como secundario.")
+        if len({client.pk for client in secondary_clients}) != len(secondary_clients):
+            self.add_error("secondary_clients", "No puede seleccionar el mismo cliente secundario mas de una vez.")
         if new_assignment and FiduciaryAssignment.objects.filter(assignment_number=new_assignment).exists():
-            self.add_error("new_assignment", "Ya existe un encargo fiduciario con ese numero.")
+            self.add_error("new_assignment_number", "Ya existe un encargo fiduciario con ese numero.")
         return cleaned
 
 
@@ -811,7 +1462,8 @@ class FiduciaryAssignmentForm(ChangeReasonMixin, forms.ModelForm):
             self.fields["property_unit"].widget.attrs["disabled"] = "disabled"
         if not unit_id:
             self.fields["primary_client"].widget.attrs["disabled"] = "disabled"
-        self.fields["property_unit"].queryset = units.order_by("project__name", "name", "code")
+        self.fields["property_unit"].queryset = with_natural_unit_order(units)
+        use_property_unit_choice_labels(self.fields["property_unit"])
         self.fields["primary_client"].queryset = eligible_assignment_clients(unit_id)
 
     def clean(self):
@@ -921,24 +1573,18 @@ def validate_assignment_holder_formset(formset, unit, primary_client):
 class FiduciaryAssignmentUpdateForm(ChangeReasonMixin, forms.ModelForm):
     class Meta:
         model = FiduciaryAssignment
-        fields = ("assignment_number", "property_unit", "start_date", "observations", "is_active")
+        fields = (
+            "adhesion_contract_date",
+            "promise_date",
+            "promised_delivery_date",
+            "actual_delivery_date",
+        )
         widgets = {
-            "assignment_number": forms.TextInput(attrs={"class": "form-control"}),
-            "property_unit": forms.Select(attrs={"class": "form-select"}),
-            "start_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
-            "observations": forms.Textarea(attrs={"class": "form-control", "rows": 3}),
-            "is_active": forms.CheckboxInput(attrs={"class": "form-check-input"}),
+            "adhesion_contract_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+            "promise_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+            "promised_delivery_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+            "actual_delivery_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
         }
-
-    def clean(self):
-        cleaned = super().clean()
-        unit = cleaned.get("property_unit")
-        if unit and cleaned.get("is_active"):
-            try:
-                validate_active_assignment_available(unit=unit, current_instance=self.instance)
-            except ValidationError as exc:
-                self.add_error("property_unit", exc.message_dict.get("property_unit", exc.messages)[0])
-        return cleaned
 
     def save(self, commit=True):
         instance = super().save(commit=False)
@@ -947,6 +1593,17 @@ class FiduciaryAssignmentUpdateForm(ChangeReasonMixin, forms.ModelForm):
             instance.save()
             self.save_m2m()
         return instance
+
+
+class AssignmentFinancialEntityForm(forms.Form):
+    financial_entity = forms.CharField(
+        label="Entidad financiera",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "form-control", "placeholder": "BANCO CAJA SOCIAL"}),
+    )
+
+    def clean_financial_entity(self):
+        return " ".join((self.cleaned_data.get("financial_entity") or "").split())
 
 
 class OwnershipFinalizeForm(forms.Form):
@@ -1174,9 +1831,10 @@ class ImportResolutionForm(forms.ModelForm):
         self.fields["target_structural_group"].queryset = StructuralGroup.objects.select_related(
             "project", "grouping_type"
         ).order_by("project__name", "name", "code")
-        self.fields["target_property_unit"].queryset = PropertyUnit.objects.select_related(
-            "project", "structural_group"
-        ).order_by("project__name", "structural_group__name", "name", "code")
+        self.fields["target_property_unit"].queryset = with_natural_unit_order(
+            PropertyUnit.objects.select_related("project", "structural_group")
+        )
+        use_property_unit_choice_labels(self.fields["target_property_unit"])
         self.fields["parent_project"].queryset = Project.objects.order_by("name", "code")
         self.fields["parent_grouping_type"].queryset = GroupingType.objects.order_by("name", "code")
         self.fields["parent_structural_group"].queryset = StructuralGroup.objects.select_related(
@@ -1252,8 +1910,24 @@ class StructuralGroupResolutionForm(forms.Form):
     )
     grouping_type = forms.ModelChoiceField(
         label="Tipo de agrupacion",
+        required=False,
         queryset=GroupingType.objects.none(),
         widget=forms.Select(attrs={"class": "form-select", "data-structural-resolution": "grouping-type"}),
+    )
+    create_grouping_type = forms.BooleanField(
+        label="Crear tipo de agrupacion",
+        required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input", "data-structural-resolution": "create-grouping-type"}),
+    )
+    new_grouping_type_code = forms.CharField(
+        label="Codigo del tipo",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "form-control", "placeholder": "ED"}),
+    )
+    new_grouping_type_name = forms.CharField(
+        label="Nombre del tipo",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "form-control", "placeholder": "Edificacion"}),
     )
     existing_group = forms.ModelChoiceField(
         label="Agrupacion existente",
@@ -1300,8 +1974,20 @@ class StructuralGroupResolutionForm(forms.Form):
         action = cleaned.get("action")
         project = cleaned.get("project")
         grouping_type = cleaned.get("grouping_type")
+        create_grouping_type = cleaned.get("create_grouping_type")
+        new_grouping_type_code = (cleaned.get("new_grouping_type_code") or "").strip()
+        new_grouping_type_name = (cleaned.get("new_grouping_type_name") or "").strip()
         existing_group = cleaned.get("existing_group")
         new_group_name = cleaned.get("new_group_name")
+        if create_grouping_type:
+            if not new_grouping_type_code:
+                self.add_error("new_grouping_type_code", "Registre el codigo del tipo.")
+            if not new_grouping_type_name:
+                self.add_error("new_grouping_type_name", "Registre el nombre del tipo.")
+            if action == ImportResolution.Action.ASSOCIATE_EXISTING:
+                self.add_error("action", "Para crear un tipo nuevo debe crear tambien la agrupacion detectada.")
+        elif not grouping_type:
+            self.add_error("grouping_type", "Seleccione el tipo de agrupacion.")
         if action == ImportResolution.Action.ASSOCIATE_EXISTING:
             if not existing_group:
                 self.add_error("existing_group", "Seleccione la agrupacion existente.")
@@ -1331,9 +2017,23 @@ class DailyReportUploadForm(forms.Form):
 
 
 class DailyReportAssignmentResolutionForm(forms.ModelForm):
+    payment_destination = forms.ChoiceField(
+        label="Recibido por",
+        required=False,
+        choices=[(Payment.Destination.FIDUCIARIA, Payment.Destination.FIDUCIARIA.label)],
+        initial=Payment.Destination.FIDUCIARIA,
+        disabled=True,
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    financial_entity = forms.CharField(
+        label="Entidad financiera",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "form-control"}),
+    )
+
     class Meta:
         model = DailyReportRow
-        fields = ("assignment", "resolution_note")
+        fields = ("assignment", "payment_destination", "resolution_note")
         widgets = {
             "assignment": forms.Select(attrs={"class": "form-select"}),
             "resolution_note": forms.Textarea(attrs={"class": "form-control", "rows": 3}),
@@ -1349,6 +2049,15 @@ class DailyReportAssignmentResolutionForm(forms.ModelForm):
             "property_unit", "property_unit__project"
         ).order_by("assignment_number")
         self.fields["assignment"].required = False
+        assignment = self.instance.assignment if self.instance and self.instance.assignment_id else None
+        if assignment and not self.is_bound:
+            self.fields["financial_entity"].initial = assignment.property_unit.financial_entity or ""
+
+    def clean_payment_destination(self):
+        return Payment.Destination.FIDUCIARIA
 
     def clean_resolution_note(self):
         return self.cleaned_data["resolution_note"].strip()
+
+    def clean_financial_entity(self):
+        return " ".join((self.cleaned_data.get("financial_entity") or "").split())

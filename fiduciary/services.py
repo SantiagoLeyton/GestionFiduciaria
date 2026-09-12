@@ -131,14 +131,17 @@ def create_payment(
     source_column=None,
     source_header=None,
     source_had_formula=False,
+    destination=None,
+    historical_date_values=None,
+    historical_receipt_values=None,
 ) -> PaymentCreationResult:
     try:
         normalized_amount = Decimal(str(amount))
     except (InvalidOperation, TypeError, ValueError):
         return PaymentCreationResult(status="invalid", errors=["El valor del pago no es valido."])
 
-    if normalized_amount <= 0:
-        return PaymentCreationResult(status="invalid", errors=["El valor del pago debe ser mayor que cero."])
+    if normalized_amount < 0:
+        return PaymentCreationResult(status="invalid", errors=["El valor del pago no puede ser negativo."])
 
     duplicate_query = Payment.objects.filter(assignment=assignment, amount=normalized_amount)
     if date_precision == Payment.DatePrecision.EXACT:
@@ -148,6 +151,15 @@ def create_payment(
             date_precision=date_precision,
             period_year=period_year,
             period_month=period_month,
+        )
+    elif date_precision == Payment.DatePrecision.AMBIGUOUS:
+        duplicate_query = duplicate_query.filter(
+            date_precision=date_precision,
+            source_file=source_file,
+            source_sheet=source_sheet,
+            source_row=source_row,
+            source_column=source_column,
+            source_header=source_header,
         )
     else:
         return PaymentCreationResult(status="invalid", errors=["La precision de fecha no es valida."])
@@ -163,6 +175,7 @@ def create_payment(
         date_precision=date_precision,
         amount=normalized_amount,
         concept=(concept or "").strip() or None,
+        destination=destination,
         movement_type=movement_type,
         source_file=source_file,
         source_sheet=source_sheet,
@@ -170,6 +183,8 @@ def create_payment(
         source_column=source_column,
         source_header=source_header,
         source_had_formula=source_had_formula,
+        historical_date_values=list(historical_date_values or []),
+        historical_receipt_values=list(historical_receipt_values or []),
     )
 
     try:

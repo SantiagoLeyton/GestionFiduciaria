@@ -12,11 +12,11 @@
       <div class="page-heading">
         <div>
           <h1>{{ title }}</h1>
-          <p>Registre observaciones manuales asociadas a una unidad y, opcionalmente, a cliente o encargo.</p>
+          <p>Registre observaciones manuales asociadas a una unidad y, opcionalmente, a un encargo.</p>
         </div>
         <a class="btn btn-outline-secondary" href="{% url back_url %}">Volver</a>
       </div>
-      <form class="form-panel" method="post" novalidate>
+      <form class="form-panel" method="post" novalidate data-unit-hierarchy>
         {% csrf_token %}
         {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
         <div class="form-grid">
@@ -36,14 +36,13 @@
     </section>
   </main>
 </div>
+{% include "fiduciary/includes/unit_hierarchy_script.html" %}
 <script>
 document.addEventListener("DOMContentLoaded", function () {
   const unit = document.getElementById("id_property_unit");
-  const project = document.getElementById("id_project");
-  const client = document.getElementById("id_client");
   const assignment = document.getElementById("id_assignment");
   const url = "{% url 'fiduciary:observation_context' %}";
-  if (!unit || !client || !assignment) return;
+  if (!unit || !assignment) return;
   function fill(select, rows, emptyLabel) {
     const selected = select.value;
     select.innerHTML = "";
@@ -59,30 +58,19 @@ document.addEventListener("DOMContentLoaded", function () {
       select.appendChild(option);
     });
   }
-  function loadUnits() {
-    if (!project || !project.value) return;
-    fetch(url + "?project=" + encodeURIComponent(project.value), {headers: {"X-Requested-With": "XMLHttpRequest"}})
-      .then(response => response.json())
-      .then(data => {
-        fill(unit, data.units || [], "Seleccione una unidad");
-        loadContext();
-      });
-  }
   function loadContext() {
     if (!unit.value) {
-      fill(client, [], "Sin cliente relacionado");
       fill(assignment, [], "Sin encargo relacionado");
       return;
     }
     fetch(url + "?unit=" + encodeURIComponent(unit.value), {headers: {"X-Requested-With": "XMLHttpRequest"}})
       .then(response => response.json())
       .then(data => {
-        fill(client, data.clients || [], "Sin cliente relacionado");
         fill(assignment, data.assignments || [], "Sin encargo relacionado");
       });
   }
-  if (project) project.addEventListener("change", loadUnits);
   unit.addEventListener("change", loadContext);
+  unit.addEventListener("unit-hierarchy:changed", loadContext);
   loadContext();
 });
 </script>

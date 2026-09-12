@@ -12,7 +12,7 @@
       <div class="page-heading">
         <div>
           <h1>Resolver agrupación</h1>
-          <p>Esta decisión se aplicará a todas las apariciones equivalentes del lote #{{ batch.pk }}.</p>
+          <p>Esta decisión se aplica al pendiente seleccionado y puede proponer patrones seguros dentro del mismo proyecto.</p>
         </div>
         <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_pending' batch.pk %}">Volver</a>
       </div>
@@ -20,9 +20,58 @@
       <section class="context-panel">
         <span><strong>Valor detectado:</strong> {{ element.raw_value }}</span>
         <span><strong>Normalizado:</strong> {{ element.normalized_value|default:"-" }}</span>
-        {% if element.structural_context.project_id %}<span><strong>Proyecto sugerido:</strong> #{{ element.structural_context.project_id }}</span>{% endif %}
-        {% if element.structural_context.grouping_type_id %}<span><strong>Tipo sugerido:</strong> #{{ element.structural_context.grouping_type_id }}</span>{% endif %}
+        {% if suggested_project %}<span><strong>Proyecto sugerido:</strong> {{ suggested_project.name }}</span>{% endif %}
+        <span><strong>Patrón:</strong> {{ pattern_label }}</span>
       </section>
+
+      {% if pattern_elements %}
+        <section class="data-section">
+          <div class="section-header">
+            <h2>Agrupaciones detectadas del patrón {{ pattern_label }}</h2>
+            <span>{{ pattern_elements|length }} agrupación{{ pattern_elements|length|pluralize:"es" }}</span>
+          </div>
+          <p class="text-muted">Seleccione el tipo de agrupación para aplicar esta decisión a los pendientes compatibles del mismo patrón.</p>
+          <div class="table-responsive">
+            <table class="table data-table">
+              <thead><tr><th>Agrupación detectada</th><th>Ocurrencias</th></tr></thead>
+              <tbody>
+                {% for pattern_element in pattern_elements %}
+                  <tr><td>{{ pattern_element.raw_value }}</td><td>{{ pattern_element.occurrence_count }}</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      {% endif %}
+
+      {% if pattern_suggestions %}
+        <section class="data-section">
+          <div class="section-header">
+            <h2>Propuesta por patrón</h2>
+            <span>{{ pattern_count }} pendiente{{ pattern_count|pluralize }} similar{{ pattern_count|pluralize:"es" }}</span>
+          </div>
+          <p class="text-muted">Se detectaron pendientes del mismo proyecto y tipo de agrupación que siguen el mismo patrón.</p>
+          <div class="table-responsive">
+            <table class="table data-table">
+              <thead><tr><th>Pendiente</th><th>Solución propuesta</th></tr></thead>
+              <tbody>
+                {% for suggestion in pattern_suggestions %}
+                  <tr><td>{{ suggestion.element.raw_value }}</td><td>{{ suggestion.target }}</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <form method="post" class="form-actions mt-3">
+            {% csrf_token %}
+            {% for key, value in pending_form_data.items %}
+              <input type="hidden" name="{{ key }}" value="{{ value }}">
+            {% endfor %}
+            <input type="hidden" name="confirm_pattern" value="1">
+            <button class="btn btn-success" type="submit">Aplicar soluciones</button>
+            <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_pending' batch.pk %}">Cancelar</a>
+          </form>
+        </section>
+      {% endif %}
 
       <form class="form-panel" method="post" novalidate data-group-resolution-form data-groups-url="{% url 'fiduciary:historical_import_context_groups' %}">
         {% csrf_token %}
@@ -47,6 +96,21 @@
             <label class="form-label" for="{{ form.grouping_type.id_for_label }}">{{ form.grouping_type.label }}</label>
             {{ form.grouping_type }}
             {{ form.grouping_type.errors }}
+          </div>
+          <div class="form-check align-self-end">
+            {{ form.create_grouping_type }}
+            <label class="form-check-label" for="{{ form.create_grouping_type.id_for_label }}">{{ form.create_grouping_type.label }}</label>
+            {{ form.create_grouping_type.errors }}
+          </div>
+          <div data-new-grouping-type-field>
+            <label class="form-label" for="{{ form.new_grouping_type_code.id_for_label }}">{{ form.new_grouping_type_code.label }}</label>
+            {{ form.new_grouping_type_code }}
+            {{ form.new_grouping_type_code.errors }}
+          </div>
+          <div data-new-grouping-type-field>
+            <label class="form-label" for="{{ form.new_grouping_type_name.id_for_label }}">{{ form.new_grouping_type_name.label }}</label>
+            {{ form.new_grouping_type_name }}
+            {{ form.new_grouping_type_name.errors }}
           </div>
           <div data-existing-group-field>
             <label class="form-label" for="{{ form.existing_group.id_for_label }}">{{ form.existing_group.label }}</label>
@@ -78,15 +142,24 @@
     const action = form.querySelector("[data-structural-resolution='action']");
     const project = form.querySelector("[data-structural-resolution='project']");
     const groupingType = form.querySelector("[data-structural-resolution='grouping-type']");
+    const createGroupingType = form.querySelector("[data-structural-resolution='create-grouping-type']");
     const existingGroup = form.querySelector("[data-structural-resolution='existing-group']");
     const existingField = form.querySelector("[data-existing-group-field]");
     const newField = form.querySelector("[data-new-group-field]");
+    const newGroupingTypeFields = form.querySelectorAll("[data-new-grouping-type-field]");
 
     function syncMode() {
+      const createsType = createGroupingType.checked;
+      if (createsType && action.value === "associate_existing") action.value = "create_new";
       const relate = action.value === "associate_existing";
       existingField.style.display = relate ? "" : "none";
-      existingGroup.disabled = !relate;
+      existingGroup.disabled = !relate || createsType;
       newField.style.display = relate ? "none" : "";
+      groupingType.disabled = createsType;
+      newGroupingTypeFields.forEach((field) => {
+        field.style.display = createsType ? "" : "none";
+        field.querySelectorAll("input").forEach((input) => input.disabled = !createsType);
+      });
     }
 
     async function loadGroups() {
@@ -107,6 +180,7 @@
     }
 
     action.addEventListener("change", syncMode);
+    createGroupingType.addEventListener("change", syncMode);
     project.addEventListener("change", loadGroups);
     groupingType.addEventListener("change", loadGroups);
     syncMode();

@@ -7,6 +7,9 @@ from django.db.migrations.executor import MigrationExecutor
 
 from fiduciary.imports.historical import DuplicateHistoricalImportError, analyze_historical_import
 from fiduciary.imports.historical.analyzer import reserve_historical_import_file
+from fiduciary.imports.historical.data import HistoricalAssignment, HistoricalClient, HistoricalRow, ParseStatistics, SheetData, WorkbookData
+from fiduciary.imports.historical.resolutions import reanalyze_pending_resolutions, update_batch_resolution_state
+from fiduciary.imports.historical.normalize import normalize_text
 from fiduciary.models import (
     Client,
     DetectedStructureElement,
@@ -24,6 +27,70 @@ from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGr
 
 HISTORICAL_FILE = Path("samples/fiduciary/historical/LIBRO Springfield.xlsx")
 UNIVERSO_FILE = Path("samples/fiduciary/historical/LIBRO_Universo_7.xlsx")
+
+
+def _workbook_with_groups(path: Path, *, project_name: str, group_names: list[str]) -> WorkbookData:
+    sheets = []
+    for index, group_name in enumerate(group_names, start=1):
+        rows = [
+            HistoricalRow(
+                sheet_name=group_name,
+                row_number=5,
+                project=project_name,
+                grouping_type=None,
+                grouping_code=group_name,
+                grouping_name=group_name,
+                unit_code="101",
+                unit_name="101",
+                assignment=HistoricalAssignment(f"EF-{group_name}-101"),
+                clients=[
+                    HistoricalClient(
+                        order=1,
+                        name=f"CLIENTE {group_name}",
+                        document_number=f"900{index}",
+                        is_primary=True,
+                    )
+                ],
+            )
+        ]
+        sheets.append(
+            SheetData(
+                name=group_name,
+                index=index,
+                visibility="visible",
+                used_rows=5,
+                used_columns=8,
+                classification="processable",
+                header_row=4,
+                rows=rows,
+            )
+        )
+    return WorkbookData(
+        path=path,
+        file_type="xlsx",
+        sheets=sheets,
+        statistics=ParseStatistics(
+            sheets_total=len(sheets),
+            sheets_processed=len(sheets),
+            valid_rows=len(sheets),
+            client_appearances_found=len(sheets),
+            distinct_assignments_found=len(sheets),
+        ),
+    )
+
+
+def _patch_workbook_parser(monkeypatch, workbook: WorkbookData) -> None:
+    class FakeHistoricalWorkbookParser:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parse(self):
+            return workbook
+
+    monkeypatch.setattr(
+        "fiduciary.imports.historical.analyzer.HistoricalWorkbookParser",
+        FakeHistoricalWorkbookParser,
+    )
 
 
 @pytest.fixture
@@ -83,7 +150,11 @@ def test_analyze_historical_import_persists_only_preparation_records(import_batc
 
     assert ImportedFile.objects.filter(batch=import_batch).count() == 1
     assert ImportedSheetResult.objects.count() == 3
-    assert ImportRowIssue.objects.count() == 18
+    assert ImportRowIssue.objects.count() == 159
+    assert ImportRowIssue.objects.filter(code="FORMULA_WITH_CACHED_VALUE").count() == 12
+    assert ImportRowIssue.objects.filter(code="HIST_PAYMENT_DATE_RECEIPT_MISMATCH").count() == 143
+    assert ImportRowIssue.objects.filter(code="HIST_PAYMENT_VALUE_COUNT_MISMATCH", severity=ImportRowIssue.Severity.INFO).count() == 4
+    assert ImportRowIssue.objects.filter(code="HIST_PAYMENT_VALUE_COUNT_MISMATCH", field_name__endswith="...").exists()
     assert ImportedHistoricalNovelty.objects.count() == 3
     assert DetectedStructureElement.objects.count() > 0
     assert ImportResolution.objects.count() == DetectedStructureElement.objects.count()
@@ -100,7 +171,7 @@ def test_analyze_historical_import_persists_only_preparation_records(import_batc
 
 
 @pytest.mark.django_db
-def test_analyzer_auto_matches_safe_existing_structure(import_batch, springfield_structure):
+def test_analyzer_detects_existing_groups_but_leaves_grouping_type_resolution_explicit(import_batch, springfield_structure):
     project, grouping_type, groups = springfield_structure
 
     result = analyze_historical_import(
@@ -114,10 +185,72 @@ def test_analyzer_auto_matches_safe_existing_structure(import_batch, springfield
     assert result.preview.grouping_type.status == "auto_matched"
     assert result.preview.grouping_type.candidates[0].object_id == grouping_type.pk
     matched_groups = {item.raw_value: item for item in result.preview.structural_groups}
-    assert matched_groups["VS Viviendas"].status == "auto_matched"
-    assert matched_groups["CM Comercio"].status == "auto_matched"
-    assert matched_groups["ID Industrial"].status == "auto_matched"
-    assert matched_groups["VS Viviendas"].candidates[0].object_id == groups["VS Viviendas"].pk
+    assert matched_groups["VS Viviendas"].status == "needs_review"
+    assert matched_groups["CM Comercio"].status == "needs_review"
+    assert matched_groups["ID Industrial"].status == "needs_review"
+    assert matched_groups["VS Viviendas"].candidates == []
+
+
+@pytest.mark.django_db
+def test_analyzer_detects_multiple_grouping_patterns_without_deducing_grouping_type(
+    import_batch,
+    tmp_path,
+    monkeypatch,
+):
+    project = Project.objects.create(code="KSMP", name="KSMP")
+    torre = GroupingType.objects.create(code="T", name="Torre")
+    edificacion = GroupingType.objects.create(code="ED", name="Edificacion")
+    groups = {
+        "T1": StructuralGroup.objects.create(project=project, grouping_type=torre, code="T1", name="T1"),
+        "T2": StructuralGroup.objects.create(project=project, grouping_type=torre, code="T2", name="T2"),
+        "ED1": StructuralGroup.objects.create(project=project, grouping_type=edificacion, code="ED1", name="ED1"),
+        "ED2": StructuralGroup.objects.create(project=project, grouping_type=edificacion, code="ED2", name="ED2"),
+    }
+    for group in groups.values():
+        PropertyUnit.objects.create(project=project, structural_group=group, code="101", name="101")
+    path = tmp_path / "LIBRO_KSMP_MULTITIPO.xlsx"
+    path.write_bytes(b"historical")
+    _patch_workbook_parser(monkeypatch, _workbook_with_groups(path, project_name="KSMP", group_names=["T1", "T2", "ED1", "ED2"]))
+
+    result = analyze_historical_import(batch=import_batch, file_path=path, grouping_type_hint="Torre")
+
+    matched = {item.raw_value: item for item in result.preview.structural_groups}
+    assert set(matched) == {"T1", "T2", "ED1", "ED2"}
+    for raw_value, group in groups.items():
+        assert matched[raw_value].status == "needs_review"
+        assert matched[raw_value].candidates == []
+        element = DetectedStructureElement.objects.get(pk=matched[raw_value].detected_element_id)
+        assert element.structural_context["project_id"] == project.pk
+        assert element.structural_context["grouping_name"] == raw_value
+        assert "grouping_type_id" not in element.structural_context
+        assert element.resolution.action == ImportResolution.Action.UNRESOLVED
+    assert result.preview.pending_resolution_count == 4
+
+
+@pytest.mark.django_db
+def test_analyzer_keeps_group_pending_even_when_code_exists_until_type_is_selected(
+    import_batch,
+    tmp_path,
+    monkeypatch,
+):
+    project = Project.objects.create(code="AMB", name="Ambiguo")
+    torre = GroupingType.objects.create(code="T", name="Torre")
+    edificacion = GroupingType.objects.create(code="ED", name="Edificacion")
+    StructuralGroup.objects.create(project=project, grouping_type=torre, code="X1", name="X1 Torre")
+    StructuralGroup.objects.create(project=project, grouping_type=edificacion, code="ED1", name="X1")
+    path = tmp_path / "LIBRO_AMBIGUO.xlsx"
+    path.write_bytes(b"historical")
+    _patch_workbook_parser(monkeypatch, _workbook_with_groups(path, project_name="Ambiguo", group_names=["X1"]))
+
+    result = analyze_historical_import(batch=import_batch, file_path=path)
+
+    group = result.preview.structural_groups[0]
+    assert group.raw_value == "X1"
+    assert group.status == "needs_review"
+    assert group.candidates == []
+    element = DetectedStructureElement.objects.get(pk=group.detected_element_id)
+    assert element.status == DetectedStructureElement.Status.NEEDS_REVIEW
+    assert element.resolution.action == ImportResolution.Action.UNRESOLVED
 
 
 @pytest.mark.django_db
@@ -199,7 +332,7 @@ def test_analyzer_records_sheet_results_and_parser_issues(import_batch, springfi
     assert imported_file.sha256
     assert set(imported_file.sheet_results.values_list("sheet_name", flat=True)) == {"VS", "CM", "ID"}
     assert imported_file.row_issues.filter(code="FORMULA_WITH_CACHED_VALUE").count() == 12
-    assert imported_file.row_issues.filter(code="INVALID_HISTORICAL_ROW").count() == 6
+    assert imported_file.row_issues.filter(code="INVALID_HISTORICAL_ROW").count() == 0
     assert imported_file.row_issues.filter(code="HISTORICAL_NOVELTY_SECTION_SKIPPED").count() == 0
     assert imported_file.historical_novelties.count() == 3
     novelty = imported_file.historical_novelties.order_by("sheet_result__sheet_index", "row_number").first()

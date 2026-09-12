@@ -2,6 +2,7 @@ import pytest
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth import authenticate
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group, Permission
 from django.core import mail
 from django.test import override_settings
 from django.urls import reverse
@@ -107,6 +108,118 @@ def test_accounting_admin_can_create_user(client, accounting_admin_user):
 
 
 @pytest.mark.django_db
+def test_managed_user_create_requires_first_and_last_name(client, accounting_admin_user):
+    client.force_login(accounting_admin_user)
+
+    response = client.post(
+        reverse("user_create"),
+        {
+            "first_name": "   ",
+            "last_name": "",
+            "email": "sin-nombre@centenario.com",
+            "role": User.Role.COMMERCIAL,
+            "is_active": "on",
+        },
+    )
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert not get_user_model().objects.filter(email="sin-nombre@centenario.com").exists()
+    assert "Registre el nombre del usuario" in content
+    assert "Registre el apellido del usuario" in content
+
+
+@pytest.mark.django_db
+def test_create_user_reuses_logically_deleted_email_without_old_access(client, accounting_admin_user):
+    client.force_login(accounting_admin_user)
+    deleted = User.objects.create_user(
+        username="eliminado",
+        email="reuso@centenario.com",
+        password="OldPass123",
+        first_name="Nombre",
+        last_name="Anterior",
+        role=User.Role.ACCOUNTING_ADMIN,
+    )
+    group = Group.objects.create(name="Grupo anterior")
+    permission = Permission.objects.first()
+    deleted.groups.add(group)
+    if permission:
+        deleted.user_permissions.add(permission)
+    deleted_pk = deleted.pk
+    delete_response = client.post(reverse("user_delete", args=[deleted.pk]), {"reason": "Cuenta anterior cerrada"})
+    assert delete_response.status_code == 302
+
+    response = client.post(
+        reverse("user_create"),
+        {
+            "first_name": "Nombre Nuevo",
+            "last_name": "Apellido Nuevo",
+            "email": "reuso@centenario.com",
+            "role": User.Role.COMMERCIAL,
+            "is_active": "on",
+        },
+    )
+
+    reused = User.objects.get(pk=deleted_pk)
+    assert response.status_code == 302
+    assert User.objects.filter(email="reuso@centenario.com").count() == 1
+    assert reused.is_deleted is False
+    assert reused.is_active is True
+    assert reused.first_name == "Nombre Nuevo"
+    assert reused.last_name == "Apellido Nuevo"
+    assert reused.role == User.Role.COMMERCIAL
+    assert reused.groups.count() == 0
+    assert reused.user_permissions.count() == 0
+    assert authenticate(username="reuso@centenario.com", password="OldPass123") is None
+    assert LogEntry.objects.filter(
+        object_id=str(reused.pk),
+        change_message__icontains="reutilizando correo de usuario eliminado",
+    ).exists()
+    assert LogEntry.objects.filter(object_id=str(reused.pk), change_message__icontains="ELIMINAR_USUARIO").exists()
+
+
+@pytest.mark.django_db
+def test_create_user_still_rejects_active_or_inactive_existing_email(client, accounting_admin_user):
+    client.force_login(accounting_admin_user)
+    active = User.objects.create_user(
+        username="activo-email",
+        email="duplicado@centenario.com",
+        password="StrongPass123",
+        first_name="Activo",
+        last_name="Correo",
+        role=User.Role.COMMERCIAL,
+    )
+
+    active_response = client.post(
+        reverse("user_create"),
+        {
+            "first_name": "Otro",
+            "last_name": "Usuario",
+            "email": active.email,
+            "role": User.Role.COMMERCIAL,
+            "is_active": "on",
+        },
+    )
+    assert active_response.status_code == 200
+    assert User.objects.filter(email=active.email).count() == 1
+
+    active.is_active = False
+    active.save(update_fields=["is_active"])
+    inactive_response = client.post(
+        reverse("user_create"),
+        {
+            "first_name": "Otro",
+            "last_name": "Usuario",
+            "email": active.email,
+            "role": User.Role.COMMERCIAL,
+            "is_active": "on",
+        },
+    )
+    assert inactive_response.status_code == 200
+    assert User.objects.filter(email=active.email).count() == 1
+
+
+@pytest.mark.django_db
 def test_accounting_admin_can_update_allowed_user_fields(client, accounting_admin_user, commercial_user):
     client.force_login(accounting_admin_user)
 
@@ -132,24 +245,75 @@ def test_accounting_admin_can_update_allowed_user_fields(client, accounting_admi
 def test_accounting_admin_can_deactivate_user(client, accounting_admin_user, commercial_user):
     client.force_login(accounting_admin_user)
 
-    response = client.post(reverse("user_status", args=[commercial_user.pk, "deactivate"]))
+    response = client.post(reverse("user_status", args=[commercial_user.pk, "deactivate"]), {"reason": "Cambio de cargo"})
 
     commercial_user.refresh_from_db()
     assert response.status_code == 302
     assert commercial_user.is_active is False
+    assert LogEntry.objects.filter(
+        object_id=str(commercial_user.pk),
+        change_message__icontains="INACTIVAR_USUARIO",
+    ).filter(change_message__icontains="Cambio de cargo").exists()
+
+
+@pytest.mark.django_db
+def test_deactivate_user_without_reason_is_rejected(client, accounting_admin_user, commercial_user):
+    client.force_login(accounting_admin_user)
+
+    response = client.post(reverse("user_status", args=[commercial_user.pk, "deactivate"]), {"reason": "   "})
+
+    commercial_user.refresh_from_db()
+    assert response.status_code == 400
+    assert commercial_user.is_active is True
+    assert not LogEntry.objects.filter(object_id=str(commercial_user.pk), change_message__icontains="INACTIVAR_USUARIO").exists()
 
 
 @pytest.mark.django_db
 def test_user_delete_is_logical(client, accounting_admin_user, commercial_user):
     client.force_login(accounting_admin_user)
 
-    response = client.post(reverse("user_delete", args=[commercial_user.pk]))
+    response = client.post(reverse("user_delete", args=[commercial_user.pk]), {"reason": "Retiro confirmado"})
 
     commercial_user.refresh_from_db()
     assert response.status_code == 302
     assert get_user_model().objects.filter(pk=commercial_user.pk).exists()
     assert commercial_user.is_deleted is True
     assert commercial_user.is_active is False
+    assert LogEntry.objects.filter(
+        object_id=str(commercial_user.pk),
+        change_message__icontains="ELIMINAR_USUARIO",
+    ).filter(change_message__icontains="Retiro confirmado").exists()
+
+
+@pytest.mark.django_db
+def test_delete_user_without_reason_is_rejected(client, accounting_admin_user, commercial_user):
+    client.force_login(accounting_admin_user)
+
+    response = client.post(reverse("user_delete", args=[commercial_user.pk]), {"reason": ""})
+
+    commercial_user.refresh_from_db()
+    assert response.status_code == 400
+    assert commercial_user.is_deleted is False
+    assert commercial_user.is_active is True
+    assert not LogEntry.objects.filter(object_id=str(commercial_user.pk), change_message__icontains="ELIMINAR_USUARIO").exists()
+
+
+@pytest.mark.django_db
+def test_user_destructive_actions_show_confirmation_before_changes(client, accounting_admin_user, commercial_user):
+    client.force_login(accounting_admin_user)
+
+    deactivate_response = client.get(reverse("user_status", args=[commercial_user.pk, "deactivate"]))
+    delete_response = client.get(reverse("user_delete", args=[commercial_user.pk]))
+
+    commercial_user.refresh_from_db()
+    assert deactivate_response.status_code == 200
+    assert "Inactivar usuario" in deactivate_response.content.decode()
+    assert "Motivo" in deactivate_response.content.decode()
+    assert delete_response.status_code == 200
+    assert "Eliminar usuario" in delete_response.content.decode()
+    assert "La cuenta sera eliminada logicamente" in delete_response.content.decode()
+    assert commercial_user.is_active is True
+    assert commercial_user.is_deleted is False
 
 
 @pytest.mark.django_db
@@ -236,7 +400,7 @@ def test_password_is_not_editable_in_account_management(client, accounting_admin
 def test_inactive_and_reactivated_account_authentication(client, accounting_admin_user, commercial_user):
     client.force_login(accounting_admin_user)
 
-    client.post(reverse("user_status", args=[commercial_user.pk, "deactivate"]))
+    client.post(reverse("user_status", args=[commercial_user.pk, "deactivate"]), {"reason": "Suspension temporal"})
     commercial_user.refresh_from_db()
     assert commercial_user.is_active is False
     assert authenticate(username=commercial_user.email, password="StrongPass123") is None
@@ -251,7 +415,7 @@ def test_inactive_and_reactivated_account_authentication(client, accounting_admi
 def test_logically_deleted_account_cannot_authenticate_and_keeps_audit(client, accounting_admin_user, commercial_user):
     client.force_login(accounting_admin_user)
 
-    response = client.post(reverse("user_delete", args=[commercial_user.pk]))
+    response = client.post(reverse("user_delete", args=[commercial_user.pk]), {"reason": "Retiro definitivo"})
 
     commercial_user.refresh_from_db()
     assert response.status_code == 302

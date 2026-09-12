@@ -12,7 +12,7 @@
       <div class="page-heading">
         <div>
           <h1>{{ novelty.display_type }}</h1>
-          <p>{{ novelty.property_unit.project.name }} - {{ novelty.property_unit.name|default:novelty.property_unit.code }}</p>
+          <p>{{ novelty.property_unit.project.name }}{% if novelty.property_unit.structural_group %} - {{ novelty.property_unit.structural_group }}{% endif %} - {{ novelty.property_unit.name|default:novelty.property_unit.code }}</p>
         </div>
         <a class="btn btn-outline-secondary" href="{% url 'fiduciary:novelty_list' %}">Volver</a>
       </div>
@@ -20,6 +20,7 @@
       <section class="data-section">
         <div class="row g-3">
           <div class="col-md-4"><strong>Tipo</strong><br>{{ novelty.display_type }}</div>
+          <div class="col-md-4"><strong>Agrupación</strong><br>{% if novelty.property_unit.structural_group %}{{ novelty.property_unit.structural_group }}{% else %}-{% endif %}</div>
           <div class="col-md-4"><strong>Unidad</strong><br><a href="{% url 'real_estate:property_unit_history' novelty.property_unit.pk %}">{{ novelty.property_unit.name|default:novelty.property_unit.code }}</a></div>
           <div class="col-md-4"><strong>Origen</strong><br>{{ novelty.get_origin_display }}</div>
           <div class="col-md-4"><strong>Fecha efectiva</strong><br>{{ novelty.effective_date|default:"-" }}</div>
