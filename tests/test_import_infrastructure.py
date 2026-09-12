@@ -313,7 +313,7 @@ def test_payment_rejects_invalid_date_modes_and_missing_date(assignment, importe
 
 
 @pytest.mark.django_db
-def test_payment_rejects_month_out_of_range_zero_and_negative(assignment, imported_file):
+def test_payment_rejects_month_out_of_range_and_negative_but_allows_zero(assignment, imported_file):
     bad_month = create_payment(
         assignment=assignment,
         amount="100",
@@ -349,7 +349,8 @@ def test_payment_rejects_month_out_of_range_zero_and_negative(assignment, import
     )
 
     assert bad_month.status == "invalid"
-    assert zero.status == "invalid"
+    assert zero.status == "created"
+    assert zero.payment.amount == Decimal("0")
     assert negative.status == "invalid"
 
 

@@ -31,6 +31,7 @@
               {% else %}
                 <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
                 {{ field }}
+                {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
               {% endif %}
               {{ field.errors }}
             </div>

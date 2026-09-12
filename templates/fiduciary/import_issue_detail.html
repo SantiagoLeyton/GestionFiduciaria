@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Detalle de incidencias | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Detalle de incidencias</h1>
+          <p>Lote #{{ batch.pk }}{% if code %} - {{ code }}{% endif %}</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_preview' batch.pk %}">Volver</a>
+      </div>
+
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Casos registrados</h2>
+          <span>{{ page_obj.paginator.count }} caso{{ page_obj.paginator.count|pluralize }}</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table data-table align-middle">
+            <thead>
+              <tr>
+                <th>Codigo</th>
+                <th>Severidad</th>
+                <th>Hoja</th>
+                <th>Fila</th>
+                <th>Columna</th>
+                <th>Valor encontrado</th>
+                <th>Causa</th>
+                <th>Descripcion</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for issue in issues %}
+                <tr>
+                  <td>{{ issue.code }}</td>
+                  <td>{{ issue.get_severity_display }}</td>
+                  <td>{{ issue.sheet_result.sheet_name|default:"-" }}</td>
+                  <td>{{ issue.row_number|default:"No aplica" }}</td>
+                  <td>
+                    {% if issue.column_letter %}
+                      {{ issue.column_letter }}{% if issue.field_name %} - {{ issue.field_name }}{% endif %}
+                    {% elif issue.field_name %}
+                      {{ issue.field_name }}
+                    {% else %}
+                      -
+                    {% endif %}
+                  </td>
+                  <td>{{ issue.found_value|default:"-" }}</td>
+                  <td>{{ issue.cause|default:"-" }}</td>
+                  <td>{{ issue.message }}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="8">No hay incidencias para los filtros seleccionados.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% include "includes/pagination.html" %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

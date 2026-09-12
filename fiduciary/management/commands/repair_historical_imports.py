@@ -156,13 +156,11 @@ class Command(BaseCommand):
         if not detail:
             return 0
         unit = assignment.property_unit
-        client = assignment.holders.select_related("client").filter(is_active=True, is_primary=True).first()
-        client_obj = client.client if client else None
         dedupe_key = _observation_dedupe_key(
             origin=ImportedHistoricalObservation.Origin.MAIN_TABLE_OBSERVATION,
             project=unit.project,
             unit=unit,
-            client=client_obj,
+            client=None,
             assignment=assignment,
             source_sheet=row.sheet_name,
             summary="",
@@ -172,7 +170,7 @@ class Command(BaseCommand):
         existing = ImportedHistoricalObservation.objects.filter(
             origin=ImportedHistoricalObservation.Origin.MAIN_TABLE_OBSERVATION,
             property_unit=unit,
-            client=client_obj,
+            client__isnull=True,
             assignment=assignment,
             source_sheet=row.sheet_name,
             source_row=row.row_number,
@@ -196,7 +194,7 @@ class Command(BaseCommand):
                 sheet_result=sheet_result,
                 project=unit.project,
                 property_unit=unit,
-                client=client_obj,
+                client=None,
                 assignment=assignment,
                 origin=ImportedHistoricalObservation.Origin.MAIN_TABLE_OBSERVATION,
                 status=ImportedHistoricalObservation.Status.IMPORTED,

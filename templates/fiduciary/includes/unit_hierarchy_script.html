@@ -1,0 +1,106 @@
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const endpoints = {
+    types: "{% url 'fiduciary:unit_context_types' %}",
+    groups: "{% url 'fiduciary:unit_context_groups' %}",
+    units: "{% url 'fiduciary:unit_context_units' %}",
+  };
+
+  function buildUrl(endpoint, params) {
+    const url = new URL(endpoint, window.location.origin);
+    Object.entries(params).forEach(([key, value]) => {
+      if (value) url.searchParams.set(key, value);
+    });
+    return url;
+  }
+
+  function setOptions(select, rows, placeholder) {
+    if (!select) return;
+    select.innerHTML = "";
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = placeholder || "---------";
+    select.appendChild(empty);
+    rows.forEach((row) => {
+      const option = document.createElement("option");
+      option.value = row.id;
+      option.textContent = row.text || row.label;
+      if (row.disabled) option.disabled = true;
+      select.appendChild(option);
+    });
+  }
+
+  function setDisabled(select, disabled) {
+    if (select) select.disabled = disabled;
+  }
+
+  async function loadOptions(endpoint, params) {
+    const response = await fetch(buildUrl(endpoint, params), {
+      headers: {"X-Requested-With": "XMLHttpRequest"},
+    });
+    if (!response.ok) return [];
+    const payload = await response.json();
+    return payload.results || [];
+  }
+
+  document.querySelectorAll("[data-unit-hierarchy]").forEach((form) => {
+    const project = form.querySelector("[data-unit-hierarchy-field='project']");
+    const type = form.querySelector("[data-unit-hierarchy-field='grouping-type']");
+    const group = form.querySelector("[data-unit-hierarchy-field='structural-group']");
+    const unit = form.querySelector("[data-unit-hierarchy-field='property-unit']");
+    if (!project || !type || !group || !unit) return;
+
+    function clearFrom(level) {
+      if (level === "project") {
+        setOptions(type, [], "---------");
+        setOptions(group, [], "---------");
+        setOptions(unit, [], "---------");
+        setDisabled(type, true);
+        setDisabled(group, true);
+        setDisabled(unit, true);
+      } else if (level === "type") {
+        setOptions(group, [], "---------");
+        setOptions(unit, [], "---------");
+        setDisabled(group, true);
+        setDisabled(unit, true);
+      } else if (level === "group") {
+        setOptions(unit, [], "---------");
+        setDisabled(unit, true);
+      }
+      unit.dispatchEvent(new CustomEvent("unit-hierarchy:changed", {bubbles: true}));
+    }
+
+    project.addEventListener("change", async function () {
+      clearFrom("project");
+      if (!project.value) return;
+      const types = await loadOptions(endpoints.types, {project: project.value});
+      setOptions(type, types, "---------");
+      setDisabled(type, false);
+    });
+
+    type.addEventListener("change", async function () {
+      clearFrom("type");
+      if (!project.value || !type.value) return;
+      const groups = await loadOptions(endpoints.groups, {project: project.value, grouping_type: type.value});
+      setOptions(group, groups, "---------");
+      setDisabled(group, false);
+    });
+
+    group.addEventListener("change", async function () {
+      clearFrom("group");
+      if (!project.value || !group.value) return;
+      const units = await loadOptions(endpoints.units, {project: project.value, structural_group: group.value});
+      setOptions(unit, units, "---------");
+      setDisabled(unit, false);
+    });
+
+    unit.addEventListener("change", function () {
+      unit.dispatchEvent(new CustomEvent("unit-hierarchy:changed", {bubbles: true}));
+    });
+
+    setDisabled(type, !project.value);
+    setDisabled(group, !type.value);
+    setDisabled(unit, !group.value);
+  });
+});
+</script>

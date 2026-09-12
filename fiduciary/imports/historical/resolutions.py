@@ -1,11 +1,13 @@
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
+import re
 
 from fiduciary.models import DetectedStructureElement, ImportAppliedRecord, ImportBatch, ImportResolution
 from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
 
 from .normalize import normalize_text
+from .readiness import has_historical_finalization_blockers
 
 
 READY_STATES = {
@@ -21,18 +23,18 @@ class ImmediateResolutionError(ValueError):
     pass
 
 
-def create_immediate_structure_from_resolution(resolution: ImportResolution, user) -> str | None:
+def create_immediate_structure_from_resolution(resolution: ImportResolution, user, *, apply_equivalents: bool = False) -> str | None:
     detected = resolution.detected_element
     if resolution.action != ImportResolution.Action.CREATE_NEW:
         return None
     if resolution.target_kind == DetectedStructureElement.InferredKind.PROJECT:
-        return _create_project_from_resolution(resolution, user)
+        return _create_project_from_resolution(resolution, user, apply_equivalents=apply_equivalents)
     if resolution.target_kind == DetectedStructureElement.InferredKind.GROUPING_TYPE:
-        return _create_grouping_type_from_resolution(resolution, user)
+        return _create_grouping_type_from_resolution(resolution, user, apply_equivalents=apply_equivalents)
     return None
 
 
-def _create_project_from_resolution(resolution: ImportResolution, user) -> str:
+def _create_project_from_resolution(resolution: ImportResolution, user, *, apply_equivalents: bool) -> str:
     code = (resolution.create_code or "").strip()
     name = (resolution.create_name or "").strip()
     if not code or not name:
@@ -62,12 +64,13 @@ def _create_project_from_resolution(resolution: ImportResolution, user) -> str:
             name=project.name,
             user=user,
         )
-        apply_resolution_to_equivalent_elements(resolution, user)
+        if apply_equivalents:
+            apply_resolution_to_equivalent_elements(resolution, user)
         update_batch_resolution_state(resolution.detected_element.batch)
     return f"Proyecto creado correctamente: {project}."
 
 
-def _create_grouping_type_from_resolution(resolution: ImportResolution, user) -> str:
+def _create_grouping_type_from_resolution(resolution: ImportResolution, user, *, apply_equivalents: bool) -> str:
     code = (resolution.create_code or "").strip()
     name = (resolution.create_name or "").strip()
     if not code or not name:
@@ -97,7 +100,8 @@ def _create_grouping_type_from_resolution(resolution: ImportResolution, user) ->
             name=grouping_type.name,
             user=user,
         )
-        apply_resolution_to_equivalent_elements(resolution, user)
+        if apply_equivalents:
+            apply_resolution_to_equivalent_elements(resolution, user)
         update_batch_resolution_state(resolution.detected_element.batch)
     return f"Tipo de agrupacion creado correctamente: {grouping_type}."
 
@@ -146,13 +150,7 @@ def _readable_model_error(exc) -> str:
 
 def apply_resolution_to_equivalent_elements(resolution: ImportResolution, user) -> int:
     detected = resolution.detected_element
-    equivalents = DetectedStructureElement.objects.filter(
-        batch=detected.batch,
-        inferred_kind=detected.inferred_kind,
-        normalized_value=detected.normalized_value,
-        structural_context=detected.structural_context,
-        status=DetectedStructureElement.Status.NEEDS_REVIEW,
-    ).select_related("resolution")
+    equivalents = equivalent_pending_elements(detected).select_related("resolution")
     with transaction.atomic():
         for element in equivalents:
             item_resolution = element.resolution
@@ -161,6 +159,40 @@ def apply_resolution_to_equivalent_elements(resolution: ImportResolution, user) 
         updated_units = auto_resolve_new_units(detected.batch, user=user)
         update_batch_resolution_state(detected.batch)
     return updated_units
+
+
+def apply_resolution_to_current_element(resolution: ImportResolution, user) -> None:
+    with transaction.atomic():
+        resolution.resolved_by = user
+        resolution.resolved_at = timezone.now()
+        resolution.status = ImportResolution.Status.APPLIED
+        resolution.save()
+        _mark_element_from_resolution(resolution.detected_element, resolution)
+
+
+def equivalent_pending_elements(element: DetectedStructureElement):
+    context = element.structural_context or {}
+    queryset = DetectedStructureElement.objects.filter(
+        batch=element.batch,
+        inferred_kind=element.inferred_kind,
+        normalized_value=element.normalized_value,
+        status=DetectedStructureElement.Status.NEEDS_REVIEW,
+    ).exclude(pk=element.pk)
+    if context.get("missing_grouping_type"):
+        queryset = DetectedStructureElement.objects.filter(
+            batch=element.batch,
+            inferred_kind=element.inferred_kind,
+            status=DetectedStructureElement.Status.NEEDS_REVIEW,
+            structural_context__missing_grouping_type=True,
+        ).exclude(pk=element.pk)
+        project_id = context.get("project_id")
+        project_name = context.get("project_name")
+        if project_id:
+            queryset = queryset.filter(structural_context__project_id=project_id)
+        elif project_name:
+            queryset = queryset.filter(structural_context__project_name=project_name)
+        return queryset
+    return queryset.filter(structural_context=context)
 
 
 def resolve_structural_group(
@@ -204,6 +236,213 @@ def resolve_structural_group(
         updated_units = apply_resolution_to_equivalent_elements(resolution, resolved_by)
         update_batch_resolution_state(detected.batch)
     return updated_units
+
+
+def structural_group_pattern_suggestions(
+    *,
+    source_element: DetectedStructureElement,
+    project: Project,
+    grouping_type: GroupingType,
+    selected_group: StructuralGroup | None,
+    new_group_name: str = "",
+) -> list[dict]:
+    source_patterns = _group_pattern(source_element.raw_value)
+    source_token = _group_pattern_token(source_element.raw_value)
+    source_prefixes = {pattern["prefix"] for pattern in source_patterns if pattern["token"] == source_token}
+    if not source_token or not source_prefixes:
+        return []
+
+    create_template = None
+    selected_prefixes: set[str] = set()
+    if selected_group:
+        selected_pattern = _group_pattern(selected_group.code, selected_group.name, str(selected_group))
+        selected_tokens = {pattern["token"] for pattern in selected_pattern if pattern["token"]}
+        selected_prefixes = {pattern["prefix"] for pattern in selected_pattern if pattern["token"] == source_token}
+        selected_prefixes.discard("")
+        if source_token not in selected_tokens:
+            return []
+    else:
+        create_template = _create_group_pattern_template(new_group_name)
+        if not create_template or create_template["token"] != source_token:
+            return []
+
+    groups = list(StructuralGroup.objects.filter(project=project, grouping_type=grouping_type).order_by("name", "code", "pk"))
+    pending = DetectedStructureElement.objects.filter(
+        batch=source_element.batch,
+        inferred_kind=DetectedStructureElement.InferredKind.STRUCTURAL_GROUP,
+        status=DetectedStructureElement.Status.NEEDS_REVIEW,
+    ).exclude(pk=source_element.pk)
+    suggestions = []
+    for element in pending:
+        context = element.structural_context or {}
+        context_project_id = context.get("project_id")
+        context_grouping_type_id = context.get("grouping_type_id")
+        if context_project_id and int(context_project_id) != project.pk:
+            continue
+        if context_grouping_type_id and int(context_grouping_type_id) != grouping_type.pk:
+            continue
+        token = _group_pattern_token(element.raw_value)
+        if not token:
+            continue
+        if not _element_matches_source_pattern(element, source_prefixes):
+            continue
+        if create_template:
+            suggestions.append(
+                {
+                    "element": element,
+                    "action": ImportResolution.Action.CREATE_NEW,
+                    "project": project,
+                    "grouping_type": grouping_type,
+                    "create_name": _format_created_group_name(create_template, element.raw_value),
+                }
+            )
+            continue
+        matches = [
+            group
+            for group in groups
+            if _group_matches_learned_pattern(group, token, selected_prefixes)
+        ]
+        if len(matches) == 1:
+            suggestions.append(
+                {
+                    "element": element,
+                    "action": ImportResolution.Action.ASSOCIATE_EXISTING,
+                    "target": matches[0],
+                }
+            )
+    return suggestions
+
+
+def structural_group_pattern_elements(source_element: DetectedStructureElement) -> list[DetectedStructureElement]:
+    source_prefixes = {
+        pattern["prefix"]
+        for pattern in _group_pattern(source_element.raw_value)
+        if pattern["prefix"]
+    }
+    if not source_prefixes:
+        return []
+    source_context = source_element.structural_context or {}
+    project_id = source_context.get("project_id")
+    queryset = DetectedStructureElement.objects.filter(
+        batch=source_element.batch,
+        inferred_kind=DetectedStructureElement.InferredKind.STRUCTURAL_GROUP,
+        status=DetectedStructureElement.Status.NEEDS_REVIEW,
+    ).select_related("resolution")
+    if project_id:
+        queryset = queryset.filter(structural_context__project_id=project_id)
+    return [
+        element
+        for element in queryset.order_by("normalized_value", "pk")
+        if _element_matches_source_pattern(element, source_prefixes)
+    ]
+
+
+def structural_group_pattern_label(source_element: DetectedStructureElement) -> str:
+    prefixes = [
+        pattern["prefix"].upper()
+        for pattern in _group_pattern(source_element.raw_value)
+        if pattern["prefix"]
+    ]
+    return f"{prefixes[0]}*" if prefixes else source_element.raw_value
+
+
+def apply_structural_group_pattern_suggestions(suggestions: list[dict], user) -> int:
+    updated = 0
+    with transaction.atomic():
+        for suggestion in suggestions:
+            element = suggestion["element"]
+            resolution = element.resolution
+            resolution.target_kind = DetectedStructureElement.InferredKind.STRUCTURAL_GROUP
+            resolution.action = suggestion["action"]
+            if suggestion["action"] == ImportResolution.Action.ASSOCIATE_EXISTING:
+                target = suggestion["target"]
+                resolution.target_structural_group = target
+                resolution.parent_project = target.project
+                resolution.parent_grouping_type = target.grouping_type
+                resolution.create_code = ""
+                resolution.create_name = ""
+            else:
+                resolution.target_structural_group = None
+                resolution.parent_project = suggestion["project"]
+                resolution.parent_grouping_type = suggestion["grouping_type"]
+                resolution.create_code = element.raw_value if element.raw_value != "(sin valor)" else ""
+                resolution.create_name = suggestion["create_name"]
+            resolution.resolved_by = user
+            resolution.resolved_at = timezone.now()
+            resolution.status = ImportResolution.Status.APPLIED
+            resolution.save()
+            _mark_element_from_resolution(element, resolution)
+            updated += 1
+        if suggestions:
+            auto_resolve_new_units(suggestions[0]["element"].batch, user=user)
+            update_batch_resolution_state(suggestions[0]["element"].batch)
+    return updated
+
+
+def _group_pattern_token(value) -> str:
+    normalized = normalize_text(value)
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    match = re.search(r"(\d+|[a-z])$", compact)
+    if not match:
+        return ""
+    token = match.group(1)
+    if token.isdigit():
+        return str(int(token))
+    return token
+
+
+def _group_pattern(*values) -> list[dict[str, str]]:
+    patterns = []
+    seen = set()
+    for value in values:
+        normalized = normalize_text(value)
+        compact = re.sub(r"[^a-z0-9]+", "", normalized)
+        match = re.search(r"^(?P<prefix>[a-z]*)(?P<token>\d+|[a-z])$", compact)
+        if not match:
+            token = _group_pattern_token(value)
+            prefix = ""
+        else:
+            prefix = match.group("prefix")
+            token = match.group("token")
+            if token.isdigit():
+                token = str(int(token))
+        if not token:
+            continue
+        key = (prefix, token)
+        if key in seen:
+            continue
+        seen.add(key)
+        patterns.append({"prefix": prefix, "token": token})
+    return patterns
+
+
+def _group_matches_learned_pattern(group: StructuralGroup, token: str, selected_prefixes: set[str]) -> bool:
+    patterns = _group_pattern(group.code, group.name, str(group))
+    if not selected_prefixes:
+        return any(pattern["token"] == token for pattern in patterns)
+    return any(pattern["token"] == token and pattern["prefix"] in selected_prefixes for pattern in patterns)
+
+
+def _element_matches_source_pattern(element: DetectedStructureElement, source_prefixes: set[str]) -> bool:
+    if not source_prefixes:
+        return False
+    return any(pattern["prefix"] in source_prefixes for pattern in _group_pattern(element.raw_value))
+
+
+def _create_group_pattern_template(value: str) -> dict[str, str] | None:
+    text = (value or "").strip()
+    match = re.search(r"^(?P<prefix>.*?)(?P<token>\d+|[A-Za-z])\s*$", text)
+    if not match:
+        return None
+    token = match.group("token")
+    normalized_token = str(int(token)) if token.isdigit() else normalize_text(token)
+    return {"prefix": match.group("prefix"), "token": normalized_token}
+
+
+def _format_created_group_name(template: dict[str, str], raw_value: str) -> str:
+    match = re.search(r"(?P<token>\d+|[A-Za-z])\s*$", (raw_value or "").strip())
+    token = match.group("token") if match else raw_value
+    return f"{template['prefix']}{token}".strip()
 
 
 def reanalyze_pending_resolutions(batch: ImportBatch, user=None) -> int:
@@ -280,16 +519,17 @@ def auto_resolve_units_for_group_resolution(group_resolution: ImportResolution, 
 
 
 def update_batch_resolution_state(batch: ImportBatch) -> None:
-    has_pending = batch.detected_elements.filter(status=DetectedStructureElement.Status.NEEDS_REVIEW).exists()
-    has_blocked = batch.detected_elements.filter(status__in=BLOCKED_STATES, resolution__action=ImportResolution.Action.UNRESOLVED).exists()
-    batch.status = ImportBatch.Status.AWAITING_RESOLUTION if has_pending or has_blocked else ImportBatch.Status.READY
+    batch.status = (
+        ImportBatch.Status.AWAITING_RESOLUTION
+        if has_historical_finalization_blockers(batch)
+        else ImportBatch.Status.READY
+    )
     batch.save(update_fields=["status"])
 
 
 def _propagate_resolved_parent_context(batch: ImportBatch) -> int:
     updated = 0
     project_id = _resolved_project_id(batch)
-    grouping_type_id = _resolved_grouping_type_id(batch)
     for element in batch.detected_elements.filter(
         inferred_kind=DetectedStructureElement.InferredKind.STRUCTURAL_GROUP,
         resolution__action=ImportResolution.Action.UNRESOLVED,
@@ -298,9 +538,6 @@ def _propagate_resolved_parent_context(batch: ImportBatch) -> int:
         changed = False
         if project_id and not context.get("project_id"):
             context["project_id"] = project_id
-            changed = True
-        if grouping_type_id and not context.get("grouping_type_id"):
-            context["grouping_type_id"] = grouping_type_id
             changed = True
         if changed:
             element.structural_context = context

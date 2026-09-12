@@ -217,22 +217,32 @@ class StructuralGroupUpdateForm(ChangeReasonMixin, StructuralGroupForm):
 class PropertyUnitForm(BaseEntityForm):
     class Meta(BaseEntityForm.Meta):
         model = PropertyUnit
-        fields = ("project", "structural_group") + BaseEntityForm.Meta.fields
+        fields = ("project", "structural_group") + BaseEntityForm.Meta.fields + ("area", "property_value")
         widgets = {
             "project": forms.Select(attrs={"class": "form-select"}),
             "structural_group": forms.Select(attrs={"class": "form-select"}),
             **BaseEntityForm.Meta.widgets,
+            "area": forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "placeholder": "55.20"}),
+            "property_value": forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "placeholder": "192172500"}),
         }
         labels = {
             "project": "Proyecto",
             "structural_group": "Agrupacion padre",
             **BaseEntityForm.Meta.labels,
+            "area": "Area",
+            "property_value": "Valor inmueble",
+        }
+        help_texts = {
+            "area": "Metros cuadrados. No incluya m2.",
+            "property_value": "Ingrese el numero sin puntos de miles.",
         }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["code"].required = False
-        self.fields["name"].required = False
+        self.fields["name"].required = True
+        self.fields["area"].required = True
+        self.fields["property_value"].required = True
         self.fields["structural_group"].required = False
         self.fields["structural_group"].queryset = StructuralGroup.objects.select_related("project").order_by(
             "project__name", "name"
@@ -244,8 +254,14 @@ class PropertyUnitForm(BaseEntityForm):
         structural_group = cleaned_data.get("structural_group")
         code = cleaned_data.get("code")
         name = cleaned_data.get("name")
+        if not name:
+            self.add_error("name", "Registre el nombre de la unidad.")
+        if cleaned_data.get("area") is None:
+            self.add_error("area", "Registre el area de la unidad.")
+        if cleaned_data.get("property_value") is None:
+            self.add_error("property_value", "Registre el valor del inmueble.")
         if not code and not name:
-            raise ValidationError("Debe registrar codigo, nombre o ambos.")
+            self.add_error("code", "Debe registrar codigo cuando la unidad no tiene nombre.")
         if project and structural_group and structural_group.project_id != project.id:
             self.add_error("structural_group", "La agrupacion debe pertenecer al mismo proyecto.")
         if project and code:

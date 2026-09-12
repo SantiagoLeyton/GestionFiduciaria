@@ -22,6 +22,7 @@ from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGr
 from .data import HistoricalRow, WorkbookData
 from .normalize import clean_text, normalize_text
 from .parser import HistoricalWorkbookParser
+from .readiness import has_historical_finalization_blockers
 
 
 @dataclass(frozen=True)
@@ -89,10 +90,15 @@ def analyze_historical_import(
     batch: ImportBatch,
     file_path,
     grouping_type_hint: str | None = None,
+    progress_callback=None,
 ) -> HistoricalImportAnalysisResult:
     path = Path(file_path)
     imported_file = reserve_historical_import_file(batch=batch, file_path=path)
-    workbook = HistoricalWorkbookParser(path, grouping_type_hint=grouping_type_hint).parse()
+    workbook = HistoricalWorkbookParser(
+        path,
+        grouping_type_hint=grouping_type_hint,
+        progress_callback=progress_callback or _batch_progress_callback(batch),
+    ).parse()
     with transaction.atomic():
         _update_imported_file_from_workbook(imported_file, workbook)
         _persist_sheet_results(imported_file, workbook)
@@ -124,6 +130,16 @@ def analyze_historical_import(
         historical_novelty_count=workbook.statistics.historical_novelties_found,
     )
     return HistoricalImportAnalysisResult(preview=preview, imported_file=imported_file)
+
+
+def _batch_progress_callback(batch: ImportBatch):
+    def callback(progress: dict[str, Any]) -> None:
+        batch.total_rows = progress.get("total_rows") or batch.total_rows
+        batch.processed_rows = progress.get("processed_rows") or batch.processed_rows
+        batch.summary = json.dumps({"progress": progress}, ensure_ascii=True)
+        batch.save(update_fields=["total_rows", "processed_rows", "summary"])
+
+    return callback
 
 
 def find_existing_historical_import(file_path) -> ImportedFile | None:
@@ -190,6 +206,8 @@ def _update_imported_file_from_workbook(imported_file: ImportedFile, workbook: W
 
 def _persist_sheet_results(imported_file: ImportedFile, workbook: WorkbookData) -> None:
     for sheet in workbook.sheets:
+        error_count = sum(1 for issue in sheet.issues if issue.severity in {"error", "blocking"})
+        warning_count = sum(1 for issue in sheet.issues if issue.severity == "warning")
         ImportedSheetResult.objects.update_or_create(
             imported_file=imported_file,
             sheet_name=sheet.name,
@@ -202,9 +220,9 @@ def _persist_sheet_results(imported_file: ImportedFile, workbook: WorkbookData) 
                 "analyzed_rows": sheet.used_rows,
                 "processed_rows": len(sheet.rows),
                 "skipped_rows": sheet.ignored_rows,
-                "error_count": sum(1 for issue in sheet.issues if issue.severity in {"error", "blocking"}),
-                "warning_count": sum(1 for issue in sheet.issues if issue.severity == "warning"),
-                "status": ImportedSheetResult.Status.ANALYZED,
+                "error_count": error_count,
+                "warning_count": warning_count,
+                "status": _sheet_status(sheet, error_count),
                 "summary": "Hoja historica analizada sin persistencia definitiva.",
             },
         )
@@ -217,11 +235,16 @@ def _persist_parser_issues(imported_file: ImportedFile, workbook: WorkbookData) 
             imported_file=imported_file,
             sheet_result=sheet_results.get(issue.sheet_name),
             row_number=issue.row_number,
-            column_letter=issue.column_letter or "",
+            column_letter=_bounded_text(issue.column_letter, 10),
             severity=_issue_severity(issue.severity),
             code=issue.code,
             defaults={
                 "message": issue.message,
+                "unit_code": _bounded_text(issue.unit_code, 80),
+                "field_name": _bounded_text(issue.field_name, 120),
+                "found_value": issue.found_value,
+                "cause": issue.cause,
+                "extra_data": issue.extra_data,
                 "status": ImportRowIssue.Status.OPEN,
             },
         )
@@ -324,6 +347,15 @@ def _json_safe_value(value):
     return value
 
 
+def _bounded_text(value, max_length: int) -> str:
+    text = clean_text(value) or ""
+    if len(text) <= max_length:
+        return text
+    if max_length <= 3:
+        return text[:max_length]
+    return text[: max_length - 3].rstrip() + "..."
+
+
 def _novelty_summary(novelty) -> str:
     unit = novelty.unit_code or "sin unidad"
     assignment = novelty.assignment.assignment_number if novelty.assignment else "sin encargo"
@@ -408,12 +440,8 @@ def _analyze_structural_groups(
     grouping_type_preview: StructurePreviewItem | None,
 ) -> list[StructurePreviewItem]:
     project_id = _single_candidate_id(project_preview)
-    grouping_type_id = _single_candidate_id(grouping_type_preview)
     groups = []
     for raw_value, count in _count_values(row.grouping_name for row in _rows(workbook)).items():
-        candidates = []
-        if project_id and grouping_type_id:
-            candidates = _match_structural_group(raw_value, project_id, grouping_type_id, index.structural_groups)
         groups.append(
             _persist_detected_item(
                 batch=batch,
@@ -421,8 +449,8 @@ def _analyze_structural_groups(
                 kind=DetectedStructureElement.InferredKind.STRUCTURAL_GROUP,
                 raw_value=raw_value,
                 occurrence_count=count,
-                candidates=candidates,
-                context={"project_id": project_id, "grouping_type_id": grouping_type_id},
+                candidates=[],
+                context={"project_id": project_id, "grouping_name": raw_value},
             )
         )
     return groups
@@ -591,7 +619,11 @@ def _candidate(obj, reason: str) -> MatchCandidate:
 
 def _update_batch_and_file_counts(batch: ImportBatch, imported_file: ImportedFile, workbook: WorkbookData) -> None:
     summary = _sanitized_summary(workbook)
-    batch.status = ImportBatch.Status.AWAITING_RESOLUTION
+    batch.status = (
+        ImportBatch.Status.AWAITING_RESOLUTION
+        if has_historical_finalization_blockers(batch)
+        else ImportBatch.Status.READY
+    )
     batch.total_files = max(batch.total_files, 1)
     batch.processed_files = max(batch.processed_files, 1)
     batch.total_rows = workbook.statistics.valid_rows + workbook.statistics.ignored_rows
@@ -648,6 +680,14 @@ def _sheet_classification(value: str) -> str:
         "summary": ImportedSheetResult.Classification.SUMMARY,
     }
     return mapping.get(value, ImportedSheetResult.Classification.UNKNOWN)
+
+
+def _sheet_status(sheet, error_count: int) -> str:
+    if error_count:
+        return ImportedSheetResult.Status.FAILED
+    if sheet.classification in {"empty", "auxiliary", "summary", "unknown"}:
+        return ImportedSheetResult.Status.SKIPPED
+    return ImportedSheetResult.Status.ANALYZED
 
 
 def _issue_severity(value: str) -> str:

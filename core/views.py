@@ -20,6 +20,7 @@ from core.services.backups import (
     sync_backup_to_drive,
     validate_backup_record,
 )
+from core.services.backup_scheduler import refresh_scheduler_status
 from users.permissions import user_can_manage_users
 
 
@@ -46,7 +47,7 @@ class BackupListView(AccountingOnlyMixin, ListView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["active_pre_restore"] = active_pre_restore()
-        backup_settings = BackupSettings.get_solo()
+        backup_settings = refresh_scheduler_status()
         context["backup_settings"] = backup_settings
         context["settings_form"] = BackupSettingsForm(instance=backup_settings)
         context["available_backup_ids"] = {
@@ -64,12 +65,17 @@ class BackupCreateView(AccountingOnlyMixin, View):
 
     def post(self, request):
         try:
-            create_backup(backup_type=BackupRecord.BackupType.MANUAL, user=request.user)
+            result = create_backup(backup_type=BackupRecord.BackupType.MANUAL, user=request.user)
         except BackupError as exc:
             record_backup_failure(backup_type=BackupRecord.BackupType.MANUAL, user=request.user, message=str(exc))
             messages.error(request, str(exc))
         else:
-            messages.success(request, "Copia de seguridad creada y validada correctamente.")
+            if result is None:
+                messages.success(request, "Copia de seguridad creada y validada correctamente.")
+            elif result.record and result.record.drive_sync_status == BackupRecord.DriveSyncStatus.FAILED:
+                messages.warning(request, result.message)
+            else:
+                messages.success(request, result.message)
         return redirect(self.success_url)
 
 

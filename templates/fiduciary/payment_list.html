@@ -15,9 +15,12 @@
           <h1>Pagos</h1>
           <p>Consulte los pagos registrados por importaciones historicas y reportes fiduciarios.</p>
         </div>
+        {% if can_create %}
+          <a class="btn btn-success" href="{% url 'fiduciary:payment_create' %}">Registrar pago</a>
+        {% endif %}
       </div>
 
-      <form class="filter-panel" method="get">
+      <form class="filter-panel" method="get" data-unit-hierarchy>
         <div class="form-grid">
           {% for field in filter_form %}
             <div>
@@ -43,21 +46,25 @@
           <div class="table-responsive">
             <table class="table align-middle data-table">
               <thead>
-                <tr><th>Fecha</th><th>Proyecto</th><th>Unidad</th><th>Cliente</th><th>Valor</th><th>Encargo fiduciario</th><th>Origen</th></tr>
+                <tr><th>Fecha</th><th>Proyecto</th><th>Agrupacion</th><th>Unidad</th><th>Cliente</th><th>Valor</th><th>Concepto</th><th>Tipo</th><th>Recibido por</th><th>Encargo fiduciario</th><th>Origen</th></tr>
               </thead>
               <tbody>
                 {% for payment in payments %}
                   <tr>
                     <td>{% if payment.exact_date %}{{ payment.exact_date|date:"d/m/Y" }}{% else %}{{ payment.period_month }}/{{ payment.period_year }}{% endif %}</td>
                     <td><a href="{% url 'real_estate:project_list' %}?q={{ payment.assignment.property_unit.project.code }}">{{ payment.assignment.property_unit.project.name }}</a></td>
+                    <td>{% if payment.assignment.property_unit.structural_group %}{{ payment.assignment.property_unit.structural_group }}{% else %}-{% endif %}</td>
                     <td><a href="{% url 'real_estate:property_unit_history' payment.assignment.property_unit.pk %}">{{ payment.assignment.property_unit.name|default:payment.assignment.property_unit.code }}</a></td>
                     <td>{% if payment.display_client %}<a href="{% url 'fiduciary:client_detail' payment.display_client.pk %}">{{ payment.display_client.full_name }}</a>{% else %}-{% endif %}</td>
                     <td>{{ payment.amount|money_co }}</td>
+                    <td>{{ payment.concept|default:"-" }}</td>
+                    <td>{{ payment.display_movement_type }}</td>
+                    <td>{{ payment.get_destination_display|default:"-" }}</td>
                     <td><a href="{% url 'fiduciary:assignment_detail' payment.assignment.pk %}">{{ payment.assignment.assignment_number }}</a></td>
                     <td>{{ payment.source_file.get_file_type_display }} - {{ payment.source_file.original_name }}</td>
                   </tr>
                 {% empty %}
-                  <tr><td colspan="7">No hay pagos con los filtros seleccionados.</td></tr>
+                  <tr><td colspan="11">No hay pagos con los filtros seleccionados.</td></tr>
                 {% endfor %}
               </tbody>
             </table>
@@ -68,4 +75,5 @@
     </section>
   </main>
 </div>
+{% include "fiduciary/includes/unit_hierarchy_script.html" %}
 {% endblock %}

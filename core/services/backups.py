@@ -139,39 +139,35 @@ def create_backup(
         apply_retention_policy(drive_client=drive_client)
     if cleanup_pre_restore and backup_type in ORDINARY_TYPES:
         clear_active_pre_restore(reason="Reversión deshabilitada por nuevo respaldo ordinario válido.")
-    return BackupResult(record=record, created=True, message="Copia de seguridad creada correctamente.")
+    message = "Copia de seguridad local creada correctamente."
+    if drive_result:
+        if drive_result.synced:
+            message += " Google Drive: sincronizada correctamente."
+        else:
+            message += f" Google Drive: {drive_result.message}"
+    return BackupResult(record=record, created=True, message=message)
 
 
 def run_automatic_backup_if_needed(*, runner=None, drive_client=None):
     settings_obj = BackupSettings.get_solo()
     settings_obj.last_auto_check_at = timezone.now()
-    today = timezone.localdate()
-    if BackupRecord.objects.filter(
-        backup_type=BackupRecord.BackupType.AUTOMATIC,
-        status=BackupRecord.Status.SUCCESS,
-        created_at__date=today,
-    ).exists():
-        sync_pending_backups(client=drive_client)
-        settings_obj.last_auto_check_result = BackupSettings.LastCheckResult.NO_CHANGES
-        settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result", "updated_at"])
-        return BackupResult(record=None, created=False, message="Ya existe una copia automática para hoy.")
 
     latest_success = latest_successful_ordinary_backup()
     marker = current_change_marker()
     if latest_success and marker and latest_success.last_change_at and marker <= latest_success.last_change_at:
         sync_pending_backups(client=drive_client)
         settings_obj.last_auto_check_result = BackupSettings.LastCheckResult.NO_CHANGES
-        settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result", "updated_at"])
+        settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result"])
         return BackupResult(record=latest_success, created=False, message="No se detectaron cambios desde el último respaldo.")
     if latest_success and marker is None:
         sync_pending_backups(client=drive_client)
         settings_obj.last_auto_check_result = BackupSettings.LastCheckResult.NO_CHANGES
-        settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result", "updated_at"])
+        settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result"])
         return BackupResult(record=latest_success, created=False, message="No se detectaron cambios persistentes.")
 
     result = create_backup(backup_type=BackupRecord.BackupType.AUTOMATIC, runner=runner, drive_client=drive_client)
     settings_obj.last_auto_check_result = BackupSettings.LastCheckResult.BACKUP_CREATED
-    settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result", "updated_at"])
+    settings_obj.save(update_fields=["last_auto_check_at", "last_auto_check_result"])
     return result
 
 
@@ -191,10 +187,10 @@ def record_backup_failure(*, backup_type, message, user=None):
     return record
 
 
-def validate_backup_record(record):
+def validate_backup_record(record, *, recover_remote=False, client=None):
     try:
         _ensure_restorable_record(record)
-        zip_path = _safe_backup_file_path(record)
+        zip_path = ensure_local_backup_file(record, client=client) if recover_remote else _safe_backup_file_path(record)
         manifest = _validate_zip(zip_path, expected_checksum=record.checksum_sha256, strict=True)
     except BackupError as exc:
         return BackupValidationResult(valid=False, message=str(exc))
@@ -206,10 +202,52 @@ def validate_backup_record(record):
 def get_downloadable_backup_path(record):
     if not record.is_user_downloadable:
         raise BackupError("Este tipo de respaldo no está disponible para descarga.")
-    validation = validate_backup_record(record)
+    validation = validate_backup_record(record, recover_remote=True)
     if not validation.valid:
         raise BackupError(validation.message)
-    return _safe_backup_file_path(record)
+    return ensure_local_backup_file(record)
+
+
+def ensure_local_backup_file(record, *, client=None):
+    try:
+        return _safe_backup_file_path(record)
+    except BackupError as local_error:
+        if not _record_can_be_recovered_from_drive(record):
+            raise local_error
+
+    storage_dir = _prepare_storage_dir()
+    destination = storage_dir / (record.file_name or f"Backup_{record.backup_uid}.zip")
+    if destination.exists():
+        destination = storage_dir / _unique_named_backup(
+            storage_dir,
+            f"{destination.stem}_{uuid.uuid4().hex[:8]}",
+            destination.suffix or ".zip",
+        )
+    temp_path = destination.with_name(f".download_{uuid.uuid4().hex}_{destination.name}")
+    drive_client = client or GoogleDriveBackupClient()
+    try:
+        metadata = drive_client.get_file_metadata(record.drive_file_id)
+        if metadata.checksum_sha256 and metadata.checksum_sha256 != record.checksum_sha256:
+            raise BackupError("La metadata remota no coincide con el checksum esperado.")
+        drive_client.download_file(record.drive_file_id, temp_path)
+        if metadata.size is not None and temp_path.stat().st_size != metadata.size:
+            raise BackupError("La descarga desde Google Drive no coincide con el tamano remoto esperado.")
+        _validate_zip(temp_path, expected_checksum=record.checksum_sha256, strict=True)
+        _copy_into_storage_with_inheritance(temp_path, destination)
+    except BackupError:
+        _safe_unlink(temp_path)
+        raise
+    except (DriveNotConfigured, DriveBackupError) as exc:
+        _safe_unlink(temp_path)
+        raise BackupError(str(exc)) from exc
+    except OSError as exc:
+        _safe_unlink(temp_path)
+        raise BackupError("No fue posible conservar la copia descargada desde Google Drive.") from exc
+    record.file_path = str(destination)
+    record.file_size = destination.stat().st_size
+    record.save(update_fields=["file_path", "file_size"])
+    _audit(record, CHANGE, "Copia descargada desde Google Drive y validada localmente.")
+    return destination
 
 
 def import_external_backup(*, uploaded_file, user):
@@ -300,6 +338,7 @@ def sync_backup_to_drive(record, *, client=None, attempts=3, user=None):
                 file_name=record.file_name,
                 backup_id=backup_id,
                 checksum=checksum,
+                backup_type=record.backup_type,
             )
         except (DriveUnavailable, DriveBackupError) as exc:
             last_error = str(exc)
@@ -330,10 +369,13 @@ def sync_pending_backups(*, client=None, user=None):
     return results
 
 
-def restore_backup(*, record, user, dump_runner=None, restore_runner=None, post_check=None):
-    validation = validate_backup_record(record)
+def restore_backup(*, record, user, dump_runner=None, restore_runner=None, post_check=None, drive_client=None):
+    validation = validate_backup_record(record, recover_remote=True, client=drive_client)
     if not validation.valid:
         raise BackupError(validation.message)
+    restore_zip_path = ensure_local_backup_file(record, client=drive_client)
+    if restore_runner is None:
+        _validate_restore_archive(restore_zip_path)
 
     current_users = _capture_current_users()
     old_pre_restore_ids = list(_active_pre_restore_queryset().values_list("pk", flat=True))
@@ -351,7 +393,7 @@ def restore_backup(*, record, user, dump_runner=None, restore_runner=None, post_
     _replace_previous_pre_restores(exclude_pk=pre_restore.pk, previous_ids=old_pre_restore_ids)
 
     try:
-        _run_pg_restore(_safe_backup_file_path(record), runner=restore_runner)
+        _run_pg_restore(restore_zip_path, runner=restore_runner)
         reconciliation_message = _reconcile_current_users(current_users)
         _post_restore_check(checker=post_check)
     except BackupError as exc:
@@ -396,7 +438,7 @@ def revert_last_restore(*, user, restore_runner=None, post_check=None):
     if not validation.valid:
         raise BackupError(validation.message)
 
-    _run_pg_restore(_safe_backup_file_path(pre_restore), runner=restore_runner)
+    _run_pg_restore(ensure_local_backup_file(pre_restore), runner=restore_runner)
     _post_restore_check(checker=post_check)
 
     _delete_backup_file(pre_restore)
@@ -463,6 +505,7 @@ def apply_retention_policy(limit=None, drive_client=None):
     )
     actionable = [record for record in candidates if _is_actionable_ordinary_backup(record)]
     if len(actionable) <= limit:
+        apply_drive_retention_policy(limit=limit, drive_client=drive_client)
         return
     for record in actionable[limit:]:
         try:
@@ -483,6 +526,32 @@ def apply_retention_policy(limit=None, drive_client=None):
         record.message = "Archivo eliminado por política de retención."
         record.save(update_fields=["status", "message"])
         _audit(record, DELETION, "Respaldo retirado por política de retención.")
+
+
+    apply_drive_retention_policy(limit=limit, drive_client=drive_client)
+
+
+def apply_drive_retention_policy(limit=None, drive_client=None):
+    limit = limit or settings.BACKUP_RETENTION_ORDINARY
+    client = drive_client or GoogleDriveBackupClient()
+    if not hasattr(client, "list_managed_backups"):
+        return []
+    try:
+        remote_files = client.list_managed_backups()
+    except DriveNotConfigured:
+        return []
+    except DriveBackupError:
+        return []
+    ordinary = [item for item in remote_files if item.backup_type != BackupRecord.BackupType.PRE_RESTORE]
+    ordinary.sort(key=_remote_sort_key, reverse=True)
+    removed = []
+    for remote in ordinary[limit:]:
+        try:
+            client.delete_file(remote.file_id)
+        except DriveBackupError:
+            continue
+        removed.append(remote.file_id)
+    return removed
 
 
 def _tracked_models():
@@ -519,6 +588,21 @@ def _manifest_backup_uid(manifest):
 def _backup_remote_copy_is_safe(record):
     record.refresh_from_db(fields=["drive_sync_status", "drive_file_id"])
     return record.drive_sync_status == BackupRecord.DriveSyncStatus.SYNCED and bool(record.drive_file_id)
+
+
+def _record_can_be_recovered_from_drive(record):
+    return (
+        record.backup_type in ORDINARY_TYPES
+        and record.status == BackupRecord.Status.SUCCESS
+        and record.drive_sync_status == BackupRecord.DriveSyncStatus.SYNCED
+        and bool(record.drive_file_id)
+        and bool(record.checksum_sha256)
+        and bool(record.file_name)
+    )
+
+
+def _remote_sort_key(remote):
+    return (remote.created_time or "", remote.name or "", remote.file_id or "")
 
 
 def _find_drive_backup(record, client, *, audit_user=None):
@@ -639,8 +723,11 @@ def _unique_backup_name(storage_dir, timestamp):
 
 def _run_pg_dump(dump_path, runner=None):
     database = settings.DATABASES["default"]
+    executable = settings.BACKUP_PG_DUMP_PATH
+    if runner is None:
+        executable = _resolve_executable(executable, "pg_dump")
     command = [
-        settings.BACKUP_PG_DUMP_PATH,
+        executable,
         "--format=custom",
         "--file",
         str(dump_path),
@@ -659,7 +746,7 @@ def _run_pg_dump(dump_path, runner=None):
     runner = runner or subprocess.run
     result = runner(command, env=env, capture_output=True, text=True, check=False)
     if getattr(result, "returncode", 0) != 0:
-        raise BackupError("No fue posible generar el volcado de PostgreSQL.")
+        raise BackupError(_command_error_message("No fue posible generar el volcado de PostgreSQL.", result))
     if not dump_path.exists() or dump_path.stat().st_size == 0:
         raise BackupError("El volcado de PostgreSQL no fue generado correctamente.")
 
@@ -671,9 +758,14 @@ def _run_pg_restore(zip_path, runner=None):
         with zipfile.ZipFile(zip_path, "r") as archive:
             archive.extract(DUMP_NAME, path=temp_dir)
         dump_path = temp_dir / DUMP_NAME
+        env = os.environ.copy()
+        password = database.get("PASSWORD") or ""
+        if password:
+            env["PGPASSWORD"] = password
         executable = settings.BACKUP_PG_RESTORE_PATH
         if runner is None:
             executable = _resolve_executable(executable, "pg_restore")
+            _validate_pg_restore_dump(executable, dump_path, env)
         command = [
             executable,
             "--clean",
@@ -692,10 +784,6 @@ def _run_pg_restore(zip_path, runner=None):
             str(database.get("USER") or ""),
             str(dump_path),
         ]
-        env = os.environ.copy()
-        password = database.get("PASSWORD") or ""
-        if password:
-            env["PGPASSWORD"] = password
         runner = runner or subprocess.run
         should_close_connection = runner is subprocess.run
         if should_close_connection:
@@ -707,7 +795,21 @@ def _run_pg_restore(zip_path, runner=None):
     if should_close_connection:
         connection.close()
     if getattr(result, "returncode", 0) != 0:
-        raise BackupError("No fue posible restaurar el respaldo con pg_restore.")
+        raise BackupError(_command_error_message("No fue posible restaurar el respaldo con pg_restore.", result))
+
+
+def _validate_restore_archive(zip_path):
+    database = settings.DATABASES["default"]
+    env = os.environ.copy()
+    password = database.get("PASSWORD") or ""
+    if password:
+        env["PGPASSWORD"] = password
+    executable = _resolve_executable(settings.BACKUP_PG_RESTORE_PATH, "pg_restore")
+    with tempfile.TemporaryDirectory(prefix="pagosfiducia_restore_validate_") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            archive.extract(DUMP_NAME, path=temp_dir)
+        _validate_pg_restore_dump(executable, temp_dir / DUMP_NAME, env)
 
 
 def _build_manifest(*, backup_type, dump_path, checksum, backup_id):
@@ -1051,7 +1153,35 @@ def _resolve_executable(configured, tool_name):
     resolved = shutil.which(str(configured))
     if resolved:
         return resolved
+    for candidate in _postgresql_tool_candidates(tool_name):
+        if candidate.exists() and candidate.is_file():
+            return str(candidate)
     raise BackupError(f"La herramienta {tool_name} de PostgreSQL no está disponible en PATH.")
+
+def _postgresql_tool_candidates(tool_name):
+    candidates = []
+    for base in filter(None, [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")]):
+        root = Path(base) / "PostgreSQL"
+        if not root.exists():
+            continue
+        for version_dir in sorted(root.iterdir(), reverse=True):
+            candidates.append(version_dir / "bin" / f"{tool_name}.exe")
+            candidates.append(version_dir / "pgAdmin 4" / "runtime" / f"{tool_name}.exe")
+    return candidates
+
+
+def _validate_pg_restore_dump(executable, dump_path, env):
+    result = subprocess.run([executable, "--list", str(dump_path)], env=env, capture_output=True, text=True, check=False)
+    if getattr(result, "returncode", 0) != 0:
+        raise BackupError(_command_error_message("El dump no es compatible o no puede ser leido por pg_restore.", result))
+
+
+def _command_error_message(prefix, result):
+    output = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+    if not output:
+        return prefix
+    output = " ".join(output.split())
+    return f"{prefix} Detalle: {output[:500]}"
 
 
 def _copy_into_storage_with_inheritance(source, destination):

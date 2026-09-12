@@ -13,13 +13,15 @@
         <div><h1>Clientes</h1><p>Consulte y administre clientes asociados a unidades y encargos fiduciarios.</p></div>
         {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:client_create' %}">Nuevo cliente</a>{% endif %}
       </div>
-      <form class="filter-panel real-estate-filter" method="get">
+      <form class="filter-panel real-estate-filter" method="get" data-unit-hierarchy>
         <div><label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>{{ filter_form.q }}</div>
         <div><label class="form-label" for="{{ filter_form.document.id_for_label }}">{{ filter_form.document.label }}</label>{{ filter_form.document }}</div>
         <div><label class="form-label" for="{{ filter_form.document_type.id_for_label }}">{{ filter_form.document_type.label }}</label>{{ filter_form.document_type }}</div>
         <div><label class="form-label" for="{{ filter_form.information_status.id_for_label }}">{{ filter_form.information_status.label }}</label>{{ filter_form.information_status }}</div>
         <div><label class="form-label" for="{{ filter_form.status.id_for_label }}">{{ filter_form.status.label }}</label>{{ filter_form.status }}</div>
         <div><label class="form-label" for="{{ filter_form.project.id_for_label }}">{{ filter_form.project.label }}</label>{{ filter_form.project }}</div>
+        <div><label class="form-label" for="{{ filter_form.grouping_type.id_for_label }}">{{ filter_form.grouping_type.label }}</label>{{ filter_form.grouping_type }}</div>
+        <div><label class="form-label" for="{{ filter_form.structural_group.id_for_label }}">{{ filter_form.structural_group.label }}</label>{{ filter_form.structural_group }}</div>
         <div><label class="form-label" for="{{ filter_form.property_unit.id_for_label }}">{{ filter_form.property_unit.label }}</label>{{ filter_form.property_unit }}</div>
         <div class="filter-actions"><button class="btn btn-success" type="submit">Buscar</button><a class="btn btn-outline-secondary" href="{% url 'fiduciary:client_list' %}">Limpiar</a></div>
       </form>
@@ -57,4 +59,5 @@
     </section>
   </main>
 </div>
+{% include "fiduciary/includes/unit_hierarchy_script.html" %}
 {% endblock %}

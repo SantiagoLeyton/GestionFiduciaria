@@ -1,9 +1,12 @@
+from decimal import Decimal
+
 import pytest
 from django.core.exceptions import ValidationError
 from django.test import Client
 from django.urls import reverse
 
 from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
+from real_estate.querysets import with_natural_unit_order
 from users.models import User
 
 
@@ -384,6 +387,113 @@ def test_property_unit_duplicate_code_same_group_is_rejected(project, grouping_t
 
 
 @pytest.mark.django_db
+def test_property_unit_create_accepts_area_and_property_value(admin_client, project, grouping_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+
+    response = admin_client.post(
+        reverse("real_estate:property_unit_create"),
+        {
+            "project": project.pk,
+            "structural_group": tower.pk,
+            "code": "201",
+            "name": "Apartamento 201",
+            "description": "",
+            "is_active": "on",
+            "area": "55.20",
+            "property_value": "192172500",
+        },
+    )
+
+    unit = PropertyUnit.objects.get(code="201")
+    assert response.status_code == 302
+    assert unit.area == Decimal("55.20")
+    assert unit.property_value == Decimal("192172500.00")
+
+
+@pytest.mark.django_db
+def test_property_unit_create_requires_name_area_and_property_value(admin_client, project, grouping_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+
+    response = admin_client.post(
+        reverse("real_estate:property_unit_create"),
+        {
+            "project": project.pk,
+            "structural_group": tower.pk,
+            "code": "203",
+            "name": "   ",
+            "description": "",
+            "is_active": "on",
+            "area": "",
+            "property_value": "",
+        },
+    )
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert not PropertyUnit.objects.filter(code="203").exists()
+    assert "Registre el nombre de la unidad" in content
+    assert "Registre el area de la unidad" in content
+    assert "Registre el valor del inmueble" in content
+
+
+@pytest.mark.django_db
+def test_property_unit_edit_updates_area_and_property_value(admin_client, project, grouping_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    unit = PropertyUnit.objects.create(
+        project=project,
+        structural_group=tower,
+        code="202",
+        name="Apartamento 202",
+        area=Decimal("50.00"),
+        property_value=Decimal("180000000.00"),
+    )
+
+    response = admin_client.post(
+        reverse("real_estate:property_unit_update", args=[unit.pk]),
+        {
+            "project": project.pk,
+            "structural_group": tower.pk,
+            "code": unit.code,
+            "name": unit.name,
+            "description": "",
+            "is_active": "on",
+            "area": "65.50",
+            "property_value": "200000000",
+            "change_reason": "Actualizacion financiera",
+        },
+    )
+
+    unit.refresh_from_db()
+    assert response.status_code == 302
+    assert unit.area == Decimal("65.50")
+    assert unit.property_value == Decimal("200000000.00")
+
+
+@pytest.mark.django_db
+def test_property_unit_detail_shows_unit_and_financial_data(admin_client, project, grouping_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    unit = PropertyUnit.objects.create(
+        project=project,
+        structural_group=tower,
+        code="201",
+        name="Apartamento 201",
+        area=Decimal("55.20"),
+        property_value=Decimal("192172500.00"),
+        financial_entity="BBVA",
+    )
+
+    response = admin_client.get(reverse("real_estate:property_unit_history", args=[unit.pk]))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Unidad" in content
+    assert "55,20 m2" in content
+    assert "Informacion financiera" in content
+    assert "192.172.500" in content
+    assert "BBVA" in content
+
+
+@pytest.mark.django_db
 def test_property_unit_allows_multiple_without_code_in_same_group(project, grouping_type):
     tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
     first = PropertyUnit.objects.create(project=project, structural_group=tower, code="", name="Zona social")
@@ -473,6 +583,33 @@ def test_property_unit_filters_by_project_type_group_and_text(admin_client, proj
     assert "Sin titular" in content
     assert "Sin encargo fiduciario" in content
     assert "No se han realizado pagos aun" in content
+
+
+@pytest.mark.django_db
+def test_property_unit_natural_order_queryset_and_list(admin_client, project, grouping_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    expected = ["101", "102", "108", "201", "901", "1001", "1002", "1101"]
+    for code in ["1001", "1002", "1003A", "101", "LOCAL1", "102", "108", "201", "901", "1101"]:
+        PropertyUnit.objects.create(project=project, structural_group=tower, code=code, name=code)
+
+    queryset_order = list(
+        with_natural_unit_order(PropertyUnit.objects.filter(project=project, structural_group=tower)).values_list(
+            "code", flat=True
+        )
+    )
+    response = admin_client.get(
+        reverse("real_estate:property_unit_list"),
+        {"project": project.pk, "grouping_type": grouping_type.pk, "structural_group": tower.pk},
+    )
+    content = response.content.decode()
+
+    assert queryset_order[:8] == expected
+    assert queryset_order[-2:] == ["1003A", "LOCAL1"]
+    assert response.status_code == 200
+    assert [content.index(f"<td>{code}</td>") for code in expected] == sorted(
+        content.index(f"<td>{code}</td>") for code in expected
+    )
+    assert content.index("<td>1101</td>") < content.index("<td>1003A</td>")
 
 
 @pytest.mark.django_db

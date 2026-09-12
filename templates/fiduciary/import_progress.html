@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}Procesando importación histórica | Centenario Gestión Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Procesando importación histórica</h1>
+          <p>Lote #{{ batch.pk }}</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_list' %}">Volver</a>
+      </div>
+
+      <section class="data-section" data-import-progress data-progress-url="{{ progress_url }}" data-preview-url="{{ preview_url }}">
+        <div class="section-header">
+          <h2>Procesamiento en curso</h2>
+          <span data-progress-status>{{ batch.get_status_display }}</span>
+        </div>
+        <div class="progress mb-3" role="progressbar" aria-label="Progreso de importación" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar bg-success" data-progress-bar style="width: 0%">0%</div>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-3"><strong>Porcentaje</strong><div data-progress-percent>0%</div></div>
+          <div class="col-md-3"><strong>Hoja actual</strong><div data-progress-sheet>-</div></div>
+          <div class="col-md-3"><strong>Hojas</strong><div data-progress-sheets>-</div></div>
+          <div class="col-md-3"><strong>Filas</strong><div data-progress-rows>-</div></div>
+        </div>
+        <div class="alert alert-danger mt-3 d-none" data-progress-error></div>
+        <div class="form-actions mt-3 d-none" data-progress-actions>
+          <a class="btn btn-success" href="{{ preview_url }}">Ver resultados</a>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    const panel = document.querySelector("[data-import-progress]");
+    if (!panel) return;
+    const progressUrl = panel.dataset.progressUrl;
+    const previewUrl = panel.dataset.previewUrl;
+    const bar = panel.querySelector("[data-progress-bar]");
+    const status = panel.querySelector("[data-progress-status]");
+    const percentText = panel.querySelector("[data-progress-percent]");
+    const sheetText = panel.querySelector("[data-progress-sheet]");
+    const sheetsText = panel.querySelector("[data-progress-sheets]");
+    const rowsText = panel.querySelector("[data-progress-rows]");
+    const errorBox = panel.querySelector("[data-progress-error]");
+    const actions = panel.querySelector("[data-progress-actions]");
+
+    function render(payload) {
+      const progress = payload.progress || {};
+      const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
+      bar.style.width = percent + "%";
+      bar.textContent = percent + "%";
+      percentText.textContent = percent + "%";
+      status.textContent = payload.status || progress.phase || "Procesando";
+      sheetText.textContent = progress.sheet || "-";
+      sheetsText.textContent = progress.total_sheets ? ((progress.sheet_index || 0) + " de " + progress.total_sheets) : "-";
+      rowsText.textContent = progress.total_rows ? ((progress.processed_rows || 0) + " de " + progress.total_rows) : "-";
+      if (payload.status === "completed" || percent >= 100 && payload.status !== "failed") {
+        actions.classList.remove("d-none");
+        window.setTimeout(function () { window.location.href = previewUrl; }, 900);
+        return;
+      }
+      if (payload.status === "failed") {
+        errorBox.textContent = progress.error || "No fue posible completar el procesamiento del libro.";
+        errorBox.classList.remove("d-none");
+        actions.classList.remove("d-none");
+        return;
+      }
+      window.setTimeout(fetchProgress, 1200);
+    }
+
+    function fetchProgress() {
+      fetch(progressUrl, {headers: {"Accept": "application/json"}})
+        .then(function (response) { return response.json(); })
+        .then(render)
+        .catch(function () {
+          errorBox.textContent = "No fue posible consultar el progreso. Intente abrir los resultados del lote.";
+          errorBox.classList.remove("d-none");
+          actions.classList.remove("d-none");
+        });
+    }
+
+    fetchProgress();
+  });
+</script>
+{% endblock %}

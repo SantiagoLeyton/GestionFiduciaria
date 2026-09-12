@@ -15,6 +15,13 @@
           {% csrf_token %}
           {{ form.non_field_errors }}
           <div class="mb-3">{{ form.assignment.label_tag }}{{ form.assignment }}{{ form.assignment.errors }}</div>
+          <div class="mb-3">{{ form.payment_destination.label_tag }}{{ form.payment_destination }}{{ form.payment_destination.errors }}</div>
+          <div class="mb-3">
+            {{ form.financial_entity.label_tag }}
+            {{ form.financial_entity }}
+            <div class="form-text">Se actualiza en la unidad del encargo seleccionado solo al guardar.</div>
+            {{ form.financial_entity.errors }}
+          </div>
           <div class="mb-3">{{ form.resolution_note.label_tag }}{{ form.resolution_note }}{{ form.resolution_note.errors }}</div>
           <a class="btn btn-outline-secondary" href="{% url 'fiduciary:daily_report_preview' batch.pk %}">Volver</a>
           <button class="btn btn-success" type="submit">Guardar resolucion</button>
@@ -23,4 +30,18 @@
     </section>
   </main>
 </div>
+{{ assignment_financial_entities|json_script:"assignment-financial-entities" }}
+<script>
+  (function () {
+    var entities = JSON.parse(document.getElementById("assignment-financial-entities").textContent);
+    var assignment = document.getElementById("id_assignment");
+    var financialEntity = document.getElementById("id_financial_entity");
+    if (!assignment || !financialEntity) {
+      return;
+    }
+    assignment.addEventListener("change", function () {
+      financialEntity.value = entities[assignment.value] || "";
+    });
+  })();
+</script>
 {% endblock %}

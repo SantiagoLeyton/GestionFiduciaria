@@ -28,6 +28,11 @@ class ParserIssue:
     sheet_name: str | None = None
     row_number: int | None = None
     column_letter: str | None = None
+    unit_code: str = ""
+    field_name: str = ""
+    found_value: str = ""
+    cause: str = ""
+    extra_data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,8 @@ class DetectedColumn:
     normalized_header: str
     index: int
     letter: str
+    expected_header: str = ""
+    match_type: str = "exact"
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,11 @@ class HistoricalClient:
 class HistoricalAssignment:
     assignment_number: str
     status: str | None = None
+    previous_assignment_number: str | None = None
+    adhesion_contract_date: str | None = None
+    promise_date: str | None = None
+    promised_delivery_date: str | None = None
+    actual_delivery_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,8 +83,33 @@ class HistoricalMonthlyPayment:
     source_row: int
     source_column: str
     source_header: str
+    destination: str | None = None
     has_formula: bool = False
     has_cached_value: bool = False
+
+
+@dataclass(frozen=True)
+class ReconstructedHistoricalPayment:
+    category: str
+    date_value: str
+    receipt: str
+    receipt_source: str
+    receipt_source_header: str
+    receipt_source_column: str
+    receipt_source_order: int
+    receipt_order: int
+    amount: Decimal
+    value_source_column: str
+    value_source_header: str
+    destination: str | None
+    value_source_order: int
+    source_row: int
+    sheet_name: str
+    value_had_formula: bool = False
+    value_formula: str = ""
+    date_relation_status: str = "exact"
+    ambiguous_date_values: tuple[str, ...] = ()
+    ambiguous_receipt_values: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -114,10 +151,14 @@ class HistoricalRow:
     grouping_name: str
     unit_code: str | None
     unit_name: str | None
-    assignment: HistoricalAssignment | None
+    assignment: HistoricalAssignment | None = None
+    area: Decimal | None = None
+    property_value: Decimal | None = None
+    financial_entity: str = ""
     observation: str = ""
     clients: list[HistoricalClient] = field(default_factory=list)
     payments: list[HistoricalMonthlyPayment] = field(default_factory=list)
+    reconstructed_payments: list[ReconstructedHistoricalPayment] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

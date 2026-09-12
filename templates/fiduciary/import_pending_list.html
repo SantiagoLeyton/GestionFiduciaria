@@ -12,7 +12,7 @@
       <div class="page-heading">
         <div>
           <h1>Elementos pendientes</h1>
-          <p>Lote #{{ batch.pk }}. Cada decision se aplicara a las apariciones equivalentes del lote.</p>
+          <p>Lote #{{ batch.pk }}. Cada decisión se aplica al pendiente seleccionado y puede propagarse a similares solo con confirmación.</p>
         </div>
         <div class="actions-cell">
           <form method="post" action="{% url 'fiduciary:historical_import_reanalyze_pending' batch.pk %}">
@@ -48,7 +48,7 @@
                   </td>
                   <td>
                     {% if element.structural_context.missing_grouping_type %}
-                      Tipo de agrupacion no indicado por el archivo
+                      Tipo de agrupación no indicado por el archivo
                       <div class="text-muted small">No falta una fila del Excel; debe clasificar el nivel estructural detectado.</div>
                     {% else %}
                       {{ element.raw_value }}
@@ -57,7 +57,7 @@
                   <td>{{ element.occurrence_count }}</td>
                   <td>
                     {% if element.structural_context.project_name %}<div>Proyecto: {{ element.structural_context.project_name }}</div>{% endif %}
-                    {% if element.structural_context.grouping_name %}<div>Agrupacion detectada: {{ element.structural_context.grouping_name }}</div>{% endif %}
+                    {% if element.structural_context.grouping_name %}<div>Agrupación detectada: {{ element.structural_context.grouping_name }}</div>{% endif %}
                     {% if element.structural_context.explanation %}<div class="text-muted small">{{ element.structural_context.explanation }}</div>{% endif %}
                     {% if not element.structural_context.project_name and not element.structural_context.grouping_name and not element.structural_context.explanation %}-{% endif %}
                   </td>

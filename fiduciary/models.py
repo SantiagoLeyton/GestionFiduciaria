@@ -168,6 +168,10 @@ class UnitOwnership(DatedActiveRelation):
 class FiduciaryAssignment(DatedActiveRelation):
     assignment_number = models.CharField("numero de encargo fiduciario", max_length=80, unique=True)
     property_unit = models.ForeignKey(PropertyUnit, on_delete=models.PROTECT, related_name="fiduciary_assignments")
+    adhesion_contract_date = models.DateField("fecha contrato de adhesion", blank=True, null=True)
+    promise_date = models.DateField("fecha de promesa", blank=True, null=True)
+    promised_delivery_date = models.DateField("entrega segun promesa", blank=True, null=True)
+    actual_delivery_date = models.DateField("entrega real", blank=True, null=True)
     observations = models.TextField("observaciones", blank=True)
 
     class Meta:
@@ -694,6 +698,11 @@ class ImportRowIssue(models.Model):
     )
     row_number = models.PositiveIntegerField("fila", blank=True, null=True)
     column_letter = models.CharField("columna", max_length=10, blank=True)
+    unit_code = models.CharField("unidad", max_length=80, blank=True)
+    field_name = models.CharField("campo", max_length=120, blank=True)
+    found_value = models.TextField("valor encontrado", blank=True)
+    cause = models.TextField("causa", blank=True)
+    extra_data = models.JSONField("datos adicionales", default=dict, blank=True)
     severity = models.CharField("severidad", max_length=16, choices=Severity.choices)
     code = models.CharField("codigo", max_length=80)
     message = models.TextField("mensaje sanitizado")
@@ -710,6 +719,10 @@ class ImportRowIssue(models.Model):
     def clean(self):
         super().clean()
         self.column_letter = self.column_letter.strip().upper()
+        self.unit_code = self.unit_code.strip()
+        self.field_name = self.field_name.strip()
+        self.found_value = self.found_value.strip()
+        self.cause = self.cause.strip()
         self.code = self.code.strip()
         self.message = self.message.strip()
 
@@ -873,20 +886,28 @@ class Payment(TimestampedModel):
     class DatePrecision(models.TextChoices):
         EXACT = "exact", "Fecha exacta"
         MONTH = "month", "Periodo mensual"
+        AMBIGUOUS = "ambiguous", "Fechas historicas ambiguas"
 
     class MovementType(models.TextChoices):
         HISTORICAL_PAYMENT = "historical_payment", "Pago historico"
         ADDITION = "addition", "Adicion"
         WITHDRAWAL = "withdrawal", "Retiro"
 
+    class Destination(models.TextChoices):
+        CONSTRUCTORA = "constructora", "Constructora"
+        FIDUCIARIA = "fiduciaria", "Fiduciaria"
+
     assignment = models.ForeignKey(FiduciaryAssignment, on_delete=models.PROTECT, related_name="payments")
     exact_date = models.DateField("fecha exacta", blank=True, null=True)
     period_year = models.PositiveSmallIntegerField("ano del periodo", blank=True, null=True)
     period_month = models.PositiveSmallIntegerField("mes del periodo", blank=True, null=True)
-    date_precision = models.CharField("precision de fecha", max_length=8, choices=DatePrecision.choices)
+    date_precision = models.CharField("precision de fecha", max_length=16, choices=DatePrecision.choices)
     amount = models.DecimalField("valor", max_digits=18, decimal_places=2)
     concept = models.CharField("concepto", max_length=180, blank=True, null=True)
+    destination = models.CharField("recibido por", max_length=16, choices=Destination.choices, blank=True, null=True)
     movement_type = models.CharField("tipo de movimiento", max_length=24, choices=MovementType.choices)
+    historical_date_values = models.JSONField("fechas historicas sin relacion determinada", default=list, blank=True)
+    historical_receipt_values = models.JSONField("recibos historicos sin relacion determinada", default=list, blank=True)
     source_file = models.ForeignKey(ImportedFile, on_delete=models.PROTECT, related_name="payments")
     source_sheet = models.CharField("hoja origen", max_length=150)
     source_row = models.PositiveIntegerField("fila origen")
@@ -899,13 +920,14 @@ class Payment(TimestampedModel):
         ordering = ("assignment", "-exact_date", "-period_year", "-period_month", "-created_at")
         indexes = [
             models.Index(fields=["assignment", "exact_date", "amount"], name="fiduciary_payment_exact_idx"),
+            models.Index(fields=["destination"], name="fiduciary_payment_dest_idx"),
             models.Index(fields=["assignment", "period_year", "period_month", "amount"], name="fiduciary_payment_month_idx"),
             models.Index(fields=["source_file", "source_sheet", "source_row", "source_column"], name="fiduciary_payment_source_idx"),
         ]
         constraints = [
-            models.CheckConstraint(condition=Q(amount__gt=0), name="fiduciary_payment_amount_positive"),
+            models.CheckConstraint(condition=Q(amount__gte=0), name="fiduciary_payment_amount_positive"),
             models.CheckConstraint(
-                condition=Q(date_precision__in=["exact", "month"]),
+                condition=Q(date_precision__in=["exact", "month", "ambiguous"]),
                 name="fiduciary_payment_date_precision_valid",
             ),
             models.CheckConstraint(
@@ -913,9 +935,14 @@ class Payment(TimestampedModel):
                 name="fiduciary_payment_movement_type_valid",
             ),
             models.CheckConstraint(
+                condition=Q(destination__isnull=True) | Q(destination__in=["constructora", "fiduciaria"]),
+                name="fiduciary_payment_destination_valid",
+            ),
+            models.CheckConstraint(
                 condition=(
                     Q(date_precision="exact", exact_date__isnull=False, period_year__isnull=True, period_month__isnull=True)
                     | Q(date_precision="month", exact_date__isnull=True, period_year__isnull=False, period_month__isnull=False)
+                    | Q(date_precision="ambiguous", exact_date__isnull=True, period_year__isnull=True, period_month__isnull=True)
                 ),
                 name="fiduciary_payment_one_date_mode",
             ),
@@ -938,11 +965,12 @@ class Payment(TimestampedModel):
     def clean(self):
         super().clean()
         self.concept = self.concept.strip() if self.concept else None
+        self.destination = self.destination.strip() if self.destination else None
         self.source_sheet = self.source_sheet.strip()
         self.source_column = self.source_column.strip().upper() if self.source_column else None
         self.source_header = self.source_header.strip() if self.source_header else None
-        if self.amount is not None and self.amount <= 0:
-            raise ValidationError({"amount": "El valor debe ser mayor que cero."})
+        if self.amount is not None and self.amount < 0:
+            raise ValidationError({"amount": "El valor no puede ser negativo."})
         if self.date_precision == self.DatePrecision.EXACT:
             if not self.exact_date:
                 raise ValidationError({"exact_date": "Registre la fecha exacta del pago."})
@@ -955,6 +983,11 @@ class Payment(TimestampedModel):
                 raise ValidationError("Registre ano y mes del periodo.")
             if not 1 <= self.period_month <= 12:
                 raise ValidationError({"period_month": "El mes debe estar entre 1 y 12."})
+        elif self.date_precision == self.DatePrecision.AMBIGUOUS:
+            if self.exact_date or self.period_year or self.period_month:
+                raise ValidationError("Un pago con fechas historicas ambiguas no debe tener fecha exacta ni periodo mensual.")
+            if not self.historical_date_values:
+                raise ValidationError({"historical_date_values": "Conserve las fechas historicas conocidas del pago ambiguo."})
         else:
             raise ValidationError({"date_precision": "Seleccione una precision de fecha valida."})
 
@@ -1116,6 +1149,7 @@ class DailyReportRow(models.Model):
         choices=Payment.MovementType.choices,
         default=Payment.MovementType.ADDITION,
     )
+    payment_destination = models.CharField("recibido por", max_length=16, choices=Payment.Destination.choices, blank=True, null=True)
     payer_name = models.CharField("pagador", max_length=180, blank=True)
     payer_document = models.CharField("identificacion del pagador", max_length=80, blank=True)
     concept = models.CharField("concepto", max_length=180, blank=True)

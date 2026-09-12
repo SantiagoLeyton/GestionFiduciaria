@@ -7,6 +7,7 @@ import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import PermissionDenied
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import Client as DjangoClient, override_settings
 from django.urls import reverse
 
 from fiduciary.imports.cancellation import cancel_import_batch
@@ -68,6 +69,36 @@ def make_batch(user):
         load_mode=ImportBatch.LoadMode.SINGLE_FILE,
         status=ImportBatch.Status.ANALYZING,
         total_files=1,
+    )
+
+
+def make_report_file(batch, sha="c"):
+    return ImportedFile.objects.create(
+        batch=batch,
+        original_name="reporte-prueba.xlsx",
+        extension=".xlsx",
+        size_bytes=128,
+        sha256=sha * 64,
+        file_type=ImportedFile.FileType.REPORT,
+        status=ImportedFile.Status.READY,
+        order=1,
+    )
+
+
+def make_daily_report_row(batch, imported_file, *, number="999999", status=DailyReportRow.Status.ASSIGNMENT_NOT_FOUND):
+    return DailyReportRow.objects.create(
+        batch=batch,
+        imported_file=imported_file,
+        sheet_name="Reporte",
+        row_number=batch.daily_report_rows.count() + 2,
+        original_assignment_number=number,
+        normalized_assignment_number=number,
+        payment_date=date(2026, 7, 25),
+        amount=Decimal("1250000.00"),
+        movement_type=Payment.MovementType.ADDITION,
+        concept="Pago diario",
+        status=status,
+        message="Encargo pendiente de resolucion.",
     )
 
 
@@ -209,6 +240,7 @@ def test_analyze_daily_report_classifies_existing_missing_invalid_and_duplicate(
         DailyReportRow.Status.INVALID_DATE,
         DailyReportRow.Status.INVALID_AMOUNT,
     ]
+    assert set(batch.daily_report_rows.values_list("payment_destination", flat=True)) == {Payment.Destination.FIDUCIARIA}
 
 
 def test_duplicate_sha_is_rejected(tmp_path, accounting_admin_user):
@@ -250,6 +282,9 @@ def test_real_montecielo_xls_full_flow_and_sha_idempotence(accounting_admin_user
     assert batch.status == ImportBatch.Status.COMPLETED
     assert result.imported_rows == 3
     assert Payment.objects.filter(source_file__batch=batch).count() == 3
+    assert set(Payment.objects.filter(source_file__batch=batch).values_list("destination", flat=True)) == {
+        Payment.Destination.FIDUCIARIA
+    }
     first_payment = Payment.objects.get(source_row=6)
     assert first_payment.assignment.assignment_number == "002010980323"
     assert first_payment.exact_date == date(2026, 7, 14)
@@ -321,6 +356,124 @@ def test_manual_resolution_reanalyze_and_finalization(accounting_admin_user):
     assert ImportAppliedRecord.objects.filter(batch=batch, entity_kind=ImportAppliedRecord.EntityKind.PAYMENT).exists()
 
 
+def test_daily_report_resolution_shows_assignment_financial_entity(accounting_admin_user):
+    assignment = make_assignment("700001")
+    assignment.property_unit.financial_entity = "BANCO CAJA SOCIAL"
+    assignment.property_unit.save(update_fields=["financial_entity"])
+    batch = make_batch(accounting_admin_user)
+    imported_file = make_report_file(batch)
+    row = make_daily_report_row(batch, imported_file, number="SIN-ENCARGO")
+    row.assignment = assignment
+    row.save(update_fields=["assignment"])
+    client = DjangoClient()
+    client.force_login(accounting_admin_user)
+
+    response = client.get(reverse("fiduciary:daily_report_resolve", args=[batch.pk, row.pk]))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "Entidad financiera" in content
+    assert "BANCO CAJA SOCIAL" in content
+    assert "Recibido por" in content
+    assert "Fiduciaria" in content
+
+
+def test_daily_report_create_route_opens_for_authenticated_user(accounting_admin_user):
+    client = DjangoClient(HTTP_HOST="127.0.0.1")
+    client.force_login(accounting_admin_user)
+
+    response = client.get(reverse("fiduciary:daily_report_create"))
+
+    assert response.status_code == 200
+    assert "Reportes diarios" in response.content.decode()
+
+
+def test_daily_report_resolution_can_fill_empty_unit_financial_entity(accounting_admin_user):
+    assignment = make_assignment("700002")
+    batch = make_batch(accounting_admin_user)
+    imported_file = make_report_file(batch)
+    row = make_daily_report_row(batch, imported_file, number="SIN-ENCARGO")
+    make_daily_report_row(batch, imported_file, number="PENDIENTE")
+    client = DjangoClient()
+    client.force_login(accounting_admin_user)
+
+    response = client.post(
+        reverse("fiduciary:daily_report_resolve", args=[batch.pk, row.pk]),
+        {
+            "assignment": assignment.pk,
+            "financial_entity": "  BBVA  ",
+            "resolution_note": "Banco informado al resolver pago.",
+        },
+    )
+
+    assignment.property_unit.refresh_from_db()
+    batch.refresh_from_db()
+    assert response.status_code == 302
+    assert batch.status == ImportBatch.Status.AWAITING_RESOLUTION
+    assert assignment.property_unit.financial_entity == "BBVA"
+
+
+def test_daily_report_resolution_updates_unit_financial_entity(accounting_admin_user):
+    assignment = make_assignment("700003")
+    assignment.property_unit.financial_entity = "BANCO ANTIGUO"
+    assignment.property_unit.save(update_fields=["financial_entity"])
+    batch = make_batch(accounting_admin_user)
+    imported_file = make_report_file(batch)
+    row = make_daily_report_row(batch, imported_file, number="SIN-ENCARGO")
+    make_daily_report_row(batch, imported_file, number="PENDIENTE")
+    client = DjangoClient()
+    client.force_login(accounting_admin_user)
+
+    response = client.post(
+        reverse("fiduciary:daily_report_resolve", args=[batch.pk, row.pk]),
+        {
+            "assignment": assignment.pk,
+            "financial_entity": "BANCO NUEVO",
+            "resolution_note": "",
+        },
+    )
+
+    assignment.property_unit.refresh_from_db()
+    assert response.status_code == 302
+    assert assignment.property_unit.financial_entity == "BANCO NUEVO"
+
+
+def test_daily_report_payment_registration_does_not_clear_existing_financial_entity(
+    tmp_path, accounting_admin_user
+):
+    assignment = make_assignment("700004")
+    assignment.property_unit.financial_entity = "BANCO DE BOGOTA"
+    assignment.property_unit.save(update_fields=["financial_entity"])
+    batch = make_batch(accounting_admin_user)
+    imported_file = make_report_file(batch)
+    stored_path = Path("imports/reports/reporte-prueba.xlsx")
+    (tmp_path / stored_path.parent).mkdir(parents=True)
+    (tmp_path / stored_path).write_bytes(b"reporte")
+    imported_file.stored_path = str(stored_path)
+    imported_file.save(update_fields=["stored_path"])
+    row = make_daily_report_row(batch, imported_file, number="SIN-ENCARGO")
+    client = DjangoClient()
+    client.force_login(accounting_admin_user)
+
+    with override_settings(MEDIA_ROOT=tmp_path):
+        response = client.post(
+            reverse("fiduciary:daily_report_resolve", args=[batch.pk, row.pk]),
+            {
+                "assignment": assignment.pk,
+                "financial_entity": "",
+                "resolution_note": "Resuelto sin cambiar banco.",
+            },
+        )
+
+    assignment.property_unit.refresh_from_db()
+    batch.refresh_from_db()
+    assert response.status_code == 302
+    assert batch.status == ImportBatch.Status.COMPLETED
+    payment = Payment.objects.get(assignment=assignment)
+    assert payment.destination == Payment.Destination.FIDUCIARIA
+    assert assignment.property_unit.financial_entity == "BANCO DE BOGOTA"
+
+
 def test_finalization_blocks_when_pending_and_completed_retry(accounting_admin_user):
     batch = make_batch(accounting_admin_user)
     analyze_daily_report_import(batch=batch, file_path=REPORT)
@@ -370,7 +523,12 @@ def test_views_for_daily_report_flow(client, accounting_admin_user, tmp_path):
         response = client.post(reverse("fiduciary:daily_report_create"), {"file": handle}, follow=True)
     assert response.status_code == 200
     batch = ImportBatch.objects.get(import_type=ImportBatch.ImportType.REPORTS)
-    assert "Previsualizacion de reporte diario" in response.content.decode()
+    preview_response = client.get(reverse("fiduciary:daily_report_preview", args=[batch.pk]))
+    content = preview_response.content.decode()
+    assert preview_response.status_code == 200
+    assert "Previsualizacion de reporte diario" in content
+    assert f"Lote #{batch.pk}" not in content
+    assert "Estado:" in content
     response = client.get(reverse("fiduciary:daily_report_finalize", args=[batch.pk]))
     assert response.status_code == 200
 
@@ -387,6 +545,9 @@ def test_view_uploads_real_montecielo_xls_report(client, accounting_admin_user):
     content = response.content.decode()
     assert "Resumen de carga" in content
     assert "Ver lote" in content
+    assert "<th>Lote</th>" not in content
+    assert f"#{ImportBatch.objects.get(import_type=ImportBatch.ImportType.REPORTS).pk}" not in content
+    assert reverse("fiduciary:daily_report_preview", args=[ImportBatch.objects.get(import_type=ImportBatch.ImportType.REPORTS).pk]) in content
 
 
 def test_daily_report_multi_upload_summarizes_duplicate_selection(client, accounting_admin_user):
@@ -403,6 +564,10 @@ def test_daily_report_multi_upload_summarizes_duplicate_selection(client, accoun
 
     assert response.redirect_chain[-1][0] == reverse("fiduciary:import_upload_summary")
     assert ImportBatch.objects.count() == 1
+    batch = ImportBatch.objects.get()
     assert "Duplicados" in content
     assert "dos.xlsx" in content
+    assert "<th>Lote</th>" not in content
+    assert f"#{batch.pk}" not in content
+    assert reverse("fiduciary:daily_report_preview", args=[batch.pk]) in content
     assert DailyReportRow.objects.count() == len(DailyReportParser(REPORT).parse().rows)

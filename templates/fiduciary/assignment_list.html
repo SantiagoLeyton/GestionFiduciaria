@@ -10,9 +10,10 @@
     <section class="content">
       {% include "includes/messages.html" %}
       <div class="page-heading">
-        <div><h1>Encargos fiduciarios</h1><p>Consulte encargos, titulares y relacion con unidades inmobiliarias. Los nuevos encargos se registran desde Nueva titularidad.</p></div>
+        <div><h1>Encargos fiduciarios</h1><p>Consulte encargos, titulares y relacion con unidades inmobiliarias.</p></div>
+        {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:assignment_create' %}">Nuevo Encargo</a>{% endif %}
       </div>
-      <form class="filter-panel real-estate-filter" method="get">
+      <form class="filter-panel real-estate-filter" method="get" data-unit-hierarchy>
         <div><label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>{{ filter_form.q }}</div>
         <div><label class="form-label" for="{{ filter_form.project.id_for_label }}">{{ filter_form.project.label }}</label>{{ filter_form.project }}</div>
         <div><label class="form-label" for="{{ filter_form.grouping_type.id_for_label }}">{{ filter_form.grouping_type.label }}</label>{{ filter_form.grouping_type }}</div>
@@ -25,17 +26,17 @@
         <div class="filter-actions"><button class="btn btn-success" type="submit">Buscar</button><a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_list' %}">Limpiar</a></div>
       </form>
       <section class="data-section">
-        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Encargo</th><th>Proyecto</th><th>Unidad</th><th>Titular principal</th><th>Secundarios</th><th>Periodo</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>
+        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Encargo</th><th>Proyecto</th><th>Agrupacion</th><th>Unidad</th><th>Titular principal</th><th>Secundarios</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>
           {% for assignment in assignments %}
             <tr>
               <td><a href="{% url 'fiduciary:assignment_detail' assignment.pk %}">{{ assignment.assignment_number }}</a></td>
               <td>{{ assignment.property_unit.project.name }}</td>
+              <td>{% if assignment.property_unit.structural_group %}{{ assignment.property_unit.structural_group }}{% else %}-{% endif %}</td>
               <td>{{ assignment.property_unit }}</td>
               <td>{% for holder in assignment.holders.all %}{% if holder.is_active and holder.is_primary %}{{ holder.client.full_name }}{% endif %}{% empty %}-{% endfor %}</td>
               <td>{% for holder in assignment.holders.all %}{% if holder.is_active and not holder.is_primary %}{{ holder.client.full_name }}{% if not forloop.last %}, {% endif %}{% endif %}{% empty %}-{% endfor %}</td>
-              <td>{{ assignment.start_date }} - {{ assignment.end_date|default:"Vigente" }}</td>
-              <td>{% if assignment.is_active %}<span class="status-pill status-active">Vigente</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
-              <td class="actions-cell"><a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Ver</a>{% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_update' assignment.pk %}">Editar</a>{% endif %}</td>
+              <td>{% if assignment.operationally_active %}<span class="status-pill status-active">Vigente</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
+              <td class="actions-cell"><a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Ver</a>{% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_update' assignment.pk %}">Actualizar informacion contractual</a>{% endif %}</td>
             </tr>
           {% empty %}<tr><td colspan="8">No hay encargos registrados.</td></tr>{% endfor %}
         </tbody></table></div>
@@ -44,4 +45,5 @@
     </section>
   </main>
 </div>
+{% include "fiduciary/includes/unit_hierarchy_script.html" %}
 {% endblock %}

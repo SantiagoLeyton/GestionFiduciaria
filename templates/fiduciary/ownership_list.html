@@ -14,12 +14,13 @@
         {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:ownership_create' %}">Nueva titularidad</a>{% endif %}
       </div>
       <section class="data-section">
-        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Cliente</th><th>Unidad</th><th>Proyecto</th><th>Rol</th><th>Periodo</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>
+        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Cliente</th><th>Proyecto</th><th>Agrupacion</th><th>Unidad</th><th>Rol</th><th>Periodo</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>
           {% for ownership in ownerships %}
             <tr>
               <td><a href="{% url 'fiduciary:client_detail' ownership.client.pk %}">{{ ownership.client.full_name }}</a></td>
-              <td>{{ ownership.property_unit }}</td>
               <td>{{ ownership.property_unit.project.name }}</td>
+              <td>{% if ownership.property_unit.structural_group %}{{ ownership.property_unit.structural_group }}{% else %}-{% endif %}</td>
+              <td>{{ ownership.property_unit }}</td>
               <td>{% if ownership.is_primary %}Principal{% else %}Secundario{% endif %}</td>
               <td>{{ ownership.start_date }} - {{ ownership.end_date|default:"Vigente" }}</td>
               <td>{% if ownership.is_active %}Vigente{% else %}Finalizada{% endif %}</td>
@@ -44,7 +45,7 @@
                 {% endif %}
               </td>
             </tr>
-          {% empty %}<tr><td colspan="7">No hay titularidades registradas.</td></tr>{% endfor %}
+          {% empty %}<tr><td colspan="8">No hay titularidades registradas.</td></tr>{% endfor %}
         </tbody></table></div>
         {% include "includes/pagination.html" %}
       </section>

@@ -41,6 +41,24 @@ class UserSearchForm(forms.Form):
     )
 
 
+class UserActionReasonForm(forms.Form):
+    reason = forms.CharField(
+        label="Motivo",
+        required=True,
+        widget=forms.Textarea(
+            attrs={
+                "class": "form-control",
+                "rows": 3,
+                "placeholder": "Ingrese el motivo de la operacion",
+            }
+        ),
+        error_messages={"required": "Ingrese el motivo de la operacion."},
+    )
+
+    def clean_reason(self):
+        return self.cleaned_data["reason"].strip()
+
+
 class BaseManagedUserForm(forms.ModelForm):
     class Meta:
         model = User
@@ -62,18 +80,39 @@ class BaseManagedUserForm(forms.ModelForm):
 
     def __init__(self, *args, actor=None, **kwargs):
         self.actor = actor
+        self.deleted_user_for_reuse = None
         super().__init__(*args, **kwargs)
+        self.fields["first_name"].required = True
+        self.fields["last_name"].required = True
+        self.fields["first_name"].error_messages["required"] = "Registre el nombre del usuario."
+        self.fields["last_name"].error_messages["required"] = "Registre el apellido del usuario."
         if self.actor and self.instance.pk and self.instance.pk == self.actor.pk:
             self.fields["role"].disabled = True
             self.fields["is_active"].disabled = True
+
+    def clean_first_name(self):
+        value = (self.cleaned_data.get("first_name") or "").strip()
+        if not value:
+            raise ValidationError("Registre el nombre del usuario.")
+        return value
+
+    def clean_last_name(self):
+        value = (self.cleaned_data.get("last_name") or "").strip()
+        if not value:
+            raise ValidationError("Registre el apellido del usuario.")
+        return value
 
     def clean_email(self):
         email = self.cleaned_data["email"].strip().lower()
         queryset = User.objects.filter(email__iexact=email)
         if self.instance.pk:
             queryset = queryset.exclude(pk=self.instance.pk)
-        if queryset.exists():
+        active_or_inactive = queryset.filter(is_deleted=False)
+        if active_or_inactive.exists():
             raise ValidationError("Ya existe un usuario con este correo electronico.")
+        self.deleted_user_for_reuse = queryset.filter(is_deleted=True).first()
+        if self.deleted_user_for_reuse and not self.instance.pk:
+            self.instance = self.deleted_user_for_reuse
         return email
 
     def clean_role(self):

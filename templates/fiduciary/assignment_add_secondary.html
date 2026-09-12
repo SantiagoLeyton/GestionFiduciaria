@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block title %}Añadir cliente secundario | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Añadir cliente secundario</h1>
+          <p>Encargo {{ assignment.assignment_number }} | {{ assignment.property_unit }}</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Volver</a>
+      </div>
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Buscar cliente</h2>
+          <a class="btn btn-sm btn-outline-secondary" href="{{ client_create_url }}">¿Aun no has registrado al cliente? Registralo</a>
+        </div>
+        <div class="row g-2 align-items-end">
+          <div class="col-md-3">
+            <label class="form-label" for="client-search-criterion">Buscar por</label>
+            <select class="form-select" id="client-search-criterion">
+              <option value="document">Identificacion</option>
+              <option value="name">Nombre</option>
+              <option value="email">Correo</option>
+            </select>
+          </div>
+          <div class="col-md-6"><label class="form-label" for="client-search-q">Valor</label><input class="form-control" id="client-search-q" type="search"></div>
+          <div class="col-md-3"><button class="btn btn-outline-success w-100" id="client-search-button" type="button">Buscar</button></div>
+        </div>
+        <div class="list-group mt-3" id="client-search-results"></div>
+      </section>
+      <form class="form-panel" method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+        {{ form.client_id }}{{ form.client_id.errors }}
+        <p class="text-muted" id="selected-client">Sin cliente seleccionado.</p>
+        <div class="form-actions">
+          <button class="btn btn-success" type="submit">Añadir cliente secundario</button>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Cancelar</a>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const url = "{{ client_search_url }}";
+  const criterion = document.getElementById("client-search-criterion");
+  const q = document.getElementById("client-search-q");
+  const button = document.getElementById("client-search-button");
+  const results = document.getElementById("client-search-results");
+  const clientInput = document.getElementById("id_client_id");
+  const selected = document.getElementById("selected-client");
+  button.addEventListener("click", function () {
+    results.innerHTML = "";
+    const params = new URLSearchParams({criterion: criterion.value, q: q.value});
+    fetch(url + "?" + params.toString(), {headers: {"X-Requested-With": "XMLHttpRequest"}})
+      .then((response) => response.json())
+      .then((data) => {
+        (data.results || []).forEach((item) => {
+          const row = document.createElement("div");
+          row.className = "list-group-item d-flex justify-content-between align-items-center gap-3";
+          const label = document.createElement("span");
+          label.textContent = item.text + " | " + item.status;
+          const option = document.createElement("button");
+          option.type = "button";
+          option.className = "btn btn-sm btn-outline-success";
+          option.textContent = "Seleccionar";
+          option.addEventListener("click", function () {
+            clientInput.value = item.id;
+            selected.textContent = "Seleccionado: " + item.text;
+          });
+          row.appendChild(label);
+          row.appendChild(option);
+          results.appendChild(row);
+        });
+        if (!results.children.length) {
+          results.innerHTML = '<div class="text-muted">No se encontraron clientes.</div>';
+        }
+      });
+  });
+  q.addEventListener("keydown", function (event) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      button.click();
+    }
+  });
+});
+</script>
+{% endblock %}

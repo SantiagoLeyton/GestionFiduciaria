@@ -27,7 +27,6 @@
           <table class="table align-middle data-table">
             <thead>
               <tr>
-                <th>ID</th>
                 <th>Fecha</th>
                 <th>Usuario</th>
                 <th>Estado</th>
@@ -41,7 +40,6 @@
             <tbody>
               {% for batch in batches %}
                 <tr>
-                  <td>#{{ batch.pk }}</td>
                   <td>{{ batch.created_at|date:"d/m/Y H:i" }}</td>
                   <td>{{ batch.initiated_by.get_full_name|default:batch.initiated_by.email }}</td>
                   <td><span class="status-pill status-inactive">{{ batch.get_status_display }}</span></td>
@@ -60,7 +58,7 @@
                   </td>
                 </tr>
               {% empty %}
-                <tr><td colspan="9">No hay lotes historicos registrados.</td></tr>
+                <tr><td colspan="8">No hay lotes historicos registrados.</td></tr>
               {% endfor %}
             </tbody>
           </table>

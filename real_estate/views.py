@@ -28,6 +28,7 @@ from .permissions import (
     can_create_real_estate,
     can_update_real_estate,
 )
+from .querysets import with_natural_unit_order
 
 
 class EntityListView(RealEstateReadRequiredMixin, ListView):
@@ -342,7 +343,7 @@ class PropertyUnitListView(EntityListView):
             queryset = queryset.filter(is_active=True)
         elif status == "inactive":
             queryset = queryset.filter(is_active=False)
-        return queryset
+        return with_natural_unit_order(queryset)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)

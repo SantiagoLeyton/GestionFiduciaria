@@ -12,7 +12,7 @@
       <div class="page-heading">
         <div>
           <h1>Previsualizacion historica</h1>
-          <p>Lote #{{ batch.pk }} - {{ batch.get_status_display }}</p>
+          <p>Estado: {{ batch.get_status_display }}</p>
         </div>
         <div class="actions-cell">
           <a class="btn btn-outline-secondary" href="{% url 'fiduciary:historical_import_list' %}">Volver</a>
@@ -101,12 +101,18 @@
         <div class="section-header"><h2>Incidencias agrupadas</h2><span>{{ issue_groups|length }} grupo{{ issue_groups|length|pluralize }}</span></div>
         <div class="table-responsive">
           <table class="table data-table">
-            <thead><tr><th>Codigo</th><th>Severidad</th><th>Hoja</th><th>Cantidad</th></tr></thead>
+            <thead><tr><th>Codigo</th><th>Severidad</th><th>Hoja</th><th>Cantidad</th><th>Acciones</th></tr></thead>
             <tbody>
               {% for issue in issue_groups %}
-                <tr><td>{{ issue.code }}</td><td>{{ issue.severity }}</td><td>{{ issue.sheet_result__sheet_name|default:"-" }}</td><td>{{ issue.total }}</td></tr>
+                <tr>
+                  <td>{{ issue.code }}</td>
+                  <td>{{ issue.severity }}</td>
+                  <td>{{ issue.sheet_result__sheet_name|default:"-" }}</td>
+                  <td>{{ issue.total }}</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:historical_import_issues' batch.pk %}?code={{ issue.code|urlencode }}&severity={{ issue.severity|urlencode }}&sheet={{ issue.sheet_result__sheet_name|urlencode }}">Ver detalles</a></td>
+                </tr>
               {% empty %}
-                <tr><td colspan="4">No hay incidencias registradas.</td></tr>
+                <tr><td colspan="5">No hay incidencias registradas.</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -140,12 +146,12 @@
         <div class="section-header"><h2>Muestra de unidades</h2><span>Primeros registros estructurales</span></div>
         <div class="table-responsive">
           <table class="table data-table">
-            <thead><tr><th>Valor</th><th>Ocurrencias</th><th>Estado</th><th>Decision</th></tr></thead>
+            <thead><tr><th>Agrupacion</th><th>Unidad</th><th>Ocurrencias</th><th>Estado</th><th>Decision</th></tr></thead>
             <tbody>
               {% for unit in unit_samples %}
-                <tr><td>{{ unit.raw_value }}</td><td>{{ unit.occurrence_count }}</td><td>{{ unit.get_status_display }}</td><td>{{ unit.resolution.get_action_display }}</td></tr>
+                <tr><td>{{ unit.structural_context.grouping_name|default:"-" }}</td><td>{{ unit.raw_value }}</td><td>{{ unit.occurrence_count }}</td><td>{{ unit.get_status_display }}</td><td>{{ unit.resolution.get_action_display }}</td></tr>
               {% empty %}
-                <tr><td colspan="4">No hay unidades detectadas.</td></tr>
+                <tr><td colspan="5">No hay unidades detectadas.</td></tr>
               {% endfor %}
             </tbody>
           </table>
