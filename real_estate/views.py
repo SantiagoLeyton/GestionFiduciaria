@@ -5,7 +5,9 @@ from django.db.models import Prefetch
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse_lazy
-from django.views.generic import CreateView, DetailView, ListView, UpdateView, View
+from django.views.generic import CreateView, DetailView, ListView, TemplateView, UpdateView, View
+
+from core.audit import audit_event, audit_snapshot
 
 from .forms import (
     GroupingTypeForm,
@@ -29,6 +31,53 @@ from .permissions import (
     can_update_real_estate,
 )
 from .querysets import with_natural_unit_order
+
+
+class AdministrativeDeleteConfirmView(RealEstateManagementRequiredMixin, TemplateView):
+    template_name = "real_estate/admin_delete_confirm.html"
+    model = None
+    success_url = None
+    action_label = ""
+    warning = ""
+
+    def dispatch(self, request, *args, **kwargs):
+        self.object = get_object_or_404(self.model, pk=kwargs["pk"])
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_summary(self):
+        raise NotImplementedError
+
+    def perform_delete(self, reason: str):
+        raise NotImplementedError
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        summary = self.get_summary()
+        context.update(
+            {
+                "object": self.object,
+                "action_label": self.action_label,
+                "warning": self.warning,
+                "summary": summary,
+                "summary_items": summary.as_dict().items(),
+                "cancel_url": self.success_url,
+            }
+        )
+        return context
+
+    def post(self, request, *args, **kwargs):
+        if request.POST.get("confirm") != "yes":
+            messages.error(request, "Debe confirmar la eliminacion.")
+            return redirect(self.success_url)
+        reason = request.POST.get("change_reason", "").strip()
+        if not reason:
+            messages.error(request, "Debe registrar el motivo de la eliminacion.")
+            return redirect(request.path)
+        result = self.perform_delete(reason)
+        if result is False:
+            return redirect(request.path)
+        messages.success(request, "Eliminacion administrativa ejecutada correctamente.")
+        return redirect(self.success_url)
 
 
 class EntityListView(RealEstateReadRequiredMixin, ListView):
@@ -82,8 +131,18 @@ class EntityCreateView(RealEstateCreateRequiredMixin, CreateView):
     def form_valid(self, form):
         with transaction.atomic():
             self.object = form.save()
+            audit_event(
+                user=self.request.user,
+                action="Creado",
+                entity=self.entity_label,
+                obj=self.object,
+                context=self.audit_context(self.object),
+            )
         messages.success(self.request, f"{self.entity_label} creado correctamente.")
         return redirect(self.success_url)
+
+    def audit_context(self, obj):
+        return {"Nombre": getattr(obj, "name", ""), "Codigo": getattr(obj, "code", "")}
 
     def form_invalid(self, form):
         messages.error(self.request, "No fue posible guardar la informacion. Revise los datos ingresados.")
@@ -101,9 +160,23 @@ class EntityUpdateView(RealEstateManagementRequiredMixin, UpdateView):
 
     def form_valid(self, form):
         with transaction.atomic():
+            before = audit_snapshot(self.object, form.changed_data)
             self.object = form.save()
+            after = audit_snapshot(self.object, form.changed_data)
+            audit_event(
+                user=self.request.user,
+                action="Modificado",
+                entity=self.entity_label,
+                obj=self.object,
+                context=self.audit_context(self.object),
+                before=before,
+                after=after,
+            )
         messages.success(self.request, f"{self.entity_label} actualizado correctamente.")
         return redirect(self.success_url)
+
+    def audit_context(self, obj):
+        return {"Nombre": getattr(obj, "name", ""), "Codigo": getattr(obj, "code", "")}
 
     def form_invalid(self, form):
         messages.error(self.request, "No fue posible actualizar la informacion. Revise los datos ingresados.")
@@ -125,6 +198,16 @@ class EntityStatusView(RealEstateManagementRequiredMixin, View):
         instance.is_active = action == "activate"
         instance.last_change_reason = reason
         instance.save(update_fields=["is_active", "last_change_reason", "updated_at"])
+        audit_event(
+            user=request.user,
+            action="Modificado",
+            entity=getattr(self, "entity_label", instance._meta.verbose_name.title()),
+            obj=instance,
+            description="Registro activado." if instance.is_active else "Registro inactivado.",
+            context={"Motivo": reason},
+            before=f"is_active: {not instance.is_active}",
+            after=f"is_active: {instance.is_active}",
+        )
         message = "Registro activado correctamente." if instance.is_active else "Registro inactivado correctamente."
         messages.success(request, message)
         return redirect(self.list_url_name)
@@ -160,6 +243,27 @@ class ProjectUpdateView(EntityUpdateView):
 class ProjectStatusView(EntityStatusView):
     model = Project
     list_url_name = "real_estate:project_list"
+    entity_label = "Proyecto"
+
+
+class ProjectDeleteView(AdministrativeDeleteConfirmView):
+    model = Project
+    success_url = reverse_lazy("real_estate:project_list")
+    action_label = "Eliminar proyecto"
+    warning = (
+        "Esta accion eliminara el proyecto y la informacion asociada exclusivamente a el. "
+        "Los clientes se conservaran. Esta accion no se puede deshacer."
+    )
+
+    def get_summary(self):
+        from fiduciary.admin_cleanup import project_cleanup_summary
+
+        return project_cleanup_summary(self.object)
+
+    def perform_delete(self, reason: str):
+        from fiduciary.admin_cleanup import delete_project
+
+        delete_project(self.object, user=self.request.user, reason=reason)
 
 
 class GroupingTypeListView(EntityListView):
@@ -192,6 +296,35 @@ class GroupingTypeUpdateView(EntityUpdateView):
 class GroupingTypeStatusView(EntityStatusView):
     model = GroupingType
     list_url_name = "real_estate:grouping_type_list"
+    entity_label = "Tipo de agrupacion"
+
+
+class GroupingTypeDeleteView(AdministrativeDeleteConfirmView):
+    model = GroupingType
+    success_url = reverse_lazy("real_estate:grouping_type_list")
+    action_label = "Eliminar tipo de agrupacion"
+    warning = (
+        "Esta accion solo eliminara el tipo si no esta utilizado por agrupaciones. "
+        "No se eliminaran proyectos ni agrupaciones."
+    )
+
+    def get_summary(self):
+        from fiduciary.admin_cleanup import grouping_type_cleanup_summary
+
+        return grouping_type_cleanup_summary(self.object)
+
+    def perform_delete(self, reason: str):
+        from fiduciary.admin_cleanup import delete_grouping_type_if_unused, grouping_type_cleanup_summary
+
+        summary = grouping_type_cleanup_summary(self.object)
+        if summary.structural_groups:
+            messages.error(
+                self.request,
+                "No se elimino el tipo porque esta siendo utilizado por agrupaciones. Desvincule primero esas agrupaciones.",
+            )
+            return False
+        delete_grouping_type_if_unused(self.object, user=self.request.user, reason=reason)
+        return True
 
 
 class StructuralGroupListView(EntityListView):
@@ -255,6 +388,27 @@ class StructuralGroupUpdateView(EntityUpdateView):
 class StructuralGroupStatusView(EntityStatusView):
     model = StructuralGroup
     list_url_name = "real_estate:structural_group_list"
+    entity_label = "Agrupacion"
+
+
+class StructuralGroupDeleteView(AdministrativeDeleteConfirmView):
+    model = StructuralGroup
+    success_url = reverse_lazy("real_estate:structural_group_list")
+    action_label = "Desvincular agrupacion del proyecto"
+    warning = (
+        "Esta accion elimina la agrupacion dentro de este proyecto y la informacion que depende "
+        "exclusivamente de ella. El tipo de agrupacion global y otros proyectos se conservan."
+    )
+
+    def get_summary(self):
+        from fiduciary.admin_cleanup import structural_group_cleanup_summary
+
+        return structural_group_cleanup_summary(self.object)
+
+    def perform_delete(self, reason: str):
+        from fiduciary.admin_cleanup import unlink_structural_group
+
+        unlink_structural_group(self.object, user=self.request.user, reason=reason)
 
 
 class PropertyUnitListView(EntityListView):
@@ -373,6 +527,28 @@ class PropertyUnitUpdateView(EntityUpdateView):
 class PropertyUnitStatusView(EntityStatusView):
     model = PropertyUnit
     list_url_name = "real_estate:property_unit_list"
+    entity_label = "Unidad inmobiliaria"
+
+
+class PropertyUnitDeleteView(AdministrativeDeleteConfirmView):
+    model = PropertyUnit
+    success_url = reverse_lazy("real_estate:property_unit_list")
+    action_label = "Eliminar unidad inmobiliaria"
+    warning = (
+        "Esta accion eliminara la unidad y la informacion dependiente exclusivamente de ella. "
+        "Los clientes se conservaran."
+    )
+
+    def get_summary(self):
+        from fiduciary.admin_cleanup import property_unit_cleanup_summary
+
+        return property_unit_cleanup_summary(self.object)
+
+    def perform_delete(self, reason: str):
+        from fiduciary.admin_cleanup import delete_property_unit
+
+        delete_property_unit(self.object, user=self.request.user, reason=reason)
+        return True
 
 
 class PropertyUnitHistoryView(RealEstateReadRequiredMixin, DetailView):

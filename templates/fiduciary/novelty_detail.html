@@ -14,7 +14,12 @@
           <h1>{{ novelty.display_type }}</h1>
           <p>{{ novelty.property_unit.project.name }}{% if novelty.property_unit.structural_group %} - {{ novelty.property_unit.structural_group }}{% endif %} - {{ novelty.property_unit.name|default:novelty.property_unit.code }}</p>
         </div>
-        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:novelty_list' %}">Volver</a>
+        <div class="d-flex gap-2">
+          {% if can_manage %}
+            <a class="btn btn-outline-success" href="{% url 'fiduciary:novelty_update' novelty.pk %}">Editar</a>
+          {% endif %}
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:novelty_list' %}">Volver</a>
+        </div>
       </div>
 
       <section class="data-section">

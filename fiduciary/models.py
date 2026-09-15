@@ -502,6 +502,7 @@ class ImportBatch(models.Model):
         COMPLETED_WITH_ISSUES = "completed_with_issues", "Completado con incidencias"
         FAILED = "failed", "Fallido"
         CANCELLED = "cancelled", "Cancelado"
+        REVERTED = "reverted", "Revertido"
 
     class LoadMode(models.TextChoices):
         SINGLE_FILE = "single_file", "Archivo individual"
@@ -523,6 +524,14 @@ class ImportBatch(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="completed_import_batches",
+        blank=True,
+        null=True,
+    )
+    reverted_at = models.DateTimeField("fecha de reversion", blank=True, null=True)
+    reverted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="reverted_import_batches",
         blank=True,
         null=True,
     )
@@ -566,6 +575,7 @@ class ImportedFile(models.Model):
         FAILED = "failed", "Fallido"
         DUPLICATE = "duplicate", "Duplicado"
         CANCELLED = "cancelled", "Cancelado"
+        REVERTED = "reverted", "Revertido"
 
     batch = models.ForeignKey(ImportBatch, on_delete=models.PROTECT, related_name="files")
     original_name = models.CharField("nombre original", max_length=255)
@@ -594,16 +604,6 @@ class ImportedFile(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(fields=["batch", "sha256"], name="fiduciary_imported_file_batch_sha_unique"),
-            models.UniqueConstraint(
-                fields=["sha256"],
-                condition=Q(file_type="historical"),
-                name="fiduciary_imported_file_historical_sha_unique",
-            ),
-            models.UniqueConstraint(
-                fields=["sha256"],
-                condition=Q(file_type="report"),
-                name="fiduciary_imported_file_report_sha_unique",
-            ),
             models.CheckConstraint(
                 condition=Q(file_type__in=["historical", "report", "unknown"]),
                 name="fiduciary_imported_file_type_valid",
@@ -951,7 +951,7 @@ class Payment(TimestampedModel):
                 name="fiduciary_payment_period_month_range",
             ),
             models.UniqueConstraint(
-                fields=["assignment", "exact_date", "amount"],
+                fields=["assignment", "exact_date", "amount", "destination", "concept"],
                 condition=Q(date_precision="exact"),
                 name="fiduciary_payment_exact_unique",
             ),
@@ -1114,6 +1114,33 @@ class ImportAppliedRecord(models.Model):
 
     def __str__(self):
         return f"{self.get_entity_kind_display()} - {self.get_action_display()}"
+
+    @property
+    def is_audit_event(self):
+        return self.source_column == "__AUDIT__"
+
+    @property
+    def audit_lines(self):
+        return [line.strip() for line in (self.summary or "").splitlines() if line.strip()]
+
+    @property
+    def audit_action_label(self):
+        for line in self.audit_lines:
+            if line.lower().startswith("accion:"):
+                return line.split(":", 1)[1].strip()
+        return self.get_action_display()
+
+    @property
+    def audit_entity_label(self):
+        for line in self.audit_lines:
+            if line.lower().startswith("entidad:"):
+                return line.split(":", 1)[1].strip()
+        return self.get_entity_kind_display()
+
+    @property
+    def audit_description(self):
+        ignored = ("accion:", "entidad:")
+        return "\n".join(line for line in self.audit_lines if not line.lower().startswith(ignored))
 
 
 class DailyReportRow(models.Model):

@@ -13,6 +13,7 @@
         <div><h1>{{ client_obj.full_name }}</h1><p>{{ client_obj.get_document_type_display }} {{ client_obj.document_number }}</p></div>
         <div class="actions-cell">
           {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:assignment_create' %}">Nuevo Encargo</a>{% endif %}
+          {% if can_update %}<a class="btn btn-outline-danger" href="{% url 'fiduciary:client_delete' client_obj.pk %}">Eliminar cliente</a>{% endif %}
           <a class="btn btn-outline-secondary" href="{% url 'fiduciary:client_list' %}">Volver</a>
         </div>
       </div>

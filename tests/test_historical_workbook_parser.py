@@ -2,6 +2,7 @@ from dataclasses import is_dataclass
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+import zipfile
 
 import pytest
 from django.db import models
@@ -465,6 +466,54 @@ def test_reader_handles_real_xlsx_metadata_without_modifying_file():
     assert workbook.sheets[0].cell(6, 26).has_cached_value is True
     assert workbook.sheets[0].cell(4, 20).column in workbook.sheets[0].hidden_columns
     assert not workbook.sheets[0].hidden_rows
+
+
+def test_reader_keeps_out_of_range_excel_date_as_controlled_issue(tmp_path):
+    path = tmp_path / "invalid-date.xlsx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "xl/workbook.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheets><sheet name="T1" sheetId="1" r:id="rId1"/></sheets>
+            </workbook>""",
+        )
+        archive.writestr(
+            "xl/_rels/workbook.xml.rels",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+            </Relationships>""",
+        )
+        archive.writestr(
+            "xl/styles.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs>
+            </styleSheet>""",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <dimension ref="BO213:BO213"/>
+              <sheetData><row r="213"><c r="BO213" s="1"><v>4682000</v></c></row></sheetData>
+            </worksheet>""",
+        )
+
+    workbook = WorkbookReader().read(path)
+
+    cell = workbook.sheets[0].cell(213, 67)
+    assert cell.value == "4682000"
+    assert cell.is_date is True
+    issue = workbook.issues[0]
+    assert issue.code == "INVALID_EXCEL_DATE_VALUE"
+    assert issue.severity == "warning"
+    assert issue.sheet_name == "T1"
+    assert issue.row_number == 213
+    assert issue.column_letter == "BO"
+    assert issue.found_value == "4682000"
 
 
 def test_xls_without_reader_returns_controlled_issue():

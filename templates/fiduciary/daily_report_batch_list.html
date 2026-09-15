@@ -36,6 +36,12 @@
                     {% if can_create and batch.status in cancelable_statuses %}
                       <a class="btn btn-sm btn-outline-danger" href="{% url 'fiduciary:daily_report_cancel' batch.pk %}">Cancelar</a>
                     {% endif %}
+                    {% if can_create and batch.status == "completed" %}
+                      <a class="btn btn-sm btn-outline-danger" href="{% url 'fiduciary:daily_report_revert' batch.pk %}">Deshacer importación</a>
+                    {% endif %}
+                    {% if can_create and batch.status == "completed_with_issues" %}
+                      <a class="btn btn-sm btn-outline-danger" href="{% url 'fiduciary:daily_report_revert' batch.pk %}">Deshacer importación</a>
+                    {% endif %}
                   </td>
                 </tr>
               {% empty %}

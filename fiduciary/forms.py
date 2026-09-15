@@ -2,6 +2,7 @@ import uuid
 from decimal import Decimal
 
 from django import forms
+from core.models import AuditEvent
 from django.core.exceptions import ValidationError
 from django.db.models import Q
 from django.forms import formset_factory
@@ -840,6 +841,7 @@ class ObservationForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         self.user = kwargs.pop("user", None)
         self.require_change_reason = kwargs.pop("require_change_reason", False)
+        self.lock_context = kwargs.pop("lock_context", False)
         super().__init__(*args, **kwargs)
         data = self.data if self.is_bound else None
         initial_unit = self.instance.property_unit if self.instance.pk else None
@@ -853,13 +855,16 @@ class ObservationForm(forms.ModelForm):
                 .prefetch_related("holders__client")
                 .order_by("-is_active", "assignment_number")
             )
-        if self.instance.pk and self.instance.origin != ImportedHistoricalObservation.Origin.MANUAL:
+        if self.instance.pk and self.instance.origin != ImportedHistoricalObservation.Origin.MANUAL and not self.require_change_reason:
             for field in self.fields.values():
                 field.disabled = True
         if not self.require_change_reason:
             self.fields.pop("change_reason")
         else:
             self.fields["change_reason"].required = True
+        if self.lock_context and self.instance.pk:
+            for field_name in ("project", "grouping_type", "structural_group", "property_unit", "assignment"):
+                self.fields.pop(field_name, None)
 
     def clean_detail(self):
         return self.cleaned_data["detail"].strip()
@@ -885,14 +890,16 @@ class ObservationForm(forms.ModelForm):
         return cleaned
 
     def save(self, commit=True):
+        is_new = not self.instance.pk
         instance = super().save(commit=False)
-        instance.origin = ImportedHistoricalObservation.Origin.MANUAL
+        if is_new:
+            instance.origin = ImportedHistoricalObservation.Origin.MANUAL
         instance.status = ImportedHistoricalObservation.Status.IMPORTED
         instance.project = instance.property_unit.project
         instance.client = None
-        if self.user and not instance.pk:
+        if self.user and is_new:
             instance.imported_by = self.user
-        if self.user and instance.pk:
+        if self.user and not is_new:
             instance.updated_by = self.user
         if not instance.dedupe_key:
             instance.dedupe_key = uuid.uuid4().hex
@@ -1099,12 +1106,53 @@ class GlobalManualPaymentForm(ManualPaymentForm):
         return cleaned
 
 
+class PaymentEditForm(forms.ModelForm):
+    class Meta:
+        model = Payment
+        fields = ("date_precision", "exact_date", "period_year", "period_month", "amount", "concept", "destination")
+        widgets = {
+            "date_precision": forms.Select(attrs={"class": "form-select"}),
+            "exact_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+            "period_year": forms.NumberInput(attrs={"class": "form-control", "min": "2000", "max": "2099"}),
+            "period_month": forms.NumberInput(attrs={"class": "form-control", "min": "1", "max": "12"}),
+            "amount": forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "min": "0"}),
+            "concept": forms.TextInput(attrs={"class": "form-control"}),
+            "destination": forms.Select(attrs={"class": "form-select"}),
+        }
+        labels = {
+            "date_precision": "Tipo de fecha",
+            "exact_date": "Fecha exacta",
+            "period_year": "Ano del periodo",
+            "period_month": "Mes del periodo",
+            "amount": "Valor",
+            "concept": "Concepto",
+            "destination": "Recibido por",
+        }
+
+    def clean_concept(self):
+        return " ".join((self.cleaned_data.get("concept") or "").split()) or None
+
+    def clean(self):
+        cleaned = super().clean()
+        precision = cleaned.get("date_precision")
+        if precision == Payment.DatePrecision.EXACT:
+            cleaned["period_year"] = None
+            cleaned["period_month"] = None
+        elif precision == Payment.DatePrecision.MONTH:
+            cleaned["exact_date"] = None
+        elif precision == Payment.DatePrecision.AMBIGUOUS:
+            cleaned["exact_date"] = None
+            cleaned["period_year"] = None
+            cleaned["period_month"] = None
+        return cleaned
+
+
 class AuditFilterForm(forms.Form):
     responsible = forms.ModelChoiceField(label="Responsable", required=False, queryset=User.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
     date_from = forms.DateField(label="Fecha inicial", required=False, widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}))
     date_to = forms.DateField(label="Fecha final", required=False, widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}))
-    action = forms.ChoiceField(label="Accion", required=False, choices=[("", "Todas")] + list(ImportAppliedRecord.Action.choices), widget=forms.Select(attrs={"class": "form-select"}))
-    entity_kind = forms.ChoiceField(label="Modulo o entidad", required=False, choices=[("", "Todos")] + list(ImportAppliedRecord.EntityKind.choices), widget=forms.Select(attrs={"class": "form-select"}))
+    action = forms.ChoiceField(label="Accion", required=False, choices=[("", "Todas")], widget=forms.Select(attrs={"class": "form-select"}))
+    entity_kind = forms.ChoiceField(label="Modulo o entidad", required=False, choices=[("", "Todos")], widget=forms.Select(attrs={"class": "form-select"}))
     reason = forms.CharField(label="Motivo", required=False, widget=forms.TextInput(attrs={"class": "form-control"}))
     batch = forms.ModelChoiceField(label="Lote", required=False, queryset=ImportBatch.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
     imported_file = forms.ModelChoiceField(label="Archivo", required=False, queryset=ImportedFile.objects.none(), widget=forms.Select(attrs={"class": "form-select"}))
@@ -1114,6 +1162,10 @@ class AuditFilterForm(forms.Form):
         self.fields["responsible"].queryset = User.objects.order_by("email", "username")
         self.fields["batch"].queryset = ImportBatch.objects.select_related("initiated_by").order_by("-created_at")
         self.fields["imported_file"].queryset = ImportedFile.objects.order_by("-created_at", "original_name")
+        actions = AuditEvent.objects.order_by("action").values_list("action", flat=True).distinct()
+        entities = AuditEvent.objects.order_by("entity").values_list("entity", flat=True).distinct()
+        self.fields["action"].choices = [("", "Todas")] + [(item, item) for item in actions if item]
+        self.fields["entity_kind"].choices = [("", "Todos")] + [(item, item) for item in entities if item]
 
     def clean_reason(self):
         return self.cleaned_data.get("reason", "").strip()
@@ -1362,6 +1414,211 @@ class OperationalNoveltyForm(forms.ModelForm):
         if new_assignment and FiduciaryAssignment.objects.filter(assignment_number=new_assignment).exists():
             self.add_error("new_assignment_number", "Ya existe un encargo fiduciario con ese numero.")
         return cleaned
+
+
+class OperationalNoveltyEditForm(forms.ModelForm):
+    project = forms.ModelChoiceField(
+        label="Proyecto",
+        required=False,
+        queryset=Project.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    grouping_type = forms.ModelChoiceField(
+        label="Tipo de agrupacion",
+        required=False,
+        queryset=GroupingType.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "grouping-type"}),
+    )
+    structural_group = forms.ModelChoiceField(
+        label="Agrupacion",
+        required=False,
+        queryset=StructuralGroup.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "structural-group"}),
+    )
+    current_assignment = AssignmentChoiceField(
+        label="Encargo fiduciario",
+        required=False,
+        queryset=FiduciaryAssignment.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    current_client = forms.ModelChoiceField(
+        label="Cliente de la novedad",
+        required=False,
+        queryset=Client.objects.none(),
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+    novelty_type = forms.ChoiceField(
+        label="Tipo de novedad",
+        required=False,
+        choices=OperationalNoveltyForm.MANUAL_NOVELTY_TYPE_CHOICES,
+        widget=forms.Select(attrs={"class": "form-select", "data-novelty-type": "true"}),
+    )
+    new_assignment_number = forms.CharField(
+        label="Nuevo numero de encargo",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "form-control"}),
+    )
+    secondary_clients = forms.ModelMultipleChoiceField(
+        label="Clientes secundarios asociados",
+        required=False,
+        queryset=Client.objects.none(),
+        widget=forms.SelectMultiple(attrs={"class": "form-select", "data-secondary-client-select": "true"}),
+    )
+
+    class Meta:
+        model = OperationalNovelty
+        fields = (
+            "project",
+            "grouping_type",
+            "structural_group",
+            "property_unit",
+            "current_assignment",
+            "current_client",
+            "novelty_type",
+            "other_type",
+            "effective_date",
+            "new_client",
+            "new_assignment_number",
+            "secondary_clients",
+            "summary",
+            "detail",
+        )
+        widgets = {
+            "property_unit": forms.Select(attrs={"class": "form-select", "data-unit-hierarchy-field": "property-unit"}),
+            "effective_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+            "new_client": forms.Select(attrs={"class": "form-select"}),
+            "summary": forms.TextInput(attrs={"class": "form-control"}),
+            "detail": forms.Textarea(attrs={"class": "form-control", "rows": 4}),
+            "other_type": forms.TextInput(attrs={"class": "form-control"}),
+        }
+        labels = {
+            "property_unit": "Unidad",
+            "effective_date": "Fecha efectiva",
+            "new_client": "Nuevo titular principal",
+            "summary": "Resumen",
+            "detail": "Detalle",
+            "other_type": "Cual",
+        }
+
+    def clean_summary(self):
+        return (self.cleaned_data.get("summary") or "").strip()
+
+    def clean_detail(self):
+        return (self.cleaned_data.get("detail") or "").strip()
+
+    def clean_other_type(self):
+        return (self.cleaned_data.get("other_type") or "").strip()
+
+    def clean(self):
+        cleaned = super().clean()
+        if not cleaned.get("summary") and not cleaned.get("detail"):
+            raise ValidationError("La novedad debe conservar resumen o detalle.")
+        return cleaned
+
+    def save(self, commit=True):
+        original = OperationalNovelty.objects.get(pk=self.instance.pk)
+        instance = super().save(commit=False)
+        for field_name in (
+            "project",
+            "property_unit",
+            "novelty_type",
+            "previous_client",
+            "new_client",
+            "historical_client",
+            "previous_assignment",
+            "new_assignment",
+            "historical_assignment",
+            "origin",
+            "status",
+            "source_observation",
+            "source_novelty",
+            "batch",
+            "imported_file",
+            "source_sheet",
+            "source_row",
+            "historical_section",
+            "historical_month",
+            "historical_year",
+            "source_payload",
+            "created_by",
+        ):
+            setattr(instance, field_name, getattr(original, field_name))
+        if commit:
+            instance.save()
+        return instance
+
+    def __init__(self, *args, **kwargs):
+        structural_locked = kwargs.pop("structural_locked", False)
+        super().__init__(*args, **kwargs)
+        novelty = self.instance
+        unit = novelty.property_unit if novelty and novelty.pk else None
+        current_assignment = novelty.previous_assignment or novelty.historical_assignment or novelty.new_assignment
+        current_client = novelty.previous_client or novelty.historical_client
+        if not current_client and novelty.new_client_id and novelty.novelty_type in {
+            OperationalNovelty.NoveltyType.OTHER,
+            OperationalNovelty.NoveltyType.ADMINISTRATIVE_CORRECTION,
+        }:
+            current_client = novelty.new_client
+        displayed_type = novelty.novelty_type
+        if novelty.novelty_type == OperationalNovelty.NoveltyType.OTHER and novelty.other_type.upper() == "INCLUSION":
+            displayed_type = MANUAL_INCLUSION_TYPE
+
+        if unit:
+            self.fields["project"].queryset = Project.objects.filter(pk=unit.project_id)
+            self.fields["project"].initial = unit.project_id
+            if unit.structural_group_id:
+                grouping_type_id = unit.structural_group.grouping_type_id
+                self.fields["grouping_type"].queryset = GroupingType.objects.filter(pk=grouping_type_id)
+                self.fields["grouping_type"].initial = grouping_type_id
+                self.fields["structural_group"].queryset = StructuralGroup.objects.filter(pk=unit.structural_group_id)
+                self.fields["structural_group"].initial = unit.structural_group_id
+            self.fields["property_unit"].queryset = PropertyUnit.objects.filter(pk=unit.pk)
+            self.fields["property_unit"].initial = unit.pk
+        if current_assignment:
+            self.fields["current_assignment"].queryset = FiduciaryAssignment.objects.filter(pk=current_assignment.pk).prefetch_related("holders__client")
+            self.fields["current_assignment"].initial = current_assignment.pk
+            secondary_ids = list(
+                current_assignment.holders.filter(is_active=True, is_primary=False).values_list("client_id", flat=True)
+            )
+            if novelty.new_client_id:
+                secondary_ids.append(novelty.new_client_id)
+            self.fields["secondary_clients"].queryset = Client.objects.filter(pk__in=secondary_ids).order_by(
+                "last_names_or_company", "first_names"
+            )
+            if displayed_type == MANUAL_INCLUSION_TYPE and novelty.new_client_id:
+                self.fields["secondary_clients"].initial = [novelty.new_client_id]
+        if current_client:
+            self.fields["current_client"].queryset = Client.objects.filter(pk=current_client.pk)
+            self.fields["current_client"].initial = current_client.pk
+        if novelty.new_client_id:
+            self.fields["new_client"].queryset = Client.objects.filter(pk=novelty.new_client_id)
+            self.fields["new_client"].initial = novelty.new_client_id
+        else:
+            self.fields["new_client"].queryset = Client.objects.none()
+        self.fields["novelty_type"].initial = displayed_type
+        if novelty.new_assignment:
+            self.fields["new_assignment_number"].initial = novelty.new_assignment.assignment_number
+
+        readonly_fields = (
+            "project",
+            "grouping_type",
+            "structural_group",
+            "property_unit",
+            "current_assignment",
+            "current_client",
+            "novelty_type",
+            "new_client",
+            "new_assignment_number",
+            "secondary_clients",
+        )
+        for field_name in readonly_fields:
+            self.fields[field_name].disabled = True
+            self.fields[field_name].help_text = "Solo lectura durante la edicion."
+        if structural_locked:
+            for field_name in ("effective_date", "other_type"):
+                if field_name in self.fields:
+                    self.fields[field_name].disabled = True
+                    self.fields[field_name].help_text = "Este dato estructural se conserva sin cambios."
 
 
 class FiduciaryAssignmentForm(ChangeReasonMixin, forms.ModelForm):

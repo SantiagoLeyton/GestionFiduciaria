@@ -458,6 +458,23 @@ def test_password_reset_request_uses_generic_response(client, commercial_user):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("host", ["GF-SERVER:8000", "OTRO-SERVIDOR:8000"])
+@override_settings(
+    ALLOWED_HOSTS=["GF-SERVER", "OTRO-SERVIDOR"],
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+)
+def test_password_reset_email_uses_request_host(client, commercial_user, host):
+    mail.outbox.clear()
+
+    client.post(reverse("password_reset"), {"email": commercial_user.email}, HTTP_HOST=host)
+
+    body = mail.outbox[0].body
+    assert f"http://{host}/accounts/reset/" in body
+    assert "127.0.0.1" not in body
+    assert "localhost" not in body
+
+
+@pytest.mark.django_db
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 def test_valid_account_can_reset_password_and_token_cannot_be_reused(client, commercial_user):
     client.post(reverse("password_reset"), {"email": commercial_user.email})

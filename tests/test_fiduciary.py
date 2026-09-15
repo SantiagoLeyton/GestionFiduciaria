@@ -1655,13 +1655,16 @@ def test_write_post_requires_csrf(accounting_admin_user):
 
 
 @pytest.mark.django_db
-def test_delete_endpoints_do_not_exist(accounting_client, active_client, unit):
+def test_delete_endpoints_require_confirmation_and_reason(accounting_client, active_client, unit):
     create_ownership(active_client, unit)
     assignment = create_assignment(unit, active_client)
 
-    assert accounting_client.post(f"/fiduciary/clients/{active_client.pk}/delete/").status_code == 404
-    assert accounting_client.post(f"/fiduciary/assignments/{assignment.pk}/delete/").status_code == 404
+    assert accounting_client.get(reverse("fiduciary:client_delete", args=[active_client.pk])).status_code == 200
+    assert accounting_client.get(reverse("fiduciary:assignment_delete", args=[assignment.pk])).status_code == 403
+    assert accounting_client.post(reverse("fiduciary:client_delete", args=[active_client.pk]), {"confirm": "yes"}).status_code == 302
+    assert accounting_client.post(reverse("fiduciary:assignment_delete", args=[assignment.pk]), {"confirm": "yes"}).status_code == 403
     assert FiduciaryClient.objects.filter(pk=active_client.pk).exists()
+    assert FiduciaryAssignment.objects.filter(pk=assignment.pk).exists()
 
 
 @pytest.mark.django_db
@@ -1726,7 +1729,7 @@ def test_assignment_detail_shows_real_payments(accounting_client, accounting_adm
 
 
 @pytest.mark.django_db
-def test_assignment_detail_and_update_manage_operational_dates(accounting_client, active_client, secondary_client, unit, second_unit):
+def test_assignment_detail_blocks_free_update_and_delete(accounting_client, active_client, secondary_client, unit, second_unit):
     create_ownership(active_client, unit, True)
     create_ownership(secondary_client, second_unit, True)
     assignment = create_assignment(unit, active_client)
@@ -1757,7 +1760,8 @@ def test_assignment_detail_and_update_manage_operational_dates(accounting_client
     assert "Registrar cambio de encargo" not in data_section
     assert "Registrar novedad" in content
     assert "Registrar observacion" in content
-    assert reverse("fiduciary:assignment_update", args=[assignment.pk]) in content
+    assert reverse("fiduciary:assignment_update", args=[assignment.pk]) not in content
+    assert reverse("fiduciary:assignment_delete", args=[assignment.pk]) not in content
     assert reverse("fiduciary:novelty_create") in content
     assert reverse("fiduciary:observation_create") in content
     assert accounting_client.get(reverse("fiduciary:novelty_create"), {"project": unit.project_id, "property_unit": unit.pk}).status_code == 200
@@ -1767,13 +1771,14 @@ def test_assignment_detail_and_update_manage_operational_dates(accounting_client
     ).status_code == 200
 
     form_response = accounting_client.get(reverse("fiduciary:assignment_update", args=[assignment.pk]))
-    form_content = form_response.content.decode()
-    assert form_response.status_code == 200
-    assert "Actualizar informacion contractual" in form_content
-    assert "Fecha de inicio" not in form_content
-    assert "assignment_number" not in form_content
-    assert "property_unit" not in form_content
-    assert "is_active" not in form_content
+    assert form_response.status_code == 403
+    delete_get_response = accounting_client.get(reverse("fiduciary:assignment_delete", args=[assignment.pk]))
+    delete_post_response = accounting_client.post(
+        reverse("fiduciary:assignment_delete", args=[assignment.pk]),
+        {"confirm": "yes", "change_reason": "Intento directo"},
+    )
+    assert delete_get_response.status_code == 403
+    assert delete_post_response.status_code == 403
 
     update_response = accounting_client.post(
         reverse("fiduciary:assignment_update", args=[assignment.pk]),
@@ -1786,13 +1791,13 @@ def test_assignment_detail_and_update_manage_operational_dates(accounting_client
         },
     )
 
-    assert update_response.status_code == 302
+    assert update_response.status_code == 403
     assignment.refresh_from_db()
     other_assignment.refresh_from_db()
-    assert assignment.adhesion_contract_date == date(2024, 1, 11)
-    assert assignment.promise_date == date(2024, 2, 21)
-    assert assignment.promised_delivery_date is None
-    assert assignment.actual_delivery_date == date(2024, 4, 2)
+    assert assignment.adhesion_contract_date == date(2024, 1, 10)
+    assert assignment.promise_date == date(2024, 2, 20)
+    assert assignment.promised_delivery_date == date(2024, 3, 15)
+    assert assignment.actual_delivery_date == date(2024, 4, 1)
     assert assignment.assignment_number == "EF-001"
     assert assignment.property_unit_id == unit.pk
     assert assignment.start_date == date(2026, 1, 1)
@@ -3253,7 +3258,7 @@ def test_export_routes_constructor_and_fiduciary_payments_to_separate_monthly_co
     assert row["RECIBOS"] == "NCR-C1"
     assert row["RECIBOS FIDUBOGOTA"] == "NCR-F1 - NCR-F2"
     assert row["RECIBIDO"] == Decimal("1000000")
-    assert sheet.cell(5, header_col["RECIBO FIDUCIA ENE/2026"]).formula == "1800000+200000"
+    assert sheet.cell(5, header_col["RECIBO FIDUCIA ENE/2026"]).formula == "1800000+200000+2330000"
     assert "RECIBIDO ENE/2026" not in headers
     assert "RECIBIDO FIDUBOGOTA ENE/2026" not in headers
     assert "||" not in str(row["RECIBIDO"])
@@ -3315,12 +3320,50 @@ def test_assignment_detail_registers_manual_constructor_and_fiduciary_payments(
     assert "Fiduciaria" in detail_content
 
     row = exported_row_for_unit(project, tmp_path, "T1", "101")
-    assert row["FECHA"] == " || ENE.10/26 - ENE.11/26F"
+    assert row["FECHA"] == "ENE.10/26 - ENE.11/26F"
     assert not row["RECIBOS"]
-    assert row["RECIBIDO ENE/2026"] == Decimal("1000000")
-    assert row["RECIBIDO FIDUBOGOTA ENE/2026"] == Decimal("1800000")
-    assert "||" not in str(row["RECIBIDO ENE/2026"])
-    assert "||" not in str(row["RECIBIDO FIDUBOGOTA ENE/2026"])
+    assert row["RECIBOS FIDUBOGOTA"] in ("", None)
+    assert row["RECIBIDO"] == Decimal("1000000")
+    assert row["RECIBO FIDUCIA ENE/2026"] == Decimal("1800000")
+    assert "||" not in str(row["RECIBIDO"])
+    assert "||" not in str(row["RECIBO FIDUCIA ENE/2026"])
+
+
+@pytest.mark.django_db
+def test_export_manual_report_fiduciary_payment_creates_month_column_from_payment(
+    accounting_admin_user, project, grouping_type, active_client, tmp_path
+):
+    group = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="test", name="agrupacion")
+    unit = PropertyUnit.objects.create(project=project, structural_group=group, code="unidad 2", name="unidad 2")
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "123654789012")
+    _, report_file = create_imported_file(accounting_admin_user, ImportedFile.FileType.REPORT)
+    Payment.objects.create(
+        assignment=assignment,
+        date_precision=Payment.DatePrecision.EXACT,
+        exact_date=date(2026, 9, 15),
+        amount=Decimal("10000000"),
+        concept="NCR782",
+        destination=Payment.Destination.FIDUCIARIA,
+        movement_type=Payment.MovementType.ADDITION,
+        source_file=report_file,
+        source_sheet="Pagos manuales",
+        source_row=1,
+    )
+
+    exported = export_historical_workbook(project)
+    export_path = tmp_path / "libro-test.xlsx"
+    export_path.write_bytes(exported.content)
+    workbook = WorkbookReader().read(export_path)
+    sheet = next(sheet for sheet in workbook.sheets if sheet.name == "test")
+    headers = [sheet.cell(4, index).value for index in range(1, sheet.used_columns + 1)]
+    header_col = {header: index + 1 for index, header in enumerate(headers) if header}
+    row = {header: sheet.cell(5, index + 1).value for index, header in enumerate(headers) if header}
+
+    assert "RECIBO FIDUCIA SEP/2026" in headers
+    assert row["RECIBOS FIDUBOGOTA"] == "NCR782"
+    assert row["FECHA"] == "SEP.15/26F"
+    assert sheet.cell(5, header_col["RECIBO FIDUCIA SEP/2026"]).value == Decimal("10000000")
 
 
 @pytest.mark.django_db
@@ -4072,8 +4115,7 @@ def test_report_payments_are_displayed_as_abono_in_payment_list(accounting_clien
     content = response.content.decode()
 
     assert response.status_code == 200
-    assert "<th>Tipo</th>" in content
-    assert "Abono" in content
+    assert "<th>Tipo</th>" not in content
     assert "Adicion" not in content
 
 

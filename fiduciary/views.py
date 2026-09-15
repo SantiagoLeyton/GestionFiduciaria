@@ -8,12 +8,12 @@ from datetime import date
 from pathlib import Path
 
 from django.contrib import messages
-from django.contrib.admin.models import CHANGE, LogEntry
+from django.contrib.admin.models import ADDITION, CHANGE, DELETION, LogEntry
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, close_old_connections, transaction
-from django.db.models import Count, Min, Prefetch, Q, Sum
+from django.db.models import Case, Count, IntegerField, Min, Prefetch, Q, Sum, When
 from django.db.models import Value
 from django.db.models.functions import Replace
 from django.conf import settings
@@ -25,6 +25,8 @@ from django.utils.text import slugify
 from django.views.generic import CreateView, DetailView, FormView, ListView, TemplateView, UpdateView, View
 
 from core.models import BackupRecord
+from core.audit import audit_event, record_audit
+from core.models import AuditEvent
 from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
 from real_estate.querysets import with_natural_unit_order
 
@@ -56,8 +58,10 @@ from .forms import (
     assignment_can_receive_payment,
     normalize_document_query,
     OperationalNoveltyForm,
+    OperationalNoveltyEditForm,
     ObservationFilterForm,
     ObservationForm,
+    PaymentEditForm,
     PaymentFilterForm,
     OwnershipFinalizeForm,
     PrimaryOwnershipChangeForm,
@@ -83,10 +87,8 @@ from .exporters import export_historical_workbook
 from .services import create_payment
 from .utils import calculate_sha256
 from .imports.historical import (
-    DuplicateHistoricalImportError,
     analyze_historical_import,
     finalize_historical_import,
-    find_existing_historical_import,
     store_historical_import_file,
 )
 from .imports.historical.readiness import (
@@ -97,13 +99,9 @@ from .imports.historical.readiness import (
     has_unresolved_required_pendings,
 )
 from .imports.cancellation import CANCELABLE_BATCH_STATUSES, cancel_import_batch
-from .imports.daily import (
-    DailyReportDuplicateError,
-    analyze_daily_report_import,
-    finalize_daily_report_import,
-    reanalyze_daily_report_import,
-    resolve_daily_report_assignment,
-)
+from .imports.audit import AUDIT_SOURCE_COLUMN
+from .imports.reversion import import_reversion_summary, revert_import_batch
+from .imports.daily import analyze_daily_report_import, finalize_daily_report_import, reanalyze_daily_report_import, resolve_daily_report_assignment
 from .imports.historical.resolutions import (
     ImmediateResolutionError,
     apply_resolution_to_current_element,
@@ -129,6 +127,7 @@ from .models import (
     ImportBatch,
     ImportedFile,
     ImportedHistoricalObservation,
+    ImportNovelty,
     ImportRowIssue,
     ImportResolution,
     OperationalNovelty,
@@ -298,13 +297,90 @@ def _create_assignment_without_novelty(*, unit, primary_client, assignment_numbe
     return assignment
 
 
-def _log_observation_change(user, observation: ImportedHistoricalObservation, reason: str) -> None:
-    LogEntry.objects.log_actions(
-        user_id=user.pk,
-        queryset=ImportedHistoricalObservation.objects.filter(pk=observation.pk),
-        action_flag=CHANGE,
-        change_message=f"MODIFICAR_OBSERVACION | Motivo: {reason}",
-        single_object=True,
+def _audit_snapshot(obj, fields: tuple[str, ...]) -> str:
+    parts = []
+    for field in fields:
+        value = getattr(obj, field, None)
+        parts.append(f"{field}={value!r}")
+    return "; ".join(parts)
+
+
+def _log_object_action(user, obj, action: str, flag: int, message: str) -> None:
+    record_audit(
+        user=user,
+        action=_human_action_from_code(action, flag),
+        entity=_human_entity_from_object(obj),
+        obj=obj,
+        description=message,
+        context={"Codigo interno": action},
+    )
+
+
+def _log_observation_change(user, observation: ImportedHistoricalObservation, reason: str, before: str = "") -> None:
+    after = _audit_snapshot(observation, ("summary", "detail", "property_unit_id", "assignment_id"))
+    record_audit(
+        user=user,
+        action="Modificado",
+        entity="Observacion",
+        obj=observation,
+        description="MODIFICAR_OBSERVACION",
+        reason=reason,
+        before=before,
+        after=after,
+    )
+
+
+def _human_action_from_code(action: str, flag: int) -> str:
+    if flag == DELETION or action.startswith("ELIMINAR"):
+        return "Eliminado"
+    if flag == ADDITION or action.startswith("CREAR"):
+        return "Creado"
+    return "Modificado"
+
+
+def _human_entity_from_object(obj) -> str:
+    labels = {
+        ImportedHistoricalObservation: "Observacion",
+        OperationalNovelty: "Novedad",
+        Payment: "Pago",
+    }
+    return labels.get(obj.__class__, obj._meta.verbose_name.title())
+
+
+def _novelty_has_structural_effect(novelty: OperationalNovelty) -> bool:
+    structural_types = {
+        OperationalNovelty.NoveltyType.CESSION,
+        OperationalNovelty.NoveltyType.WITHDRAWAL,
+        OperationalNovelty.NoveltyType.EXCLUSION,
+        OperationalNovelty.NoveltyType.SUBSTITUTION,
+    }
+    if novelty.novelty_type in structural_types:
+        return True
+    return novelty.novelty_type == OperationalNovelty.NoveltyType.OTHER and novelty.other_type.strip().casefold() == "inclusion"
+
+
+def _unlink_payment_dependents(payment: Payment) -> None:
+    ImportNovelty.objects.filter(payment=payment).update(payment=None)
+    DailyReportRow.objects.filter(payment=payment).update(
+        payment=None,
+        status=DailyReportRow.Status.VALID,
+        message="Pago eliminado manualmente por Contabilidad.",
+    )
+    ImportedHistoricalObservation.related_payments.through.objects.filter(payment_id=payment.pk).delete()
+
+
+def _audit_manual_payment_created(user, payment: Payment) -> None:
+    audit_event(
+        user=user,
+        action="Creado",
+        entity="Pago",
+        obj=payment,
+        context={
+            "Proyecto": payment.assignment.property_unit.project,
+            "Unidad": payment.assignment.property_unit,
+            "Encargo": payment.assignment.assignment_number,
+        },
+        after=_audit_snapshot(payment, ("exact_date", "period_year", "period_month", "amount", "concept", "destination")),
     )
 
 
@@ -384,20 +460,6 @@ def _process_historical_uploads(*, request, uploaded_files, grouping_type_hint=N
                 items.append(item)
                 continue
             seen_hashes[sha256] = uploaded_file.name
-            existing_file = find_existing_historical_import(path)
-            if existing_file:
-                item.update(
-                    result="duplicate",
-                    message=(
-                        "Este archivo ya fue cargado anteriormente y no se volvio a procesar. "
-                        f"Archivo original: {existing_file.original_name}. "
-                        f"Estado del lote asociado: {existing_file.batch.get_status_display()}."
-                    ),
-                    batch_id=existing_file.batch_id,
-                    preview_url=reverse("fiduciary:historical_import_preview", args=[existing_file.batch_id]),
-                )
-                items.append(item)
-                continue
             batch = ImportBatch.objects.create(
                 initiated_by=request.user,
                 import_type=ImportBatch.ImportType.HISTORICAL,
@@ -430,19 +492,8 @@ def _process_historical_uploads(*, request, uploaded_files, grouping_type_hint=N
                     message=batch.get_status_display(),
                     preview_url=reverse("fiduciary:historical_import_preview", args=[batch.pk]),
                 )
-            except DuplicateHistoricalImportError as exc:
-                batch.delete()
-                item.update(
-                    result="duplicate",
-                    message=(
-                        "Este archivo ya fue cargado anteriormente y no se volvio a procesar. "
-                        f"Archivo original: {exc.imported_file.original_name}. "
-                        f"Estado del lote asociado: {exc.imported_file.batch.get_status_display()}."
-                    ),
-                    batch_id=exc.imported_file.batch_id,
-                    preview_url=reverse("fiduciary:historical_import_preview", args=[exc.imported_file.batch_id]),
-                )
             except Exception:
+                logger.exception("Historical import analysis failed for batch %s and file %s.", batch.pk, path.name)
                 batch.status = ImportBatch.Status.FAILED
                 batch.summary = "No fue posible analizar el archivo historico cargado."
                 batch.save(update_fields=["status", "summary"])
@@ -822,6 +873,48 @@ class HistoricalImportCancelView(FiduciaryImportRequiredMixin, DetailView):
         return context
 
 
+class ImportRevertView(FiduciaryImportRequiredMixin, DetailView):
+    template_name = "fiduciary/import_revert_confirm.html"
+    context_object_name = "batch"
+    list_url_name = ""
+    preview_url_name = ""
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        reason = request.POST.get("change_reason", "").strip()
+        if not reason:
+            messages.error(request, "Debe registrar el motivo para deshacer la importacion.")
+            return redirect(self.preview_url_name, pk=self.object.pk)
+        try:
+            summary = revert_import_batch(batch=self.object, user=request.user, reason=reason)
+        except ValidationError as exc:
+            messages.error(request, " ".join(exc.messages))
+            return redirect(self.preview_url_name, pk=self.object.pk)
+        messages.success(request, f"Importacion deshecha. {summary.text()}.")
+        return redirect(self.list_url_name)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        summary = import_reversion_summary(self.object)
+        context["imported_file"] = self.object.files.order_by("order", "original_name").first()
+        context["summary"] = summary
+        context["summary_items"] = summary.as_dict().items()
+        context["can_revert"] = self.object.status in {
+            ImportBatch.Status.COMPLETED,
+            ImportBatch.Status.COMPLETED_WITH_ISSUES,
+        }
+        context["preview_url_name"] = self.preview_url_name
+        return context
+
+
+class HistoricalImportRevertView(ImportRevertView):
+    list_url_name = "fiduciary:historical_import_list"
+    preview_url_name = "fiduciary:historical_import_preview"
+
+    def get_queryset(self):
+        return historical_batches().prefetch_related("files", "applied_records")
+
+
 class HistoricalImportPendingListView(FiduciaryImportRequiredMixin, QueryStringMixin, ListView):
     model = DetectedStructureElement
     template_name = "fiduciary/import_pending_list.html"
@@ -835,7 +928,16 @@ class HistoricalImportPendingListView(FiduciaryImportRequiredMixin, QueryStringM
     def get_queryset(self):
         return self.batch.detected_elements.filter(
             status=DetectedStructureElement.Status.NEEDS_REVIEW
-        ).select_related("resolution").order_by("inferred_kind", "normalized_value")
+        ).select_related("resolution").annotate(
+            pending_order=Case(
+                When(inferred_kind=DetectedStructureElement.InferredKind.PROJECT, then=0),
+                When(inferred_kind=DetectedStructureElement.InferredKind.GROUPING_TYPE, then=1),
+                When(inferred_kind=DetectedStructureElement.InferredKind.STRUCTURAL_GROUP, then=2),
+                When(inferred_kind=DetectedStructureElement.InferredKind.PROPERTY_UNIT, then=3),
+                default=9,
+                output_field=IntegerField(),
+            )
+        ).order_by("pending_order", "normalized_value")
 
     def get_context_data(self, **kwargs):
         context = self.add_common_context(super().get_context_data(**kwargs))
@@ -851,6 +953,8 @@ class HistoricalImportPendingListView(FiduciaryImportRequiredMixin, QueryStringM
         context["prepared_creation_count"] = self.batch.detected_elements.filter(
             resolution__action=ImportResolution.Action.CREATE_NEW,
         ).count()
+        for element in context["elements"]:
+            element.block_reason = _pending_dependency_block_reason(self.batch, element)
         return context
 
 
@@ -860,6 +964,34 @@ class HistoricalImportReanalyzePendingView(FiduciaryImportRequiredMixin, View):
         updated = reanalyze_pending_resolutions(batch, user=request.user)
         messages.success(request, f"Se volvieron a analizar los pendientes. Elementos actualizados: {updated}.")
         return redirect("fiduciary:historical_import_pending", pk=batch.pk)
+
+
+def _pending_dependency_block_reason(batch: ImportBatch, element: DetectedStructureElement) -> str:
+    unresolved_filter = Q(status=DetectedStructureElement.Status.NEEDS_REVIEW) | Q(
+        status=DetectedStructureElement.Status.DETECTED,
+        resolution__action=ImportResolution.Action.UNRESOLVED,
+    )
+    if element.inferred_kind in {
+        DetectedStructureElement.InferredKind.GROUPING_TYPE,
+        DetectedStructureElement.InferredKind.STRUCTURAL_GROUP,
+        DetectedStructureElement.InferredKind.PROPERTY_UNIT,
+    } and batch.detected_elements.filter(unresolved_filter, inferred_kind=DetectedStructureElement.InferredKind.PROJECT).exclude(
+        pk=element.pk
+    ).exists():
+        return "Resuelva primero el proyecto."
+    if element.inferred_kind in {
+        DetectedStructureElement.InferredKind.STRUCTURAL_GROUP,
+        DetectedStructureElement.InferredKind.PROPERTY_UNIT,
+    } and batch.detected_elements.filter(unresolved_filter, inferred_kind=DetectedStructureElement.InferredKind.GROUPING_TYPE).exclude(
+        pk=element.pk
+    ).exists():
+        return "Resuelva primero el tipo de agrupacion."
+    if element.inferred_kind == DetectedStructureElement.InferredKind.PROPERTY_UNIT and batch.detected_elements.filter(
+        unresolved_filter,
+        inferred_kind=DetectedStructureElement.InferredKind.STRUCTURAL_GROUP,
+    ).exclude(pk=element.pk).exists():
+        return "Resuelva primero la agrupacion."
+    return ""
 
 
 class HistoricalImportResolutionView(FiduciaryImportRequiredMixin, FormView):
@@ -872,6 +1004,10 @@ class HistoricalImportResolutionView(FiduciaryImportRequiredMixin, FormView):
             self.batch.detected_elements.select_related("resolution"),
             pk=kwargs["element_pk"],
         )
+        block_reason = _pending_dependency_block_reason(self.batch, self.element)
+        if block_reason:
+            messages.error(request, block_reason)
+            return redirect("fiduciary:historical_import_pending", pk=self.batch.pk)
         return super().dispatch(request, *args, **kwargs)
 
     def get_form_kwargs(self):
@@ -939,6 +1075,10 @@ class HistoricalImportStructuralGroupResolutionView(FiduciaryImportRequiredMixin
             pk=kwargs["element_pk"],
             inferred_kind=DetectedStructureElement.InferredKind.STRUCTURAL_GROUP,
         )
+        block_reason = _pending_dependency_block_reason(self.batch, self.element)
+        if block_reason:
+            messages.error(request, block_reason)
+            return redirect("fiduciary:historical_import_pending", pk=self.batch.pk)
         return super().dispatch(request, *args, **kwargs)
 
     def get_form_kwargs(self):
@@ -1155,16 +1295,6 @@ def _process_daily_report_uploads(*, request, uploaded_files) -> dict:
                 items.append(item)
                 continue
             seen_hashes[sha256] = uploaded_file.name
-            existing_file = ImportedFile.objects.filter(file_type=ImportedFile.FileType.REPORT, sha256=sha256).first()
-            if existing_file:
-                item.update(
-                    result="duplicate",
-                    message="Ya fue cargado anteriormente.",
-                    batch_id=existing_file.batch_id,
-                    preview_url=reverse("fiduciary:daily_report_preview", args=[existing_file.batch_id]),
-                )
-                items.append(item)
-                continue
             batch = ImportBatch.objects.create(
                 initiated_by=request.user,
                 import_type=ImportBatch.ImportType.REPORTS,
@@ -1193,14 +1323,6 @@ def _process_daily_report_uploads(*, request, uploaded_files) -> dict:
                     result="with_pendings" if batch.status == ImportBatch.Status.AWAITING_RESOLUTION else "processed",
                     message=batch.get_status_display(),
                     preview_url=reverse("fiduciary:daily_report_preview", args=[batch.pk]),
-                )
-            except DailyReportDuplicateError as exc:
-                batch.delete()
-                item.update(
-                    result="duplicate",
-                    message="Ya fue cargado anteriormente.",
-                    batch_id=exc.imported_file.batch_id,
-                    preview_url=reverse("fiduciary:daily_report_preview", args=[exc.imported_file.batch_id]),
                 )
             except Exception:
                 batch.status = ImportBatch.Status.FAILED
@@ -1351,6 +1473,14 @@ class DailyReportCancelView(FiduciaryImportRequiredMixin, DetailView):
         context["row_count"] = self.object.daily_report_rows.count()
         context["can_cancel"] = self.object.status in CANCELABLE_BATCH_STATUSES
         return context
+
+
+class DailyReportRevertView(ImportRevertView):
+    list_url_name = "fiduciary:daily_report_list"
+    preview_url_name = "fiduciary:daily_report_preview"
+
+    def get_queryset(self):
+        return daily_report_batches().prefetch_related("files", "applied_records", "daily_report_rows")
 
 
 class DailyReportFinalizeView(FiduciaryImportRequiredMixin, DetailView):
@@ -1531,6 +1661,83 @@ class ClientDetailView(FiduciaryReadRequiredMixin, DetailView):
         return context
 
 
+class AdministrativeDeleteConfirmView(FiduciaryManagementRequiredMixin, TemplateView):
+    template_name = "fiduciary/admin_delete_confirm.html"
+    model = None
+    success_url = None
+    action_label = ""
+    warning = ""
+
+    def dispatch(self, request, *args, **kwargs):
+        self.object = get_object_or_404(self.model, pk=kwargs["pk"])
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_summary(self):
+        raise NotImplementedError
+
+    def perform_delete(self, reason: str):
+        raise NotImplementedError
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        summary = self.get_summary()
+        context.update(
+            {
+                "object": self.object,
+                "action_label": self.action_label,
+                "warning": self.warning,
+                "summary": summary,
+                "summary_items": summary.as_dict().items(),
+                "cancel_url": self.success_url,
+            }
+        )
+        return context
+
+    def post(self, request, *args, **kwargs):
+        if request.POST.get("confirm") != "yes":
+            messages.error(request, "Debe confirmar la eliminacion.")
+            return redirect(self.success_url)
+        reason = request.POST.get("change_reason", "").strip()
+        if not reason:
+            messages.error(request, "Debe registrar el motivo de la eliminacion.")
+            return redirect(request.path)
+        try:
+            result = self.perform_delete(reason)
+        except ValidationError as exc:
+            messages.error(request, _validation_error_text(exc))
+            return redirect(request.path)
+        if result is False:
+            return redirect(request.path)
+        messages.success(request, "Eliminacion administrativa ejecutada correctamente.")
+        return redirect(self.success_url)
+
+
+class ClientDeleteView(AdministrativeDeleteConfirmView):
+    model = Client
+    success_url = reverse_lazy("fiduciary:client_list")
+    action_label = "Eliminar cliente"
+    warning = (
+        "El cliente solo se eliminara si no tiene titularidades, encargos, pagos, "
+        "novedades u observaciones relacionadas. No se ejecuta cascada destructiva."
+    )
+
+    def get_summary(self):
+        from .admin_cleanup import client_dependency_summary
+
+        return client_dependency_summary(self.object)
+
+    def perform_delete(self, reason: str):
+        from .admin_cleanup import client_dependency_summary, delete_client_if_orphan
+
+        summary = client_dependency_summary(self.object)
+        has_dependencies = any(count for key, count in summary.as_dict().items() if key != "clientes")
+        if has_dependencies:
+            messages.error(self.request, f"No se elimino el cliente porque tiene dependencias: {summary.text()}.")
+            return False
+        delete_client_if_orphan(self.object, user=self.request.user, reason=reason)
+        return True
+
+
 class ClientCreateView(FiduciaryCreateRequiredMixin, CreateView):
     model = Client
     form_class = ClientForm
@@ -1546,6 +1753,17 @@ class ClientCreateView(FiduciaryCreateRequiredMixin, CreateView):
     def form_valid(self, form):
         with transaction.atomic():
             self.object = form.save()
+            audit_event(
+                user=self.request.user,
+                action="Creado",
+                entity="Cliente",
+                obj=self.object,
+                context={
+                    "Cliente": self.object.full_name,
+                    "Documento": self.object.document_number,
+                    "Correo": self.object.email,
+                },
+            )
         messages.success(self.request, "Cliente creado correctamente.")
         return redirect(self.success_url)
 
@@ -1564,7 +1782,24 @@ class ClientUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
 
     def form_valid(self, form):
         with transaction.atomic():
+            before = _audit_snapshot(
+                self.object,
+                ("first_names", "last_names_or_company", "document_number", "email", "phone", "is_active"),
+            )
             self.object = form.save()
+            after = _audit_snapshot(
+                self.object,
+                ("first_names", "last_names_or_company", "document_number", "email", "phone", "is_active"),
+            )
+            audit_event(
+                user=self.request.user,
+                action="Modificado",
+                entity="Cliente",
+                obj=self.object,
+                context={"Cliente": self.object.full_name, "Documento": self.object.document_number},
+                before=before,
+                after=after,
+            )
         messages.success(self.request, "Cliente actualizado correctamente.")
         return redirect(self.success_url)
 
@@ -1579,9 +1814,20 @@ class ClientStatusView(FiduciaryManagementRequiredMixin, View):
             messages.error(request, "Debe registrar el motivo.")
             return redirect("fiduciary:client_list")
         with transaction.atomic():
+            before = f"is_active: {client.is_active}"
             client.is_active = action == "activate"
             client.last_change_reason = form.cleaned_data["change_reason"]
             client.save(update_fields=["is_active", "last_change_reason", "updated_at"])
+            audit_event(
+                user=request.user,
+                action="Modificado",
+                entity="Cliente",
+                obj=client,
+                description="Cliente activado." if client.is_active else "Cliente inactivado.",
+                context={"Cliente": client.full_name, "Documento": client.document_number, "Motivo": client.last_change_reason},
+                before=before,
+                after=f"is_active: {client.is_active}",
+            )
         messages.success(request, "Cliente actualizado correctamente.")
         return redirect("fiduciary:client_list")
 
@@ -1676,6 +1922,19 @@ class ObservationCreateView(FiduciaryManagementRequiredMixin, CreateView):
         try:
             with transaction.atomic():
                 self.object = form.save()
+                audit_event(
+                    user=self.request.user,
+                    action="Creado",
+                    entity="Observacion",
+                    obj=self.object,
+                    context={
+                        "Proyecto": self.object.project,
+                        "Unidad": self.object.property_unit,
+                        "Cliente": self.object.client,
+                        "Encargo": self.object.assignment,
+                    },
+                    after=_audit_snapshot(self.object, ("summary", "detail", "origin")),
+                )
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
@@ -1695,23 +1954,19 @@ class ObservationUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
     template_name = "fiduciary/observation_form.html"
     success_url = reverse_lazy("fiduciary:observation_list")
 
-    def dispatch(self, request, *args, **kwargs):
-        self.object = self.get_object()
-        if self.object.origin != ImportedHistoricalObservation.Origin.MANUAL:
-            raise PermissionDenied("Las observaciones importadas son de solo lectura.")
-        return super().dispatch(request, *args, **kwargs)
-
     def get_form_kwargs(self):
         kwargs = super().get_form_kwargs()
         kwargs["user"] = self.request.user
         kwargs["require_change_reason"] = True
+        kwargs["lock_context"] = True
         return kwargs
 
     def form_valid(self, form):
         try:
             with transaction.atomic():
+                before = _audit_snapshot(self.object, ("summary", "detail", "property_unit_id", "assignment_id"))
                 self.object = form.save()
-                _log_observation_change(self.request.user, self.object, form.cleaned_data["change_reason"])
+                _log_observation_change(self.request.user, self.object, form.cleaned_data["change_reason"], before)
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
@@ -1722,7 +1977,52 @@ class ObservationUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
         context = super().get_context_data(**kwargs)
         context["title"] = "Editar observacion"
         context["back_url"] = "fiduciary:observation_list"
+        observation = self.object
+        unit = observation.property_unit
+        group = unit.structural_group if unit else None
+        context["readonly_context"] = {
+            "Proyecto": unit.project if unit else observation.project,
+            "Tipo de agrupacion": group.grouping_type if group else None,
+            "Agrupacion": group,
+            "Unidad": unit,
+            "Encargo fiduciario": observation.assignment,
+        }
         return context
+
+
+class ObservationDeleteView(AdministrativeDeleteConfirmView):
+    model = ImportedHistoricalObservation
+    success_url = reverse_lazy("fiduciary:observation_list")
+    action_label = "Eliminar observacion"
+    warning = "Esta accion eliminara la observacion seleccionada. No elimina clientes, unidades, encargos ni pagos."
+
+    def dispatch(self, request, *args, **kwargs):
+        self.object = get_object_or_404(
+            ImportedHistoricalObservation.objects.exclude(origin="historical_novelty"),
+            pk=kwargs["pk"],
+        )
+        return TemplateView.dispatch(self, request, *args, **kwargs)
+
+    def get_summary(self):
+        class Summary:
+            def as_dict(self):
+                return {"Observaciones": 1}
+
+        return Summary()
+
+    def perform_delete(self, reason: str):
+        with transaction.atomic():
+            before = _audit_snapshot(self.object, ("summary", "detail", "property_unit_id", "assignment_id", "origin"))
+            _log_object_action(
+                self.request.user,
+                self.object,
+                "ELIMINAR_OBSERVACION",
+                DELETION,
+                f"ELIMINAR_OBSERVACION | Antes: {before} | Motivo: {reason}",
+            )
+            self.object.related_payments.clear()
+            self.object.delete()
+        return True
 
 
 class ObservationDetailView(FiduciaryReadRequiredMixin, QueryStringMixin, DetailView):
@@ -1950,6 +2250,76 @@ class NoveltyDetailView(FiduciaryReadRequiredMixin, QueryStringMixin, DetailView
         return context
 
 
+class NoveltyUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
+    model = OperationalNovelty
+    form_class = OperationalNoveltyEditForm
+    template_name = "fiduciary/novelty_form.html"
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["structural_locked"] = _novelty_has_structural_effect(self.object)
+        return kwargs
+
+    def form_valid(self, form):
+        reason = self.request.POST.get("change_reason", "").strip()
+        if not reason:
+            form.add_error(None, "Registre el motivo de la modificacion.")
+            return self.form_invalid(form)
+        try:
+            with transaction.atomic():
+                before = _audit_snapshot(self.object, ("effective_date", "summary", "detail", "other_type"))
+                self.object = form.save()
+                after = _audit_snapshot(self.object, ("effective_date", "summary", "detail", "other_type"))
+                _log_object_action(
+                    self.request.user,
+                    self.object,
+                    "MODIFICAR_NOVEDAD",
+                    CHANGE,
+                    f"MODIFICAR_NOVEDAD | Antes: {before} | Despues: {after} | Motivo: {reason}",
+                )
+        except ValidationError as exc:
+            _add_validation_errors_to_form(form, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Novedad actualizada correctamente.")
+        return redirect("fiduciary:novelty_detail", pk=self.object.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = "Editar novedad"
+        context["edit_mode"] = True
+        context["cancel_url"] = reverse("fiduciary:novelty_detail", args=[self.object.pk])
+        context["client_search_url"] = reverse("fiduciary:novelty_client_search")
+        context["assignment_clients_url"] = reverse("fiduciary:novelty_assignment_clients")
+        selected_clients = {}
+        for client in (self.object.previous_client, self.object.historical_client, self.object.new_client):
+            if client:
+                selected_clients[str(client.pk)] = {"text": client.full_name}
+        context["selected_clients_json"] = json.dumps(selected_clients)
+        return context
+
+
+class NoveltyDeleteView(AdministrativeDeleteConfirmView):
+    model = OperationalNovelty
+    success_url = reverse_lazy("fiduciary:novelty_list")
+    action_label = "Eliminar novedad"
+    warning = (
+        "Las novedades hacen parte de la trazabilidad historica y no se pueden eliminar manualmente."
+    )
+
+    def dispatch(self, request, *args, **kwargs):
+        raise PermissionDenied("La eliminacion manual de novedades no esta permitida.")
+
+    def get_summary(self):
+        class Summary:
+            def as_dict(self):
+                return {"Novedades": 1}
+
+        return Summary()
+
+    def perform_delete(self, reason: str):
+        raise PermissionDenied("La eliminacion manual de novedades no esta permitida.")
+
+
 class NoveltyCreateView(FiduciaryManagementRequiredMixin, QueryStringMixin, FormView):
     form_class = OperationalNoveltyForm
     template_name = "fiduciary/novelty_form.html"
@@ -1979,6 +2349,21 @@ class NoveltyCreateView(FiduciaryManagementRequiredMixin, QueryStringMixin, Form
         except ValidationError as exc:
             _add_validation_errors_to_form(form, exc)
             return self.form_invalid(form)
+        audit_event(
+            user=self.request.user,
+            action="Creado",
+            entity="Novedad",
+            obj=result.novelty,
+            context={
+                "Proyecto": result.novelty.project,
+                "Unidad": result.novelty.property_unit,
+                "Tipo": result.novelty.get_novelty_type_display(),
+                "Cliente actual": result.novelty.previous_client or result.novelty.historical_client,
+                "Cliente nuevo": result.novelty.new_client,
+                "Encargo": result.novelty.new_assignment or result.novelty.previous_assignment or result.novelty.historical_assignment,
+            },
+            after=_audit_snapshot(result.novelty, ("summary", "detail", "origin", "status")),
+        )
         messages.success(self.request, "Novedad registrada correctamente.")
         return redirect("fiduciary:novelty_detail", pk=result.novelty.pk)
 
@@ -2103,10 +2488,11 @@ class PaymentCreateView(FiduciaryCreateRequiredMixin, QueryStringMixin, FormView
     def form_valid(self, form):
         assignment = form.cleaned_data["assignment"]
         try:
-            _create_manual_payment_for_assignment(assignment, form.cleaned_data, self.request.user)
+            payment = _create_manual_payment_for_assignment(assignment, form.cleaned_data, self.request.user)
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
+        _audit_manual_payment_created(self.request.user, payment)
         messages.success(self.request, "Pago registrado correctamente.")
         return redirect(f"{reverse('fiduciary:payment_list')}?assignment_number={assignment.assignment_number}")
 
@@ -2116,6 +2502,96 @@ class PaymentCreateView(FiduciaryCreateRequiredMixin, QueryStringMixin, FormView
         context["global_payment"] = True
         context["unit_assignment_url"] = reverse("fiduciary:payment_unit_assignment")
         return context
+
+
+class PaymentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
+    model = Payment
+    form_class = PaymentEditForm
+    template_name = "fiduciary/payment_edit_form.html"
+
+    def get_queryset(self):
+        return Payment.objects.select_related("assignment", "assignment__property_unit", "source_file")
+
+    def form_valid(self, form):
+        reason = self.request.POST.get("change_reason", "").strip()
+        if not reason:
+            form.add_error(None, "Registre el motivo de la modificacion.")
+            return self.form_invalid(form)
+        try:
+            with transaction.atomic():
+                before = _audit_snapshot(
+                    self.object,
+                    ("date_precision", "exact_date", "period_year", "period_month", "amount", "concept", "destination"),
+                )
+                self.object = form.save(commit=False)
+                self.object.full_clean()
+                self.object.save()
+                after = _audit_snapshot(
+                    self.object,
+                    ("date_precision", "exact_date", "period_year", "period_month", "amount", "concept", "destination"),
+                )
+                _log_object_action(
+                    self.request.user,
+                    self.object,
+                    "MODIFICAR_PAGO",
+                    CHANGE,
+                    f"MODIFICAR_PAGO | Antes: {before} | Despues: {after} | Motivo: {reason}",
+                )
+        except ValidationError as exc:
+            _add_validation_errors_to_form(form, exc)
+            return self.form_invalid(form)
+        except IntegrityError:
+            form.add_error(None, "Ya existe un pago con la misma identidad para este encargo.")
+            return self.form_invalid(form)
+        messages.success(self.request, "Pago actualizado correctamente.")
+        return redirect(f"{reverse('fiduciary:payment_list')}?assignment_number={self.object.assignment.assignment_number}")
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = "Editar pago"
+        context["payment"] = self.object
+        return context
+
+
+class PaymentDeleteView(AdministrativeDeleteConfirmView):
+    model = Payment
+    success_url = reverse_lazy("fiduciary:payment_list")
+    action_label = "Eliminar pago"
+    warning = "Esta accion eliminara solo el pago seleccionado. No elimina cliente, unidad, proyecto ni encargo."
+
+    def get_summary(self):
+        class Summary:
+            def as_dict(self):
+                return {"Pagos": 1}
+
+        return Summary()
+
+    def perform_delete(self, reason: str):
+        with transaction.atomic():
+            before = _audit_snapshot(
+                self.object,
+                (
+                    "assignment_id",
+                    "date_precision",
+                    "exact_date",
+                    "period_year",
+                    "period_month",
+                    "amount",
+                    "concept",
+                    "destination",
+                    "source_file_id",
+                ),
+            )
+            _log_object_action(
+                self.request.user,
+                self.object,
+                "ELIMINAR_PAGO",
+                DELETION,
+                f"ELIMINAR_PAGO | Antes: {before} | Motivo: {reason}",
+            )
+            _unlink_payment_dependents(self.object)
+            self.object.delete()
+        return True
 
 
 class PaymentUnitAssignmentView(FiduciaryCreateRequiredMixin, View):
@@ -2153,19 +2629,13 @@ class PaymentUnitAssignmentView(FiduciaryCreateRequiredMixin, View):
 
 
 class AuditListView(FiduciaryManagementRequiredMixin, QueryStringMixin, ListView):
-    model = ImportAppliedRecord
+    model = AuditEvent
     template_name = "fiduciary/audit_list.html"
     context_object_name = "records"
     paginate_by = 10
 
     def get_queryset(self):
-        queryset = ImportAppliedRecord.objects.select_related(
-            "batch",
-            "batch__initiated_by",
-            "batch__imported_by",
-            "imported_file",
-            "sheet_result",
-        ).order_by("-created_at", "-pk")
+        queryset = AuditEvent.objects.select_related("user").order_by("-created_at", "-pk")
         self.filter_form = AuditFilterForm(self.request.GET)
         if self.filter_form.is_valid():
             responsible = self.filter_form.cleaned_data.get("responsible")
@@ -2177,7 +2647,7 @@ class AuditListView(FiduciaryManagementRequiredMixin, QueryStringMixin, ListView
             batch = self.filter_form.cleaned_data.get("batch")
             imported_file = self.filter_form.cleaned_data.get("imported_file")
             if responsible:
-                queryset = queryset.filter(Q(batch__imported_by=responsible) | Q(batch__initiated_by=responsible))
+                queryset = queryset.filter(user=responsible)
             if date_from:
                 queryset = queryset.filter(created_at__date__gte=date_from)
             if date_to:
@@ -2185,42 +2655,47 @@ class AuditListView(FiduciaryManagementRequiredMixin, QueryStringMixin, ListView
             if action:
                 queryset = queryset.filter(action=action)
             if entity_kind:
-                queryset = queryset.filter(entity_kind=entity_kind)
+                queryset = queryset.filter(entity=entity_kind)
             if reason:
-                queryset = queryset.filter(Q(summary__icontains=reason) | Q(batch__summary__icontains=reason))
+                queryset = queryset.filter(
+                    Q(description__icontains=reason)
+                    | Q(reason__icontains=reason)
+                    | Q(entity_repr__icontains=reason)
+                    | Q(context__icontains=reason)
+                    | Q(summary__icontains=reason)
+                )
             if batch:
-                queryset = queryset.filter(batch=batch)
+                queryset = queryset.filter(Q(context__Lote=str(batch.pk)) | Q(context__Lote=batch.pk))
             if imported_file:
-                queryset = queryset.filter(imported_file=imported_file)
+                queryset = queryset.filter(context__Archivo=imported_file.original_name)
         return queryset
 
     def get_context_data(self, **kwargs):
         context = self.add_common_context(super().get_context_data(**kwargs))
         context["filter_form"] = getattr(self, "filter_form", AuditFilterForm(self.request.GET))
-        backup_content_type = ContentType.objects.get_for_model(BackupRecord)
-        context["backup_audit_logs"] = LogEntry.objects.filter(content_type=backup_content_type).select_related(
-            "user", "content_type"
-        ).order_by("-action_time")[:10]
         return context
 
 
 class AuditDetailView(FiduciaryManagementRequiredMixin, QueryStringMixin, DetailView):
-    model = ImportAppliedRecord
+    model = AuditEvent
     template_name = "fiduciary/audit_detail.html"
     context_object_name = "record"
 
     def get_queryset(self):
-        return ImportAppliedRecord.objects.select_related(
-            "batch",
-            "batch__initiated_by",
-            "batch__imported_by",
-            "imported_file",
-            "sheet_result",
-        )
+        return AuditEvent.objects.select_related("user")
 
     def get_context_data(self, **kwargs):
         context = self.add_common_context(super().get_context_data(**kwargs))
-        context["responsible"] = self.object.batch.imported_by or self.object.batch.initiated_by
+        context["responsible"] = self.object.user
+        context["context_items"] = self.object.context.items()
+        context["before_items"] = self.object.before.items()
+        context["after_items"] = self.object.after.items()
+        keys = list(dict.fromkeys([*self.object.before.keys(), *self.object.after.keys()]))
+        context["change_rows"] = [
+            {"field": key, "before": self.object.before.get(key, ""), "after": self.object.after.get(key, "")}
+            for key in keys
+        ]
+        context["summary_items"] = self.object.summary.items()
         return context
 
 
@@ -2261,6 +2736,13 @@ class HistoricalWorkbookExportView(FiduciaryReadRequiredMixin, View):
             messages.error(request, "Seleccione un proyecto valido para exportar.")
             return redirect("fiduciary:export_home")
         exported = export_historical_workbook(form.cleaned_data["project"])
+        audit_event(
+            user=request.user,
+            action="Exportado",
+            entity="Libro historico",
+            obj=form.cleaned_data["project"],
+            context={"Proyecto": form.cleaned_data["project"], "Archivo": exported.filename},
+        )
         response = HttpResponse(
             exported.content,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2276,6 +2758,13 @@ class UploadedDocumentDownloadView(FiduciaryReadRequiredMixin, View):
         if not path or not path.exists():
             messages.error(request, "Archivo no disponible.")
             return redirect("fiduciary:export_home")
+        audit_event(
+            user=request.user,
+            action="Descargado",
+            entity="Archivo importado",
+            obj=imported_file,
+            context={"Archivo": imported_file.original_name, "Tipo": imported_file.get_file_type_display()},
+        )
         return FileResponse(path.open("rb"), as_attachment=True, filename=imported_file.original_name)
 
 
@@ -2436,6 +2925,31 @@ class AssignmentDetailView(FiduciaryReadRequiredMixin, DetailView):
         return context
 
 
+class AssignmentDeleteView(AdministrativeDeleteConfirmView):
+    model = FiduciaryAssignment
+    success_url = reverse_lazy("fiduciary:assignment_list")
+    action_label = "Eliminar encargo fiduciario"
+    warning = (
+        "Esta accion eliminara el encargo y la informacion dependiente del encargo, "
+        "incluyendo titulares del encargo, pagos, novedades y observaciones asociadas. "
+        "El cliente no se eliminara."
+    )
+
+    def dispatch(self, request, *args, **kwargs):
+        raise PermissionDenied("La eliminacion manual directa de encargos fiduciarios no esta permitida.")
+
+    def get_summary(self):
+        from .admin_cleanup import assignment_cleanup_summary
+
+        return assignment_cleanup_summary(self.object)
+
+    def perform_delete(self, reason: str):
+        from .admin_cleanup import delete_assignment
+
+        delete_assignment(self.object, user=self.request.user, reason=reason)
+        return True
+
+
 class AssignmentFinancialEntityUpdateView(FiduciaryUpdateRequiredMixin, View):
     def post(self, request, pk):
         assignment = get_object_or_404(
@@ -2449,8 +2963,19 @@ class AssignmentFinancialEntityUpdateView(FiduciaryUpdateRequiredMixin, View):
         financial_entity = form.cleaned_data["financial_entity"]
         unit = assignment.property_unit
         if financial_entity and unit.financial_entity != financial_entity:
+            before = f"financial_entity: {unit.financial_entity}"
             unit.financial_entity = financial_entity
             unit.save(update_fields=["financial_entity", "updated_at"])
+            audit_event(
+                user=request.user,
+                action="Modificado",
+                entity="Unidad inmobiliaria",
+                obj=unit,
+                description="Entidad financiera actualizada desde el encargo.",
+                context={"Proyecto": unit.project, "Unidad": unit, "Encargo": assignment.assignment_number},
+                before=before,
+                after=f"financial_entity: {unit.financial_entity}",
+            )
             messages.success(request, "Entidad financiera actualizada correctamente.")
         elif financial_entity:
             messages.info(request, "La entidad financiera no tuvo cambios.")
@@ -2476,10 +3001,11 @@ class AssignmentPaymentCreateView(FiduciaryCreateRequiredMixin, FormView):
 
     def form_valid(self, form):
         try:
-            _create_manual_payment_for_assignment(self.assignment, form.cleaned_data, self.request.user)
+            payment = _create_manual_payment_for_assignment(self.assignment, form.cleaned_data, self.request.user)
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
+        _audit_manual_payment_created(self.request.user, payment)
         messages.success(self.request, "Pago registrado correctamente.")
         return redirect("fiduciary:assignment_detail", pk=self.assignment.pk)
 
@@ -2605,6 +3131,22 @@ class AssignmentCreateView(FiduciaryCreateRequiredMixin, FormView):
                         "actual_delivery_date",
                         "updated_at",
                     ]
+                )
+                audit_event(
+                    user=self.request.user,
+                    action="Creado",
+                    entity="Encargo fiduciario",
+                    obj=assignment,
+                    context={
+                        "Proyecto": assignment.property_unit.project,
+                        "Unidad": assignment.property_unit,
+                        "Encargo": assignment.assignment_number,
+                        "Cliente principal": form.cleaned_data["primary_client_id"],
+                    },
+                    after=_audit_snapshot(
+                        assignment,
+                        ("assignment_number", "start_date", "adhesion_contract_date", "promise_date", "promised_delivery_date", "actual_delivery_date"),
+                    ),
                 )
         except ValidationError as exc:
             _add_validation_errors_to_form(form, exc)
@@ -2838,6 +3380,9 @@ class AssignmentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
     template_name = "fiduciary/form.html"
     success_url = reverse_lazy("fiduciary:assignment_list")
 
+    def dispatch(self, request, *args, **kwargs):
+        raise PermissionDenied("La edicion manual directa de encargos fiduciarios no esta permitida.")
+
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["title"] = "Actualizar informacion contractual"
@@ -2846,7 +3391,27 @@ class AssignmentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
 
     def form_valid(self, form):
         try:
+            before = _audit_snapshot(
+                self.object,
+                ("assignment_number", "adhesion_contract_date", "promise_date", "promised_delivery_date", "actual_delivery_date", "observations"),
+            )
             self.object = save_form_object_safely(form)
+            audit_event(
+                user=self.request.user,
+                action="Modificado",
+                entity="Encargo fiduciario",
+                obj=self.object,
+                context={
+                    "Proyecto": self.object.property_unit.project,
+                    "Unidad": self.object.property_unit,
+                    "Encargo": self.object.assignment_number,
+                },
+                before=before,
+                after=_audit_snapshot(
+                    self.object,
+                    ("assignment_number", "adhesion_contract_date", "promise_date", "promised_delivery_date", "actual_delivery_date", "observations"),
+                ),
+            )
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
@@ -2862,6 +3427,7 @@ class AssignmentCloseView(FiduciaryManagementRequiredMixin, View):
             messages.error(request, "Debe registrar motivo y fecha de cierre.")
             return redirect("fiduciary:assignment_detail", pk=assignment.pk)
         with transaction.atomic():
+            before = _audit_snapshot(assignment, ("is_active", "end_date", "last_change_reason"))
             assignment.is_active = False
             assignment.end_date = form.cleaned_data["end_date"]
             assignment.last_change_reason = form.cleaned_data["change_reason"]
@@ -2870,6 +3436,21 @@ class AssignmentCloseView(FiduciaryManagementRequiredMixin, View):
                 is_active=False,
                 end_date=assignment.end_date,
                 last_change_reason=assignment.last_change_reason,
+            )
+            audit_event(
+                user=request.user,
+                action="Modificado",
+                entity="Encargo fiduciario",
+                obj=assignment,
+                description="Encargo cerrado.",
+                context={
+                    "Proyecto": assignment.property_unit.project,
+                    "Unidad": assignment.property_unit,
+                    "Encargo": assignment.assignment_number,
+                    "Motivo": assignment.last_change_reason,
+                },
+                before=before,
+                after=_audit_snapshot(assignment, ("is_active", "end_date", "last_change_reason")),
             )
         messages.success(request, "Encargo fiduciario cerrado correctamente.")
         return redirect("fiduciary:assignment_detail", pk=assignment.pk)
@@ -2907,6 +3488,19 @@ class AssignmentChangeView(FiduciaryManagementRequiredMixin, FormView):
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
+        audit_event(
+            user=self.request.user,
+            action="Creado",
+            entity="Cambio de encargo",
+            obj=result.new_assignment,
+            context={
+                "Proyecto": result.new_assignment.property_unit.project,
+                "Unidad": result.new_assignment.property_unit,
+                "Encargo anterior": self.assignment.assignment_number,
+                "Encargo nuevo": result.new_assignment.assignment_number,
+                "Motivo": form.cleaned_data["reason"],
+            },
+        )
         messages.success(self.request, "Cambio de encargo registrado correctamente.")
         return redirect("fiduciary:assignment_detail", pk=result.new_assignment.pk)
 
@@ -3001,6 +3595,19 @@ class AssignmentSecondaryCreateView(FiduciaryCreateRequiredMixin, FormView):
                 )
                 observation.full_clean()
                 observation.save()
+                audit_event(
+                    user=self.request.user,
+                    action="Creado",
+                    entity="Cliente secundario de encargo",
+                    obj=self.assignment,
+                    context={
+                        "Proyecto": unit.project,
+                        "Unidad": unit,
+                        "Encargo": self.assignment.assignment_number,
+                        "Cliente": client,
+                    },
+                    description="Cliente secundario añadido con novedad de inclusion.",
+                )
         except ValidationError as exc:
             form.add_error(None, _validation_error_text(exc))
             return self.form_invalid(form)
@@ -3029,9 +3636,20 @@ class AssignmentHolderFinalizeView(FiduciaryManagementRequiredMixin, View):
             messages.error(request, "No puede finalizar el titular principal mientras el encargo siga vigente.")
             return redirect("fiduciary:assignment_detail", pk=holder.assignment_id)
         with transaction.atomic():
+            before = _audit_snapshot(holder, ("is_active", "end_date", "last_change_reason"))
             holder.is_active = False
             holder.end_date = form.cleaned_data["end_date"]
             holder.last_change_reason = form.cleaned_data["change_reason"]
             holder.save()
+            audit_event(
+                user=request.user,
+                action="Modificado",
+                entity="Titular de encargo",
+                obj=holder,
+                description="Titular finalizado.",
+                context={"Cliente": holder.client, "Encargo": holder.assignment.assignment_number, "Motivo": holder.last_change_reason},
+                before=before,
+                after=_audit_snapshot(holder, ("is_active", "end_date", "last_change_reason")),
+            )
         messages.success(request, "Titular finalizado correctamente.")
         return redirect("fiduciary:assignment_detail", pk=holder.assignment_id)

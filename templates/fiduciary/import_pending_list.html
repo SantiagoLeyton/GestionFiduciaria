@@ -69,7 +69,10 @@
                     {% endif %}
                   </td>
                   <td>
-                    {% if element.inferred_kind == "structural_group" %}
+                    {% if element.block_reason %}
+                      <button class="btn btn-sm btn-outline-secondary" type="button" disabled>Resolver</button>
+                      <div class="text-muted small mt-1">{{ element.block_reason }}</div>
+                    {% elif element.inferred_kind == "structural_group" %}
                       <a class="btn btn-sm btn-success" href="{% url 'fiduciary:historical_import_resolve_group' batch.pk element.pk %}">Resolver agrupación</a>
                     {% else %}
                       <a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:historical_import_resolve' batch.pk element.pk %}">Resolver</a>

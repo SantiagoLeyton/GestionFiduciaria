@@ -14,7 +14,13 @@
           <h1>Detalle de observacion</h1>
           <p>{{ observation.property_unit.project.name }}{% if observation.property_unit.structural_group %} - {{ observation.property_unit.structural_group }}{% endif %} - {{ observation.property_unit.name|default:observation.property_unit.code }}</p>
         </div>
-        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:observation_list' %}">Volver</a>
+        <div class="d-flex gap-2">
+          {% if can_manage %}
+            <a class="btn btn-outline-success" href="{% url 'fiduciary:observation_update' observation.pk %}">Editar</a>
+            <a class="btn btn-outline-danger" href="{% url 'fiduciary:observation_delete' observation.pk %}">Eliminar</a>
+          {% endif %}
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:observation_list' %}">Volver</a>
+        </div>
       </div>
 
       <section class="data-section">

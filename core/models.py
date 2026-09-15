@@ -4,6 +4,43 @@ from django.conf import settings
 from django.db import models
 
 
+class AuditEvent(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="audit_events",
+        blank=True,
+        null=True,
+    )
+    action = models.CharField("accion", max_length=80)
+    entity = models.CharField("entidad", max_length=120)
+    entity_id = models.CharField("id de entidad", max_length=80, blank=True)
+    entity_repr = models.CharField("representacion de entidad", max_length=200, blank=True)
+    description = models.TextField("descripcion", blank=True)
+    reason = models.TextField("motivo", blank=True)
+    context = models.JSONField("contexto", default=dict, blank=True)
+    before = models.JSONField("antes", default=dict, blank=True)
+    after = models.JSONField("despues", default=dict, blank=True)
+    summary = models.JSONField("resumen", default=dict, blank=True)
+    created_at = models.DateTimeField("fecha de creacion", auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ("-created_at", "-pk")
+        indexes = [
+            models.Index(fields=["action", "-created_at"], name="core_audit_action_date_idx"),
+            models.Index(fields=["entity", "-created_at"], name="core_audit_entity_date_idx"),
+        ]
+        verbose_name = "audit event"
+        verbose_name_plural = "audit events"
+
+    def __str__(self):
+        return f"{self.action} - {self.entity}"
+
+    @property
+    def visible_description(self):
+        return self.description or self.reason or self.entity_repr or ""
+
+
 class BackupRecord(models.Model):
     class BackupType(models.TextChoices):
         AUTOMATIC = "automatic", "Automático"

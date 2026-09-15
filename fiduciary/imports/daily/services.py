@@ -18,6 +18,7 @@ from fiduciary.models import (
     ImportedSheetResult,
     Payment,
 )
+from fiduciary.imports.audit import create_import_audit_event
 from fiduciary.permissions import can_import_fiduciary
 from fiduciary.services import create_payment
 from fiduciary.utils import calculate_sha256
@@ -180,6 +181,20 @@ def finalize_daily_report_import(*, batch_id: int, user) -> DailyReportFinalizat
             imported_file.processing_finished_at = now
             imported_file.result_message = batch.summary
             imported_file.save(update_fields=["status", "processing_finished_at", "result_message"])
+            create_import_audit_event(
+                batch=batch,
+                imported_file=imported_file,
+                entity_kind=ImportAppliedRecord.EntityKind.PAYMENT,
+                action="Importado",
+                entity="Reporte fiduciario",
+                lines=[
+                    "Descripcion: Importacion definitiva de reporte fiduciario completada.",
+                    f"Archivo: {imported_file.original_name}",
+                    f"Resultado: {batch.get_status_display()}",
+                    f"Pagos creados: {imported_rows}",
+                    f"Pagos existentes/ignorados: {duplicate_rows}",
+                ],
+            )
             return DailyReportFinalizationResult(batch_id=batch.pk, imported_rows=imported_rows, duplicate_rows=duplicate_rows)
     except Exception as exc:
         _mark_failed(batch_id, exc)
@@ -194,9 +209,6 @@ def find_existing_daily_report(file_path) -> ImportedFile | None:
 def _reserve_report_file(*, batch: ImportBatch, file_path) -> ImportedFile:
     path = Path(file_path)
     sha256 = calculate_sha256(path)
-    existing = ImportedFile.objects.filter(file_type=ImportedFile.FileType.REPORT, sha256=sha256).first()
-    if existing:
-        raise DailyReportDuplicateError(existing)
     try:
         return ImportedFile.objects.create(
             batch=batch,
@@ -209,10 +221,7 @@ def _reserve_report_file(*, batch: ImportBatch, file_path) -> ImportedFile:
             order=1,
             result_message="Analisis de reporte diario en curso.",
         )
-    except IntegrityError as exc:
-        existing = ImportedFile.objects.filter(file_type=ImportedFile.FileType.REPORT, sha256=sha256).first()
-        if existing:
-            raise DailyReportDuplicateError(existing) from exc
+    except IntegrityError:
         raise
 
 

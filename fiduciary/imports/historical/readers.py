@@ -97,7 +97,7 @@ class XlsxWorkbookReader:
             date_style_ids = self._read_date_style_ids(archive)
             sheet_refs = self._read_sheet_refs(archive)
             sheets = [
-                self._read_sheet(archive, sheet_name, index, visibility, sheet_path, shared_strings, date_style_ids)
+                self._read_sheet(archive, sheet_name, index, visibility, sheet_path, shared_strings, date_style_ids, issues)
                 for index, (sheet_name, visibility, sheet_path) in enumerate(sheet_refs, start=1)
             ]
         return RawWorkbook(file_type="xlsx", sheets=sheets, issues=issues)
@@ -154,6 +154,7 @@ class XlsxWorkbookReader:
         sheet_path: str,
         shared_strings: list[str],
         date_style_ids: set[int],
+        issues: list[ParserIssue],
     ) -> RawSheet:
         root = ET.fromstring(archive.read(sheet_path))
         dimension_node = root.find("main:dimension", NS)
@@ -180,7 +181,25 @@ class XlsxWorkbookReader:
                 formula = formula_node.text or shared_formulas.get(formula_node.attrib.get("si"), "")
             style_id = int(cell_node.attrib.get("s", "0")) if cell_node.attrib.get("s", "0").isdigit() else 0
             is_date = style_id in date_style_ids
-            value = self._cell_value(cell_node, value_node, shared_strings, is_date)
+            try:
+                value = self._cell_value(cell_node, value_node, shared_strings, is_date)
+            except (OverflowError, ValueError) as exc:
+                raw_value = value_node.text if value_node is not None else ""
+                value = raw_value
+                issues.append(
+                    ParserIssue(
+                        code="INVALID_EXCEL_DATE_VALUE",
+                        severity="warning",
+                        message="Celda con formato de fecha contiene un valor de Excel fuera del rango interpretable.",
+                        sheet_name=sheet_name,
+                        row_number=row,
+                        column_letter=column_letter,
+                        field_name=reference,
+                        found_value=str(raw_value),
+                        cause=str(exc),
+                        extra_data={"scope": "cell", "coordinate": reference},
+                    )
+                )
             cells[(row, column)] = CellData(
                 row=row,
                 column=column,

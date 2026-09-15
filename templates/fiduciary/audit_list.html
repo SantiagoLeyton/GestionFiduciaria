@@ -12,7 +12,7 @@
       <div class="page-heading">
         <div>
           <h1>Auditoria</h1>
-          <p>Consulte la trazabilidad registrada durante las operaciones de importacion.</p>
+          <p>Consulte la trazabilidad de las acciones realizadas por los usuarios.</p>
         </div>
       </div>
 
@@ -42,10 +42,10 @@
               {% for record in records %}
                 <tr>
                   <td>{{ record.created_at|date:"d/m/Y H:i" }}</td>
-                  <td>{% with responsible=record.batch.imported_by|default:record.batch.initiated_by %}{{ responsible.get_full_name|default:responsible.username }}{% endwith %}</td>
-                  <td>{{ record.get_action_display }}</td>
-                  <td>{{ record.get_entity_kind_display }}</td>
-                  <td>{{ record.summary|default:record.batch.summary|truncatechars:100 }}</td>
+                  <td>{{ record.user.get_full_name|default:record.user.username }}</td>
+                  <td>{{ record.action }}</td>
+                  <td>{{ record.entity }}</td>
+                  <td>{{ record.visible_description|truncatechars:100 }}</td>
                   <td><a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:audit_detail' record.pk %}">Ver detalle</a></td>
                 </tr>
               {% empty %}
@@ -57,29 +57,6 @@
         {% include "includes/pagination.html" %}
       </section>
 
-      <section class="data-section mt-4">
-        <div class="section-header"><h2>Copias de seguridad</h2><span>Eventos administrativos recientes</span></div>
-        <div class="table-responsive">
-          <table class="table align-middle data-table">
-            <thead>
-              <tr><th>Fecha y hora</th><th>Responsable</th><th>Accion</th><th>Entidad</th><th>Descripcion</th></tr>
-            </thead>
-            <tbody>
-              {% for log in backup_audit_logs %}
-                <tr>
-                  <td>{{ log.action_time|date:"d/m/Y H:i" }}</td>
-                  <td>{{ log.user.get_full_name|default:log.user.username }}</td>
-                  <td>{{ log.get_action_flag_display }}</td>
-                  <td>{{ log.content_type.name }}</td>
-                  <td>{{ log.change_message|default:"Evento de copia de seguridad."|truncatechars:100 }}</td>
-                </tr>
-              {% empty %}
-                <tr><td colspan="5">No hay eventos de copias de seguridad registrados.</td></tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </section>
     </section>
   </main>
 </div>

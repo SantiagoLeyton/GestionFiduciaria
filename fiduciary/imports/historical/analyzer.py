@@ -150,9 +150,6 @@ def find_existing_historical_import(file_path) -> ImportedFile | None:
 def reserve_historical_import_file(*, batch: ImportBatch, file_path) -> ImportedFile:
     path = Path(file_path)
     sha256 = calculate_sha256(path)
-    existing_file = _historical_files().filter(sha256=sha256).first()
-    if existing_file:
-        raise DuplicateHistoricalImportError(existing_file)
 
     try:
         with transaction.atomic():
@@ -167,10 +164,7 @@ def reserve_historical_import_file(*, batch: ImportBatch, file_path) -> Imported
                 order=1,
                 result_message="Analisis historico en curso.",
             )
-    except IntegrityError as exc:
-        existing_file = _historical_files().filter(sha256=sha256).first()
-        if existing_file:
-            raise DuplicateHistoricalImportError(existing_file) from exc
+    except IntegrityError:
         raise
 
 

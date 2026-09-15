@@ -46,7 +46,7 @@
           <div class="table-responsive">
             <table class="table align-middle data-table">
               <thead>
-                <tr><th>Fecha</th><th>Proyecto</th><th>Agrupacion</th><th>Unidad</th><th>Cliente</th><th>Valor</th><th>Concepto</th><th>Tipo</th><th>Recibido por</th><th>Encargo fiduciario</th><th>Origen</th></tr>
+                <tr><th>Fecha</th><th>Proyecto</th><th>Agrupacion</th><th>Unidad</th><th>Cliente</th><th>Valor</th><th>Concepto</th><th>Recibido por</th><th>Encargo fiduciario</th><th>Origen</th>{% if can_manage %}<th></th>{% endif %}</tr>
               </thead>
               <tbody>
                 {% for payment in payments %}
@@ -58,13 +58,18 @@
                     <td>{% if payment.display_client %}<a href="{% url 'fiduciary:client_detail' payment.display_client.pk %}">{{ payment.display_client.full_name }}</a>{% else %}-{% endif %}</td>
                     <td>{{ payment.amount|money_co }}</td>
                     <td>{{ payment.concept|default:"-" }}</td>
-                    <td>{{ payment.display_movement_type }}</td>
                     <td>{{ payment.get_destination_display|default:"-" }}</td>
                     <td><a href="{% url 'fiduciary:assignment_detail' payment.assignment.pk %}">{{ payment.assignment.assignment_number }}</a></td>
                     <td>{{ payment.source_file.get_file_type_display }} - {{ payment.source_file.original_name }}</td>
+                    {% if can_manage %}
+                      <td class="text-nowrap">
+                        <a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:payment_update' payment.pk %}">Editar</a>
+                        <a class="btn btn-sm btn-outline-danger" href="{% url 'fiduciary:payment_delete' payment.pk %}">Eliminar</a>
+                      </td>
+                    {% endif %}
                   </tr>
                 {% empty %}
-                  <tr><td colspan="11">No hay pagos con los filtros seleccionados.</td></tr>
+                  <tr><td colspan="{% if can_manage %}11{% else %}10{% endif %}">No hay pagos con los filtros seleccionados.</td></tr>
                 {% endfor %}
               </tbody>
             </table>

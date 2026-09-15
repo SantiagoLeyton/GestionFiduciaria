@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}Deshacer importacion | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>Deshacer importacion</h1>
+          <p>{{ imported_file.original_name|default:"Archivo importado" }}</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url preview_url_name batch.pk %}">Volver</a>
+      </div>
+      <section class="data-section">
+        <p>Esta operacion eliminara la informacion incorporada exclusivamente por esta importacion. Los clientes se conservaran.</p>
+        <ul>
+          {% for label, count in summary_items %}
+            {% if count %}<li>{{ label }}: {{ count }}</li>{% endif %}
+          {% endfor %}
+        </ul>
+        {% if can_revert %}
+          <form method="post">
+            {% csrf_token %}
+            <div class="mb-3">
+              <label class="form-label" for="id_change_reason">Motivo</label>
+              <textarea class="form-control" id="id_change_reason" name="change_reason" required rows="3"></textarea>
+            </div>
+            <button class="btn btn-outline-danger" type="submit">Deshacer importacion</button>
+            <a class="btn btn-outline-secondary" href="{% url preview_url_name batch.pk %}">Cancelar</a>
+          </form>
+        {% else %}
+          <p>Esta importacion no se puede deshacer desde su estado actual.</p>
+        {% endif %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

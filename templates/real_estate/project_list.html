@@ -35,7 +35,7 @@
                     <a class="btn btn-sm btn-outline-secondary" href="{% url 'real_estate:structural_group_list' %}?project={{ entity.pk }}">Agrupaciones</a>
                     <a class="btn btn-sm btn-outline-secondary" href="{% url 'real_estate:property_unit_list' %}?project={{ entity.pk }}">Unidades</a>
                   </td>
-                  <td class="actions-cell">{% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a>{% endif %}{% include "real_estate/includes/status_action.html" %}</td>
+                  <td class="actions-cell">{% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a><a class="btn btn-sm btn-outline-danger" href="{% url 'real_estate:project_delete' entity.pk %}">Eliminar proyecto</a>{% endif %}{% include "real_estate/includes/status_action.html" %}</td>
                 </tr>
               {% empty %}<tr><td colspan="6">No hay proyectos registrados.</td></tr>{% endfor %}
             </tbody>

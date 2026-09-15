@@ -11,6 +11,8 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 from django.views.generic import CreateView, ListView, UpdateView, View
 
+from core.audit import record_audit
+
 from .forms_admin import ManagedUserCreateForm, ManagedUserUpdateForm, UserActionReasonForm, UserSearchForm
 from .forms import LoginForm
 from .permissions import UserManagementRequiredMixin, UserReadRequiredMixin
@@ -314,10 +316,23 @@ def _generate_internal_username(email, *, exclude_pk=None):
 
 
 def _log_user_action(actor, target_user, action_flag, message):
-    LogEntry.objects.log_actions(
-        user_id=actor.pk,
-        queryset=User.objects.filter(pk=target_user.pk),
-        action_flag=action_flag,
-        change_message=message,
-        single_object=True,
+    if action_flag == DELETION:
+        action = "Eliminado"
+    elif action_flag == ADDITION:
+        action = "Creado"
+    else:
+        action = "Modificado"
+    record_audit(
+        user=actor,
+        action=action,
+        entity="Usuario",
+        obj=target_user,
+        description=message,
+        context={
+            "Usuario": target_user.get_full_name() or target_user.email,
+            "Correo": target_user.email,
+            "Rol": target_user.get_role_display(),
+            "Activo": target_user.is_active,
+            "Eliminado": target_user.is_deleted,
+        },
     )

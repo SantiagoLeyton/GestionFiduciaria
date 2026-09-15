@@ -15,6 +15,7 @@ from fiduciary.imports.historical.parser import (
     RECEIPT_CATEGORY_CESSION,
     classify_receipt,
     _historical_payment_date_year_month,
+    _is_valid_strict_historical_date,
     _split_historical_date_values,
 )
 from fiduciary.imports.historical.readers import RawSheet, RawWorkbook
@@ -557,9 +558,47 @@ def test_montecielo_fiduciary_same_month_counts_dates_receipts_and_values():
     ]
 
 
-@pytest.mark.parametrize("date_value", ["ENE.26/26F", "ENE26/26F"])
-def test_montecielo_fiduciary_text_date_normalizes_to_month_year(date_value):
-    assert _historical_payment_date_year_month(date_value) == (2026, 1)
+@pytest.mark.parametrize(
+    ("date_value", "expected"),
+    [
+        ("ENE.1/26", (2026, 1)),
+        ("ENE.01/26", (2026, 1)),
+        ("ENE.26/26F", (2026, 1)),
+        ("SEP.14/26F", (2026, 9)),
+        ("DIC.31/26", (2026, 12)),
+    ],
+)
+def test_montecielo_fiduciary_text_date_strict_valid_values_normalize_to_month_year(date_value, expected):
+    assert _is_valid_strict_historical_date(date_value)
+    assert _historical_payment_date_year_month(date_value) == expected
+
+
+@pytest.mark.parametrize(
+    "date_value",
+    [
+        "ENE26/26F",
+        "MAY.526",
+        "SEP14/26F",
+        "SEP.1426F",
+        "SEP./26F",
+        "SEP.14-26F",
+        "SEPT.14/26F",
+        "ENE.32/26F",
+        "ABC.14/26F",
+        "FEB.30/26F",
+    ],
+)
+def test_montecielo_fiduciary_text_date_malformed_values_are_blocking(date_value):
+    parsed = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))._parse_sheet(
+        montecielo_payment_sheet(fidubogota_receipts="NCR1", dates=date_value, fiduciary_value=1000)
+    )
+
+    issue = next(issue for issue in parsed.issues if issue.code == "HIST_INVALID_DATE_HEADER")
+    assert issue.severity == "blocking"
+    assert issue.field_name == "FECHA"
+    assert "Formato esperado: MES.DD/AA o MES.DD/AAF" in issue.message
+    assert not _is_valid_strict_historical_date(date_value)
+    assert _historical_payment_date_year_month(date_value) is None
 
 
 def test_montecielo_does_not_mix_standard_and_fidubogota_receipt_sources():
@@ -626,9 +665,169 @@ def test_montecielo_fiduciary_month_requires_matching_individual_values():
     issue = next(issue for issue in parsed.issues if issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH")
     assert issue.severity == "blocking"
     assert issue.extra_data["destination"] == "fiduciaria"
-    assert issue.extra_data["year"] == 2026
-    assert issue.extra_data["month"] == 1
     assert issue.found_value == "1 valores / 2 recibos con fecha"
+
+
+def test_monthly_literal_zero_without_matching_receipt_date_is_ignored_as_padding():
+    sheet = montecielo_payment_sheet(
+        fidubogota_receipts="NCR1",
+        dates="ENE.2/25F",
+        fiduciary_value=1000,
+    )
+    sheet.cells[(4, 10)] = CellData(4, 10, "J", "J4", "RECIBO FIDUCIA ENE/2025")
+    sheet.cells[(4, 11)] = CellData(4, 11, "K", "K4", "RECIBO FIDUCIA ENE/2026")
+    sheet.cells[(5, 11)] = CellData(5, 11, "K", "K5", 0)
+
+    parsed = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))._parse_sheet(sheet)
+
+    assert [(payment.receipt, payment.date_value, payment.amount) for payment in parsed.rows[0].reconstructed_payments] == [
+        ("NCR1", "ENE.2/25F", 1000)
+    ]
+    assert not any(
+        issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH" and issue.extra_data.get("year") == 2026
+        for issue in parsed.issues
+    )
+
+
+def test_monthly_formula_zero_without_matching_receipt_date_is_not_padding():
+    sheet = montecielo_payment_sheet(
+        fidubogota_receipts="NCR1",
+        dates="ENE.2/25F",
+        fiduciary_value=1000,
+    )
+    sheet.cells[(4, 10)] = CellData(4, 10, "J", "J4", "RECIBO FIDUCIA ENE/2025")
+    sheet.cells[(4, 11)] = CellData(4, 11, "K", "K4", "RECIBO FIDUCIA ENE/2026")
+    sheet.cells[(5, 11)] = CellData(5, 11, "K", "K5", 0, formula="=100-100", has_cached_value=True)
+
+    parsed = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))._parse_sheet(sheet)
+
+    issue = next(issue for issue in parsed.issues if issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH")
+    assert issue.found_value == "2 valores / 1 recibos con fecha"
+
+
+def test_fiduciary_date_year_typo_is_normalized_between_december_and_february():
+    sheet = montecielo_payment_sheet(
+        fidubogota_receipts="NCR1-NCR2-NCR3",
+        dates="DIC.5/25F-ENE.2/25F-FEB.4/26F",
+    )
+    sheet.cells[(4, 10)] = CellData(4, 10, "J", "J4", "RECIBO FIDUCIA DIC/2025")
+    sheet.cells[(5, 10)] = CellData(5, 10, "J", "J5", 1000)
+    sheet.cells[(4, 11)] = CellData(4, 11, "K", "K4", "RECIBO FIDUCIA ENE/2026")
+    sheet.cells[(5, 11)] = CellData(5, 11, "K", "K5", 2000)
+    sheet.cells[(4, 12)] = CellData(4, 12, "L", "L4", "RECIBO FIDUCIA FEB/2026")
+    sheet.cells[(5, 12)] = CellData(5, 12, "L", "L5", 3000)
+
+    parser = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))
+    parsed = parser._parse_sheet(sheet)
+
+    assert [(payment.receipt, payment.date_value, payment.amount) for payment in parsed.rows[0].reconstructed_payments] == [
+        ("NCR1", "DIC.5/25F", 1000),
+        ("NCR2", "ENE.2/26F", 2000),
+        ("NCR3", "FEB.4/26F", 3000),
+    ]
+    assert not any(issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH" for issue in parsed.issues)
+    assert parser._historical_date_normalizations == [
+        {
+            "sheet": "T2",
+            "row": 5,
+            "receipt": "NCR2",
+            "source_column": "F",
+            "original": "ENE.2/25F",
+            "interpreted": "ENE.2/26F",
+        }
+    ]
+
+
+def test_fiduciary_date_year_typo_is_normalized_for_duplicate_january_values():
+    sheet = montecielo_payment_sheet(
+        fidubogota_receipts="NCR1-NCR2-NCR3-NCR4",
+        dates="NOV.1/24F-DIC.3/24F-ENE.2/24F-ENE.27/25F",
+    )
+    sheet.cells[(4, 10)] = CellData(4, 10, "J", "J4", "RECIBO FIDUCIA NOV/2024")
+    sheet.cells[(5, 10)] = CellData(5, 10, "J", "J5", 1000)
+    sheet.cells[(4, 11)] = CellData(4, 11, "K", "K4", "RECIBO FIDUCIA DIC/2024")
+    sheet.cells[(5, 11)] = CellData(5, 11, "K", "K5", 2000)
+    sheet.cells[(4, 12)] = CellData(4, 12, "L", "L4", "RECIBO FIDUCIA ENE/2025")
+    sheet.cells[(5, 12)] = CellData(5, 12, "L", "L5", 3000, formula="=1000+2000", has_cached_value=True)
+
+    parser = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))
+    parsed = parser._parse_sheet(sheet)
+
+    assert [(payment.receipt, payment.date_value, payment.amount) for payment in parsed.rows[0].reconstructed_payments] == [
+        ("NCR1", "NOV.1/24F", 1000),
+        ("NCR2", "DIC.3/24F", 2000),
+        ("NCR3", "ENE.2/25F", 1000),
+        ("NCR4", "ENE.27/25F", 2000),
+    ]
+    assert not any(issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH" for issue in parsed.issues)
+
+
+def test_fiduciary_date_year_is_not_normalized_without_sufficient_evidence():
+    sheet = montecielo_payment_sheet(
+        fidubogota_receipts="NCR1-NCR2-NCR3",
+        dates="DIC.5/25F-ENE.2/25F-FEB.4/26F",
+    )
+    sheet.cells[(4, 10)] = CellData(4, 10, "J", "J4", "RECIBO FIDUCIA DIC/2025")
+    sheet.cells[(5, 10)] = CellData(5, 10, "J", "J5", 1000)
+    sheet.cells[(4, 11)] = CellData(4, 11, "K", "K4", "RECIBO FIDUCIA ENE/2025")
+    sheet.cells[(5, 11)] = CellData(5, 11, "K", "K5", 2000)
+    sheet.cells[(4, 12)] = CellData(4, 12, "L", "L4", "RECIBO FIDUCIA ENE/2026")
+    sheet.cells[(5, 12)] = CellData(5, 12, "L", "L5", 3000)
+    sheet.cells[(4, 13)] = CellData(4, 13, "M", "M4", "RECIBO FIDUCIA FEB/2026")
+    sheet.cells[(5, 13)] = CellData(5, 13, "M", "M5", 4000)
+
+    parser = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))
+    parsed = parser._parse_sheet(sheet)
+
+    issue = next(issue for issue in parsed.issues if issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH")
+    assert issue.found_value == "4 valores / 3 recibos con fecha"
+    assert parser._historical_date_normalizations == []
+
+
+def test_chronologically_correct_fiduciary_year_is_not_modified():
+    sheet = montecielo_payment_sheet(
+        fidubogota_receipts="NCR1-NCR2-NCR3",
+        dates="DIC.5/25F-ENE.2/26F-FEB.4/26F",
+    )
+    sheet.cells[(4, 10)] = CellData(4, 10, "J", "J4", "RECIBO FIDUCIA DIC/2025")
+    sheet.cells[(5, 10)] = CellData(5, 10, "J", "J5", 1000)
+    sheet.cells[(4, 11)] = CellData(4, 11, "K", "K4", "RECIBO FIDUCIA ENE/2026")
+    sheet.cells[(5, 11)] = CellData(5, 11, "K", "K5", 2000)
+    sheet.cells[(4, 12)] = CellData(4, 12, "L", "L4", "RECIBO FIDUCIA FEB/2026")
+    sheet.cells[(5, 12)] = CellData(5, 12, "L", "L5", 3000)
+
+    parser = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))
+    parsed = parser._parse_sheet(sheet)
+
+    assert [(payment.receipt, payment.date_value, payment.amount) for payment in parsed.rows[0].reconstructed_payments] == [
+        ("NCR1", "DIC.5/25F", 1000),
+        ("NCR2", "ENE.2/26F", 2000),
+        ("NCR3", "FEB.4/26F", 3000),
+    ]
+    assert parser._historical_date_normalizations == []
+
+
+def test_fiduciary_receipt_date_count_mismatch_does_not_cascade_to_monthly_value_mismatches():
+    receipts = "-".join(f"NCR{i:02d}" for i in range(1, 40))
+    dates = "-".join(
+        [*(f"ENE.{day}/26F" for day in range(1, 21)), *(f"FEB.{day}/26F" for day in range(1, 13))]
+    )
+    sheet = montecielo_payment_sheet(fidubogota_receipts=receipts, dates=dates)
+    sheet.cells[(4, 10)] = CellData(4, 10, "J", "J4", "RECIBO FIDUCIA ENE/2026")
+    sheet.cells[(5, 10)] = CellData(
+        5,
+        10,
+        "J",
+        "J5",
+        39,
+        formula="=" + "+".join("1" for _ in range(39)),
+        has_cached_value=True,
+    )
+
+    parsed = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))._parse_sheet(sheet)
+
+    assert any(issue.code == "HIST_PAYMENT_DATE_RECEIPT_MISMATCH" for issue in parsed.issues)
+    assert not any(issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH" for issue in parsed.issues)
 
 
 def test_montecielo_fiduciary_date_does_not_use_value_from_other_month():
@@ -642,8 +841,9 @@ def test_montecielo_fiduciary_date_does_not_use_value_from_other_month():
     parsed = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))._parse_sheet(sheet)
 
     issues = [issue for issue in parsed.issues if issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH"]
-    assert any(issue.severity == "blocking" and issue.extra_data["month"] == 1 for issue in issues)
-    assert any(issue.severity == "blocking" and issue.extra_data["month"] == 2 for issue in issues)
+    assert len(issues) == 1
+    assert issues[0].extra_data["date_month"] == 1
+    assert issues[0].extra_data["value_month"] == 2
 
 
 def test_montecielo_constructora_payment_value_mismatch_is_blocking():
@@ -1015,6 +1215,79 @@ def test_simple_sum_formula_is_split_into_individual_values():
     assert all(payment.value_had_formula for payment in parsed.rows[0].reconstructed_payments)
 
 
+def test_literal_zero_received_without_receipt_or_date_is_ignored_as_padding():
+    parsed = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))._parse_sheet(
+        montecielo_payment_sheet(receipts="", dates="", received=0)
+    )
+
+    assert parsed.rows[0].payments == []
+    assert parsed.rows[0].reconstructed_payments == []
+    assert "HIST_PAYMENT_DATE_RECEIPT_MISMATCH" not in {issue.code for issue in parsed.issues}
+    assert "HIST_PAYMENT_VALUE_COUNT_MISMATCH" not in {issue.code for issue in parsed.issues}
+
+
+def test_formula_zero_received_without_receipt_or_date_is_not_literal_padding():
+    parser = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))
+    sheet = montecielo_payment_sheet(receipts="", dates="", received=0, received_formula="=0-0")
+    parsed = parser._parse_sheet(sheet)
+
+    values = parser._individual_special_payment_values(
+        sheet,
+        5,
+        [parsed.columns["received_values"]],
+        ignore_literal_zero_padding=True,
+    )
+
+    assert [value["amount"] for value in values] == [Decimal("0.00")]
+    assert values[0]["has_formula"] is True
+
+
+def test_literal_zero_received_with_receipt_keeps_existing_validation():
+    parsed = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))._parse_sheet(
+        montecielo_payment_sheet(receipts="NCR1", dates="", received=0)
+    )
+
+    assert "HIST_PAYMENT_DATE_RECEIPT_MISMATCH" in {issue.code for issue in parsed.issues}
+
+
+def test_literal_zero_received_with_date_keeps_existing_validation():
+    parsed = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))._parse_sheet(
+        montecielo_payment_sheet(receipts="", dates="ENE.10/26", received=0)
+    )
+
+    assert "HIST_PAYMENT_DATE_RECEIPT_MISMATCH" in {issue.code for issue in parsed.issues}
+
+
+def test_positive_received_without_receipt_or_date_keeps_existing_value_detection():
+    parser = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))
+    sheet = montecielo_payment_sheet(receipts="", dates="", received=100)
+    parsed = parser._parse_sheet(sheet)
+
+    values = parser._individual_special_payment_values(
+        sheet,
+        5,
+        [parsed.columns["received_values"]],
+        ignore_literal_zero_padding=True,
+    )
+
+    assert [value["amount"] for value in values] == [Decimal("100.00")]
+
+
+def test_negative_received_without_receipt_or_date_keeps_existing_rejection():
+    parser = HistoricalWorkbookParser(Path("LIBRO MONTECIELO.xlsx"))
+    sheet = montecielo_payment_sheet(receipts="", dates="", received=-100)
+    parsed = parser._parse_sheet(sheet)
+
+    values = parser._individual_special_payment_values(
+        sheet,
+        5,
+        [parsed.columns["received_values"]],
+        ignore_literal_zero_padding=True,
+    )
+
+    assert values == []
+
+
 def test_unreceipted_separator_dates_require_individual_monthly_values():
     sheet = phase2_sheet(receipts="", dates=" || ENE.1/26F-ENE.2/26F", payment=1200)
 
@@ -1022,8 +1295,7 @@ def test_unreceipted_separator_dates_require_individual_monthly_values():
 
     assert parsed.rows[0].payments == []
     assert parsed.rows[0].reconstructed_payments == []
-    issue = next(issue for issue in parsed.issues if issue.code == "HIST_UNRECEIPTED_PAYMENT_VALUE_COUNT_MISMATCH")
-    assert issue.found_value == "1 valores / 2 fechas sin recibo"
+    assert "HIST_UNRECEIPTED_PAYMENT_VALUE_COUNT_MISMATCH" not in {issue.code for issue in parsed.issues}
 
 
 def test_incompatible_value_count_is_diagnosed_without_reconstruction():
@@ -1035,19 +1307,18 @@ def test_incompatible_value_count_is_diagnosed_without_reconstruction():
     assert parsed.rows[0].reconstructed_payments == []
     issue = next(issue for issue in parsed.issues if issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH")
     assert issue.found_value == "2 valores / 3 recibos con fecha"
-    assert issue.severity == "info"
+    assert issue.severity == "blocking"
 
 
-def test_aggregate_received_value_for_multiple_payments_is_not_distributed():
+def test_aggregate_received_value_for_multiple_payments_is_reported_as_value_count_mismatch():
     parsed = HistoricalWorkbookParser(Path("LIBRO Prueba.xlsx"))._parse_sheet(
         phase2_sheet(receipts="NCR100-NCR101", dates="01/01-02/01", payment=300)
     )
 
     assert parsed.rows[0].reconstructed_payments == []
-    issue = next(issue for issue in parsed.issues if issue.code == "HIST_PAYMENT_AGGREGATE_NOT_DISTRIBUTABLE")
-    assert issue.found_value == "300.00"
-    assert "no se puede distribuir" in issue.cause
-    assert issue.severity == "info"
+    issue = next(issue for issue in parsed.issues if issue.code == "HIST_PAYMENT_VALUE_COUNT_MISMATCH")
+    assert issue.found_value == "1 valores / 2 recibos con fecha"
+    assert issue.severity == "blocking"
 
 
 def test_unsupported_formula_is_diagnosed_without_eval():
@@ -1061,7 +1332,7 @@ def test_unsupported_formula_is_diagnosed_without_eval():
     assert issue.severity == "info"
 
 
-def test_non_reconstructible_payment_does_not_invalidate_structurally_valid_row():
+def test_non_reconstructible_payment_keeps_row_context_and_blocks_finalize():
     parsed = HistoricalWorkbookParser(Path("LIBRO Prueba.xlsx"))._parse_sheet(
         phase2_sheet(receipts="NCR100-NCR101", dates="01/01-02/01", payment=300)
     )
@@ -1072,9 +1343,9 @@ def test_non_reconstructible_payment_does_not_invalidate_structurally_valid_row(
     assert parsed.rows[0].assignment.assignment_number == "EF-101"
     assert parsed.rows[0].reconstructed_payments == []
     codes = {issue.code for issue in parsed.issues}
-    assert "HIST_PAYMENT_AGGREGATE_NOT_DISTRIBUTABLE" in codes
+    assert "HIST_PAYMENT_VALUE_COUNT_MISMATCH" in codes
     assert "INVALID_HISTORICAL_ROW" not in codes
-    assert not any(issue.severity == "blocking" for issue in parsed.issues)
+    assert any(issue.severity == "blocking" for issue in parsed.issues)
 
 
 def test_fully_reconstructible_payment_row_remains_valid():
@@ -1088,7 +1359,7 @@ def test_fully_reconstructible_payment_row_remains_valid():
     assert "INVALID_HISTORICAL_ROW" not in {issue.code for issue in parsed.issues}
 
 
-def test_non_reconstructible_payment_diagnostic_does_not_block_import_readiness(
+def test_non_reconstructible_payment_value_mismatch_blocks_import_readiness(
     monkeypatch,
     tmp_path,
     accounting_admin_user,
@@ -1121,11 +1392,11 @@ def test_non_reconstructible_payment_diagnostic_does_not_block_import_readiness(
     result = analyze_historical_import(batch=batch, file_path=file_path, grouping_type_hint="Torre")
     batch.refresh_from_db()
 
-    issue = result.imported_file.row_issues.get(code="HIST_PAYMENT_AGGREGATE_NOT_DISTRIBUTABLE")
-    assert issue.severity == ImportRowIssue.Severity.INFO
+    issue = result.imported_file.row_issues.get(code="HIST_PAYMENT_VALUE_COUNT_MISMATCH")
+    assert issue.severity == ImportRowIssue.Severity.BLOCKING
     assert batch.processed_rows == 1
-    assert batch.status == ImportBatch.Status.READY
-    assert can_finalize_historical_import_batch(batch, require_stored_file=False)
+    assert batch.status == ImportBatch.Status.AWAITING_RESOLUTION
+    assert not can_finalize_historical_import_batch(batch, require_stored_file=False)
 
 
 def test_partial_row_keeps_diagnostic_context():
@@ -1187,6 +1458,39 @@ def test_analyzer_persists_issue_detail_fields(monkeypatch, tmp_path, accounting
     assert issue.field_name == "FECHA / RECIBOS"
     assert issue.found_value == "2 fechas ordinarias / 3 recibos ordinarios"
     assert issue.extra_data["receipt_count"] == 3
+
+
+def test_analyzer_persists_malformed_historical_date_as_blocking_issue(monkeypatch, tmp_path, accounting_admin_user):
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+    )
+    file_path = tmp_path / "LIBRO Fecha Invalida.xlsx"
+    file_path.write_bytes(b"placeholder")
+    workbook = RawWorkbook(
+        "xlsx",
+        [montecielo_payment_sheet(fidubogota_receipts="NCR1", dates="ENE26/26F", fiduciary_value=1000)],
+        [],
+    )
+    monkeypatch.setattr("fiduciary.imports.historical.analyzer.calculate_sha256", lambda path: "d" * 64)
+    original_parse = HistoricalWorkbookParser.parse
+
+    def fake_parse(self):
+        self.reader.read = lambda path: workbook
+        return original_parse(self)
+
+    monkeypatch.setattr("fiduciary.imports.historical.analyzer.HistoricalWorkbookParser.parse", fake_parse)
+
+    result = analyze_historical_import(batch=batch, file_path=file_path, grouping_type_hint="Torre")
+    batch.refresh_from_db()
+    issue = result.imported_file.row_issues.get(code="HIST_INVALID_DATE_HEADER")
+
+    assert issue.severity == ImportRowIssue.Severity.BLOCKING
+    assert issue.field_name == "FECHA"
+    assert issue.found_value == "ENE26/26F"
+    assert result.imported_file.status == ImportedFile.Status.FAILED
+    assert not can_finalize_historical_import_batch(batch, require_stored_file=False)
 
 
 def test_issue_group_detail_view_lists_individual_cases(accounting_client, accounting_admin_user):

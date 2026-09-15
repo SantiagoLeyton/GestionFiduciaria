@@ -76,7 +76,7 @@
                   <td>{% if entity.is_active %}<span class="status-pill status-active">Activo</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
                   <td class="actions-cell">
                     <a class="btn btn-sm btn-outline-secondary" href="{% url 'real_estate:property_unit_history' entity.pk %}">Historial</a>
-                    {% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a>{% endif %}
+                    {% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url update_url_name entity.pk %}">Editar</a><a class="btn btn-sm btn-outline-danger" href="{% url 'real_estate:property_unit_delete' entity.pk %}">Eliminar</a>{% endif %}
                     {% include "real_estate/includes/status_action.html" %}
                   </td>
                 </tr>

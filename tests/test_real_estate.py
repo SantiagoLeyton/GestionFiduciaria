@@ -695,10 +695,12 @@ def test_status_change_requires_reason(admin_client, project):
 
 
 @pytest.mark.django_db
-def test_no_delete_endpoint_for_real_estate(admin_client, project):
-    response = admin_client.post(f"/real-estate/projects/{project.pk}/delete/")
+def test_real_estate_delete_endpoint_requires_confirmation_and_reason(admin_client, project):
+    response = admin_client.get(reverse("real_estate:project_delete", args=[project.pk]))
+    missing_reason = admin_client.post(reverse("real_estate:project_delete", args=[project.pk]), {"confirm": "yes"})
 
-    assert response.status_code == 404
+    assert response.status_code == 200
+    assert missing_reason.status_code == 302
     assert Project.objects.filter(pk=project.pk).exists()
 
 

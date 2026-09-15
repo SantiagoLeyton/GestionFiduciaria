@@ -1,6 +1,8 @@
+import calendar
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -27,6 +29,25 @@ from .normalize import MONTHS, clean_text, compact_normalized, normalize_text, p
 from .readers import RawSheet, WorkbookReader
 
 
+STRICT_HISTORICAL_DATE_MONTHS = {
+    "ENE": 1,
+    "FEB": 2,
+    "MAR": 3,
+    "ABR": 4,
+    "MAY": 5,
+    "JUN": 6,
+    "JUL": 7,
+    "AGO": 8,
+    "SEP": 9,
+    "OCT": 10,
+    "NOV": 11,
+    "DIC": 12,
+}
+STRICT_HISTORICAL_MONTH_LABELS = {month: label for label, month in STRICT_HISTORICAL_DATE_MONTHS.items()}
+STRICT_HISTORICAL_DATE_RE = re.compile(
+    r"^(?P<month>ENE|FEB|MAR|ABR|MAY|JUN|JUL|AGO|SEP|OCT|NOV|DIC)\.(?P<day>\d{1,2})/(?P<year>\d{2})(?P<fiduciary>F)?$",
+    re.IGNORECASE,
+)
 PAYMENT_HEADER_PATTERNS = (
     re.compile(r"^recibofiducia([a-z]{3,4})(\d{4})$"),
     re.compile(r"^recibidofidubogota([a-z]{3,4})(\d{4})$"),
@@ -162,6 +183,7 @@ class HistoricalWorkbookParser:
         self._receipt_tokens_cache = {}
         self._receipt_date_pairs_cache = {}
         self._payment_values_cache = {}
+        self._historical_date_normalizations = []
         self._progress_sheet_index = 0
         self._progress_total_sheets = 0
 
@@ -626,6 +648,11 @@ class HistoricalWorkbookParser:
                 ignored_rows += 1
                 ignored_reasons["invalid"] += 1
                 continue
+            date_format_issues = self._historical_date_format_issues(sheet, row_number, columns, row)
+            issues.extend(date_format_issues)
+            if date_format_issues:
+                rows.append(row)
+                continue
             issues.extend(self._receipt_date_issues(sheet, row_number, columns, row))
             issues.extend(self._payment_reconstruction_issues(sheet, row_number, columns, payment_columns, row))
             rows.append(row)
@@ -988,6 +1015,10 @@ class HistoricalWorkbookParser:
         columns: dict[str, DetectedColumn],
         payment_columns: list[DetectedPaymentColumn],
     ) -> list[HistoricalMonthlyPayment]:
+        payment_dates = self._value(sheet, row_number, columns.get("payment_dates"))
+        payment_dates_text = clean_text(payment_dates) or ""
+        if "||" in payment_dates_text and not _split_historical_date_values(payment_dates):
+            return []
         payments = []
         for column in payment_columns:
             destination = _payment_destination_from_header(column.header)
@@ -1106,7 +1137,12 @@ class HistoricalWorkbookParser:
         if constructora_pairs:
             received_column = columns.get("received_values")
             if received_column:
-                received_values = self._individual_special_payment_values(sheet, row_number, [received_column])
+                received_values = self._individual_special_payment_values(
+                    sheet,
+                    row_number,
+                    [received_column],
+                    ignore_literal_zero_padding=not _row_has_receipt_or_date_context(sheet, row_number, columns),
+                )
                 if len(received_values) == len(constructora_pairs):
                     for order, (pair, value) in enumerate(zip(constructora_pairs, received_values, strict=False), start=1):
                         reconstructed.append(
@@ -1158,47 +1194,22 @@ class HistoricalWorkbookParser:
         payment_columns: list[DetectedPaymentColumn],
     ) -> list[ReconstructedHistoricalPayment]:
         values = self._individual_payment_values(sheet, row_number, payment_columns)
-        value_groups = defaultdict(list)
-        for value in values:
-            value_groups[(value["column"].year, value["column"].month)].append(value)
-        pair_groups = defaultdict(list)
-        for pair in ordered_pairs:
-            category, token, date_value = pair
-            date_key = _historical_payment_date_year_month(date_value)
-            if date_key:
-                pair_groups[date_key].append(pair)
+        if len(ordered_pairs) != len(values):
+            return []
+        ordered_pairs = self._normalize_positional_payment_pair_years(sheet, row_number, ordered_pairs, values)
         reconstructed = []
-        value_source_order = 1
-        if not pair_groups:
-            if len(values) != len(ordered_pairs):
-                return []
-            for pair, value in zip(ordered_pairs, values, strict=False):
-                reconstructed.append(
-                    self._reconstructed_payment_from_pair_value(
-                        pair,
-                        value,
-                        row_number=row_number,
-                        sheet_name=sheet.name,
-                        value_source_order=value_source_order,
-                    )
-                )
-                value_source_order += 1
-            return reconstructed
-        for date_key, group_pairs in pair_groups.items():
-            group_values = value_groups.get(date_key, [])
-            if len(group_values) != len(group_pairs):
+        for value_source_order, (pair, value) in enumerate(zip(ordered_pairs, values, strict=False), start=1):
+            if not _payment_value_matches_pair_period(pair, value):
                 continue
-            for pair, value in zip(group_pairs, group_values, strict=False):
-                reconstructed.append(
-                    self._reconstructed_payment_from_pair_value(
-                        pair,
-                        value,
-                        row_number=row_number,
-                        sheet_name=sheet.name,
-                        value_source_order=value_source_order,
-                    )
+            reconstructed.append(
+                self._reconstructed_payment_from_pair_value(
+                    pair,
+                    value,
+                    row_number=row_number,
+                    sheet_name=sheet.name,
+                    value_source_order=value_source_order,
                 )
-                value_source_order += 1
+            )
         return sorted(reconstructed, key=lambda payment: payment.receipt_order)
 
     def _reconstructed_payment_from_pair_value(
@@ -1304,7 +1315,7 @@ class HistoricalWorkbookParser:
         if not ordinary_pairs:
             return []
         if "fidubogota_receipt_numbers" not in columns and "received_values" not in columns:
-            return self._monthly_value_count_issues(
+            return self._positional_payment_value_issues(
                 sheet,
                 row_number,
                 payment_columns,
@@ -1322,7 +1333,16 @@ class HistoricalWorkbookParser:
             pair for pair in ordinary_pairs if _payment_destination_from_pair(pair) == PAYMENT_DESTINATION_FIDUCIARIA
         ]
         received_column = columns.get("received_values")
-        received_values = self._individual_special_payment_values(sheet, row_number, [received_column]) if received_column else []
+        received_values = (
+            self._individual_special_payment_values(
+                sheet,
+                row_number,
+                [received_column],
+                ignore_literal_zero_padding=not _row_has_receipt_or_date_context(sheet, row_number, columns),
+            )
+            if received_column
+            else []
+        )
         if constructora_pairs or received_values:
             if len(received_values) != len(constructora_pairs):
                 issues.append(
@@ -1341,20 +1361,22 @@ class HistoricalWorkbookParser:
             for column in payment_columns
             if _payment_destination_from_header(column.header) == PAYMENT_DESTINATION_FIDUCIARIA
         ]
-        issues.extend(
-            self._monthly_value_count_issues(
-                sheet,
-                row_number,
-                fiducia_columns,
-                row,
-                fiducia_pairs,
-                code="HIST_PAYMENT_VALUE_COUNT_MISMATCH",
-                destination=PAYMENT_DESTINATION_FIDUCIARIA,
+        fiducia_receipt_count, fiducia_date_count = self._fiduciary_receipt_date_counts(sheet, row_number, columns)
+        if fiducia_receipt_count == fiducia_date_count:
+            issues.extend(
+                self._positional_payment_value_issues(
+                    sheet,
+                    row_number,
+                    fiducia_columns,
+                    row,
+                    fiducia_pairs,
+                    code="HIST_PAYMENT_VALUE_COUNT_MISMATCH",
+                    destination=PAYMENT_DESTINATION_FIDUCIARIA,
+                )
             )
-        )
         return issues
 
-    def _monthly_value_count_issues(
+    def _positional_payment_value_issues(
         self,
         sheet: RawSheet,
         row_number: int,
@@ -1366,37 +1388,141 @@ class HistoricalWorkbookParser:
         destination: str,
     ) -> list[ParserIssue]:
         values = self._individual_payment_values(sheet, row_number, payment_columns)
-        value_groups = defaultdict(list)
-        for value in values:
-            value_groups[(value["column"].year, value["column"].month)].append(value)
-        pair_groups = defaultdict(list)
-        for pair in pairs:
-            date_key = _historical_payment_date_year_month(pair[2])
-            if date_key:
-                pair_groups[date_key].append(pair)
-        issues = []
-        for date_key in sorted(set(pair_groups) | set(value_groups)):
-            group_pairs = pair_groups.get(date_key, [])
-            group_values = value_groups.get(date_key, [])
-            if len(group_values) == len(group_pairs):
-                continue
-            issues.append(
+        if not pairs and not values:
+            return []
+        if len(values) != len(pairs):
+            return [
                 self._payment_value_count_issue(
                     sheet,
                     row_number,
-                    [value["column"] for value in group_values] or [
-                        column for column in payment_columns if (column.year, column.month) == date_key
-                    ],
+                    [value["column"] for value in values] or payment_columns,
                     row,
-                    len(group_values),
-                    len(group_pairs),
+                    len(values),
+                    len(pairs),
                     code=code,
                     destination=destination,
-                    year=date_key[0],
-                    month=date_key[1],
+                )
+            ]
+
+        pairs = self._normalize_positional_payment_pair_years(sheet, row_number, pairs, values)
+        issues = []
+        for pair, value in zip(pairs, values, strict=False):
+            if _payment_value_matches_pair_period(pair, value):
+                continue
+            issues.append(
+                self._payment_period_mismatch_issue(
+                    sheet,
+                    row_number,
+                    row,
+                    pair,
+                    value,
+                    code=code,
+                    destination=destination,
                 )
             )
         return issues
+
+    def _fiduciary_receipt_date_counts(
+        self,
+        sheet: RawSheet,
+        row_number: int,
+        columns: dict[str, DetectedColumn],
+    ) -> tuple[int, int]:
+        receipt_columns = _receipt_columns(columns)
+        classified_receipts = _classify_receipt_tokens(self._receipt_tokens(sheet, row_number, receipt_columns))
+        classified_payment_dates = _classified_historical_payment_dates(
+            _split_historical_date_values(self._value(sheet, row_number, columns.get("payment_dates")))
+        )
+        ordinary_dates = classified_payment_dates[RECEIPT_CATEGORY_ORDINARY]
+        fiducia_dates = [
+            date for date in ordinary_dates if _payment_destination_from_date_value(date) == PAYMENT_DESTINATION_FIDUCIARIA
+        ]
+        fiducia_receipts = [
+            receipt
+            for receipt in classified_receipts[RECEIPT_CATEGORY_ORDINARY]
+            if receipt.source == "fidubogota_receipt_numbers"
+        ]
+        return len(fiducia_receipts), len(fiducia_dates)
+
+    def _normalize_positional_payment_pair_years(
+        self,
+        sheet: RawSheet,
+        row_number: int,
+        pairs: list[tuple[str, ReceiptToken, str]],
+        values: list[dict],
+    ) -> list[tuple[str, ReceiptToken, str]]:
+        if not pairs or len(pairs) != len(values):
+            return pairs
+        normalized_pairs = list(pairs)
+        for index, (pair, value) in enumerate(zip(pairs, values, strict=False)):
+            category, token, date_value = pair
+            if category != RECEIPT_CATEGORY_ORDINARY:
+                continue
+            if _payment_destination_from_pair(pair) != PAYMENT_DESTINATION_FIDUCIARIA:
+                continue
+            original_parts = _historical_payment_date_parts(date_value)
+            if original_parts is None:
+                continue
+            original_year, month, day = original_parts
+            column = value["column"]
+            if month != column.month or original_year == column.year:
+                continue
+            if abs(column.year - original_year) != 1:
+                continue
+            candidate_value = _replace_historical_payment_date_year(date_value, column.year)
+            if not candidate_value or not self._candidate_year_fits_sequence(normalized_pairs, index, candidate_value):
+                continue
+            normalized_pair = (category, token, candidate_value)
+            normalized_pairs[index] = normalized_pair
+            record = {
+                "sheet": sheet.name,
+                "row": row_number,
+                "receipt": token.raw_value,
+                "source_column": token.source_column,
+                "original": date_value,
+                "interpreted": candidate_value,
+            }
+            if record not in self._historical_date_normalizations:
+                self._historical_date_normalizations.append(record)
+
+        return normalized_pairs
+
+    def _candidate_year_fits_sequence(
+        self,
+        pairs: list[tuple[str, ReceiptToken, str]],
+        index: int,
+        candidate_value: str,
+    ) -> bool:
+        candidate_date = _historical_payment_date_as_date(candidate_value)
+        original_date = _historical_payment_date_as_date(pairs[index][2])
+        if candidate_date is None or original_date is None:
+            return False
+
+        previous_date = None
+        for previous_pair in reversed(pairs[:index]):
+            if _payment_destination_from_pair(previous_pair) != PAYMENT_DESTINATION_FIDUCIARIA:
+                continue
+            previous_date = _historical_payment_date_as_date(previous_pair[2])
+            if previous_date:
+                break
+
+        next_date = None
+        for next_pair in pairs[index + 1 :]:
+            if _payment_destination_from_pair(next_pair) != PAYMENT_DESTINATION_FIDUCIARIA:
+                continue
+            next_date = _historical_payment_date_as_date(next_pair[2])
+            if next_date:
+                break
+
+        def violations(value):
+            count = 0
+            if previous_date and value <= previous_date:
+                count += 1
+            if next_date and value >= next_date:
+                count += 1
+            return count
+
+        return violations(candidate_date) < violations(original_date)
 
     def _payment_value_count_issue(
         self,
@@ -1433,6 +1559,52 @@ class HistoricalWorkbookParser:
             },
         )
 
+    def _payment_period_mismatch_issue(
+        self,
+        sheet: RawSheet,
+        row_number: int,
+        row: HistoricalRow,
+        pair: tuple[str, ReceiptToken, str],
+        value: dict,
+        *,
+        code: str,
+        destination: str,
+    ) -> ParserIssue:
+        column = value["column"]
+        date_key = _historical_payment_date_year_month(pair[2])
+        value_key = (column.year, column.month)
+        return ParserIssue(
+            code=code,
+            severity="blocking",
+            message="El periodo de la fecha historica no coincide con la columna de valor del movimiento.",
+            sheet_name=sheet.name,
+            row_number=row_number,
+            column_letter=column.letter,
+            unit_code=row.unit_code or "",
+            field_name=column.header,
+            found_value=(
+                f"{pair[1].raw_value} / {pair[2]} -> "
+                f"{column.header} ({value['amount']})"
+            ),
+            cause=(
+                "El recibo, la fecha y el valor se pudieron emparejar por posicion, "
+                "pero el mes/ano de la fecha no coincide con la columna donde esta el valor."
+            ),
+            extra_data={
+                "scope": "cell",
+                "payment_pair_count": 1,
+                "value_count": 1,
+                "destination": destination,
+                "date_year": date_key[0] if date_key else None,
+                "date_month": date_key[1] if date_key else None,
+                "value_year": value_key[0],
+                "value_month": value_key[1],
+                "receipt": pair[1].raw_value,
+                "date_value": pair[2],
+                "value_column": column.header,
+            },
+        )
+
     def _separator_payment_reconstruction_issues(
         self,
         sheet: RawSheet,
@@ -1442,6 +1614,45 @@ class HistoricalWorkbookParser:
         row: HistoricalRow,
     ) -> list[ParserIssue]:
         return []
+
+    def _historical_date_format_issues(
+        self,
+        sheet: RawSheet,
+        row_number: int,
+        columns: dict[str, DetectedColumn],
+        row: HistoricalRow,
+    ) -> list[ParserIssue]:
+        column = columns.get("payment_dates")
+        if column is None:
+            return []
+        issues = []
+        for date_value in _split_historical_date_values(self._value(sheet, row_number, column)):
+            if not _looks_like_historical_text_date(date_value):
+                continue
+            if _is_valid_strict_historical_date(date_value):
+                continue
+            issues.append(
+                ParserIssue(
+                    code="HIST_INVALID_DATE_HEADER",
+                    severity="blocking",
+                    message=(
+                        f"Fecha invalida en encabezado: '{date_value}'. "
+                        "Formato esperado: MES.DD/AA o MES.DD/AAF."
+                    ),
+                    sheet_name=sheet.name,
+                    row_number=row_number,
+                    column_letter=column.letter,
+                    unit_code=row.unit_code or "",
+                    field_name=column.header,
+                    found_value=date_value,
+                    cause=(
+                        "El valor parece una fecha historica, pero no cumple el formato exacto "
+                        "MES.DD/AA o MES.DD/AAF con mes y dia validos."
+                    ),
+                    extra_data={"scope": "cell", "header": column.header},
+                )
+            )
+        return issues
 
     def _category_payment_value_issues(
         self,
@@ -1524,15 +1735,21 @@ class HistoricalWorkbookParser:
         sheet: RawSheet,
         row_number: int,
         payment_columns: list[DetectedPaymentColumn],
+        *,
+        pair_groups: dict[tuple[int, int], list[tuple[str, ReceiptToken, str]]] | None = None,
     ) -> list[dict]:
         cache = getattr(self, "_payment_values_cache", None)
-        cache_key = (id(sheet), row_number, tuple(column.index for column in payment_columns))
+        paired_keys = tuple(sorted(pair_groups)) if pair_groups is not None else None
+        cache_key = (id(sheet), row_number, tuple(column.index for column in payment_columns), paired_keys)
         if cache is not None and cache_key in cache:
             return cache[cache_key]
         values = []
         for column in payment_columns:
             cell = sheet.cell(row_number, column.index)
             if not cell:
+                continue
+            date_key = (column.year, column.month)
+            if pair_groups is not None and not pair_groups.get(date_key) and _is_literal_zero_cell(cell):
                 continue
             formula_values = _parse_simple_sum_formula(cell.formula)
             if formula_values is not None:
@@ -1566,15 +1783,19 @@ class HistoricalWorkbookParser:
         sheet: RawSheet,
         row_number: int,
         columns: list[DetectedColumn],
+        *,
+        ignore_literal_zero_padding: bool = False,
     ) -> list[dict]:
         cache = getattr(self, "_payment_values_cache", None)
-        cache_key = ("special", id(sheet), row_number, tuple(column.index for column in columns))
+        cache_key = ("special", id(sheet), row_number, tuple(column.index for column in columns), ignore_literal_zero_padding)
         if cache is not None and cache_key in cache:
             return cache[cache_key]
         values = []
         for column in columns:
             cell = sheet.cell(row_number, column.index)
             if not cell:
+                continue
+            if ignore_literal_zero_padding and _is_received_literal_zero_padding(column, cell):
                 continue
             formula_values = _parse_simple_sum_formula(cell.formula)
             if formula_values is not None:
@@ -1933,7 +2154,14 @@ def _split_contact_values(value: str | None, *, separators=("/",)) -> list[str]:
     if not text:
         return []
     pattern = "|".join(re.escape(separator) for separator in separators)
-    return [part.strip() for part in re.split(pattern, text) if part.strip()]
+    return [_normalize_contact_value(part) for part in re.split(pattern, text) if part.strip()]
+
+
+def _normalize_contact_value(value: str) -> str:
+    text = str(value or "").strip()
+    if text.lower().startswith("mailto:"):
+        text = text[7:].strip()
+    return text.lower() if "@" in text else text
 
 
 def _split_phone_values(value: str | None) -> list[str]:
@@ -2104,6 +2332,36 @@ def _receipt_columns(columns: dict[str, DetectedColumn]) -> list[DetectedColumn]
     )
 
 
+def _row_has_receipt_or_date_context(sheet: RawSheet, row_number: int, columns: dict[str, DetectedColumn]) -> bool:
+    for column in _receipt_columns(columns):
+        cell = sheet.cell(row_number, column.index)
+        if clean_text(cell.value if cell else None):
+            return True
+    date_column = columns.get("payment_dates")
+    if date_column:
+        cell = sheet.cell(row_number, date_column.index)
+        if _split_historical_date_values(cell.value if cell else None):
+            return True
+    return False
+
+
+def _is_received_literal_zero_padding(column: DetectedColumn, cell) -> bool:
+    return column.key == "received_values" and _is_literal_zero_cell(cell)
+
+
+def _is_literal_zero_cell(cell) -> bool:
+    if cell.has_formula:
+        return False
+    value = cell.value
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, Decimal):
+        return value == 0
+    if isinstance(value, int | float):
+        return Decimal(str(value)) == 0
+    return False
+
+
 def _payment_destination_from_header(header: str) -> str | None:
     normalized = compact_normalized(header)
     if normalized.startswith("recibidofidubogota") or normalized.startswith("recibofiducia"):
@@ -2129,6 +2387,16 @@ def _payment_destination_from_pair(pair: tuple[str, ReceiptToken, str]) -> str |
     if token.source == "receipt_numbers":
         return PAYMENT_DESTINATION_CONSTRUCTORA if _payment_destination_from_date_value(date_value) == PAYMENT_DESTINATION_CONSTRUCTORA else None
     return _payment_destination_from_date_value(date_value)
+
+
+def _payment_value_matches_pair_period(pair: tuple[str, ReceiptToken, str], value: dict) -> bool:
+    date_key = _historical_payment_date_year_month(pair[2])
+    if not date_key:
+        return True
+    column = value["column"]
+    if column.year is None or column.month is None:
+        return True
+    return date_key == (column.year, column.month)
 
 
 def _special_value_columns(columns: dict[str, DetectedColumn], category: str) -> list[DetectedColumn]:
@@ -2176,6 +2444,78 @@ def _split_historical_date_values(value: str | None, *, after_separator: bool = 
     return [part.strip() for part in re.split(r"\s*-\s*", text) if part.strip()]
 
 
+def _historical_text_date_base(value: str | None) -> str:
+    text = clean_text(value) or ""
+    text = text.strip().strip("()").strip()
+    text = re.sub(r"(TRASLADO|TRASL|CESION)$", "", text, flags=re.IGNORECASE).strip()
+    return text
+
+
+def _looks_like_historical_text_date(value: str | None) -> bool:
+    text = _historical_text_date_base(value)
+    if not text:
+        return False
+    compact = re.sub(r"\s+", "", text).upper()
+    if re.match(r"^\d{4}-\d{2}-\d{2}(?:\d{2}:\d{2}:\d{2})?$", compact):
+        return False
+    return bool(
+        re.match(r"^[A-Z]{3,4}", compact)
+        and any(char.isdigit() for char in compact)
+        and any(marker in compact for marker in (".", "/", "-", "F"))
+    )
+
+
+def _is_valid_strict_historical_date(value: str | None) -> bool:
+    text = _historical_text_date_base(value)
+    match = STRICT_HISTORICAL_DATE_RE.match(text)
+    if not match:
+        return False
+    month = STRICT_HISTORICAL_DATE_MONTHS.get(match.group("month").upper())
+    if not month:
+        return False
+    day = int(match.group("day"))
+    year = 2000 + int(match.group("year"))
+    return 1 <= day <= calendar.monthrange(year, month)[1]
+
+
+def _historical_payment_date_parts(value: str | None) -> tuple[int, int, int] | None:
+    text = _historical_text_date_base(value)
+    match = STRICT_HISTORICAL_DATE_RE.match(text)
+    if not match:
+        return None
+    month = STRICT_HISTORICAL_DATE_MONTHS.get(match.group("month").upper())
+    if not month:
+        return None
+    day = int(match.group("day"))
+    year = 2000 + int(match.group("year"))
+    if not 1 <= day <= calendar.monthrange(year, month)[1]:
+        return None
+    return year, month, day
+
+
+def _historical_payment_date_as_date(value: str | None) -> date | None:
+    parts = _historical_payment_date_parts(value)
+    if not parts:
+        return None
+    year, month, day = parts
+    return date(year, month, day)
+
+
+def _replace_historical_payment_date_year(value: str | None, year: int) -> str | None:
+    text = _historical_text_date_base(value)
+    match = STRICT_HISTORICAL_DATE_RE.match(text)
+    if not match:
+        return None
+    month = STRICT_HISTORICAL_DATE_MONTHS.get(match.group("month").upper())
+    if not month:
+        return None
+    day = int(match.group("day"))
+    if not 1 <= day <= calendar.monthrange(year, month)[1]:
+        return None
+    suffix = "F" if match.group("fiduciary") else ""
+    return f"{STRICT_HISTORICAL_MONTH_LABELS[month]}.{day}/{year % 100:02d}{suffix}"
+
+
 def _historical_payment_date_year_month(value: str | None) -> tuple[int, int] | None:
     text = clean_text(value)
     if not text:
@@ -2194,16 +2534,16 @@ def _historical_payment_date_year_month(value: str | None) -> tuple[int, int] | 
         if year < 100:
             year += 2000
         return year, int(slash_match.group("month"))
-    month_pattern = "|".join(sorted(MONTHS, key=len, reverse=True))
-    text_match = re.match(rf"^(?P<month>{month_pattern})\D*\d{{1,2}}\D*(?P<year>\d{{2,4}})", text.upper())
+    if _looks_like_historical_text_date(value) and not _is_valid_strict_historical_date(value):
+        return None
+    month_pattern = "|".join(STRICT_HISTORICAL_DATE_MONTHS)
+    text_match = re.match(rf"^(?P<month>{month_pattern})\.(?P<day>\d{{1,2}})/(?P<year>\d{{2}})$", text.upper())
     if text_match:
-        month = MONTHS.get(text_match.group("month"))
+        month = STRICT_HISTORICAL_DATE_MONTHS.get(text_match.group("month"))
         if not month:
             return None
         year = int(text_match.group("year"))
-        if year < 100:
-            year += 2000
-        return year, month
+        return year + 2000, month
     return None
 
 

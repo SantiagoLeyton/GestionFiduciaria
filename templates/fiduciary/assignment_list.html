@@ -36,7 +36,7 @@
               <td>{% for holder in assignment.holders.all %}{% if holder.is_active and holder.is_primary %}{{ holder.client.full_name }}{% endif %}{% empty %}-{% endfor %}</td>
               <td>{% for holder in assignment.holders.all %}{% if holder.is_active and not holder.is_primary %}{{ holder.client.full_name }}{% if not forloop.last %}, {% endif %}{% endif %}{% empty %}-{% endfor %}</td>
               <td>{% if assignment.operationally_active %}<span class="status-pill status-active">Vigente</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
-              <td class="actions-cell"><a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Ver</a>{% if can_update %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_update' assignment.pk %}">Actualizar informacion contractual</a>{% endif %}</td>
+              <td class="actions-cell"><a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Ver</a></td>
             </tr>
           {% empty %}<tr><td colspan="8">No hay encargos registrados.</td></tr>{% endfor %}
         </tbody></table></div>

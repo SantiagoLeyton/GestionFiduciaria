@@ -6,6 +6,7 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse_lazy
 from django.views.generic import DetailView, ListView, TemplateView, View
 
+from core.audit import audit_event
 from core.forms import BackupSettingsForm, BackupUploadForm
 from core.models import BackupRecord, BackupSettings
 from core.services.backups import (
@@ -70,6 +71,15 @@ class BackupCreateView(AccountingOnlyMixin, View):
             record_backup_failure(backup_type=BackupRecord.BackupType.MANUAL, user=request.user, message=str(exc))
             messages.error(request, str(exc))
         else:
+            if result and result.record:
+                audit_event(
+                    user=request.user,
+                    action="Creado",
+                    entity="Copia de seguridad",
+                    obj=result.record,
+                    description="Copia manual creada.",
+                    context={"Archivo": result.record.file_name, "Tipo": result.record.get_backup_type_display()},
+                )
             if result is None:
                 messages.success(request, "Copia de seguridad creada y validada correctamente.")
             elif result.record and result.record.drive_sync_status == BackupRecord.DriveSyncStatus.FAILED:
@@ -88,6 +98,14 @@ class BackupDriveRetryView(AccountingOnlyMixin, View):
             messages.error(request, str(exc))
             return redirect("backup_detail", pk=backup.pk)
         if result.synced:
+            audit_event(
+                user=request.user,
+                action="Modificado",
+                entity="Copia de seguridad",
+                obj=backup,
+                description="Sincronizacion manual con Google Drive.",
+                context={"Archivo": backup.file_name},
+            )
             messages.success(request, result.message)
         else:
             messages.warning(request, result.message)
@@ -101,7 +119,22 @@ class BackupSettingsUpdateView(AccountingOnlyMixin, View):
         backup_settings = BackupSettings.get_solo()
         form = BackupSettingsForm(request.POST, instance=backup_settings)
         if form.is_valid():
+            before = (
+                f"daily_check_time: {backup_settings.daily_check_time}; "
+                f"automation_status: {backup_settings.automation_status}"
+            )
             form.save()
+            audit_event(
+                user=request.user,
+                action="Modificado",
+                entity="Configuracion de backups",
+                obj=backup_settings,
+                before=before,
+                after=(
+                    f"daily_check_time: {backup_settings.daily_check_time}; "
+                    f"automation_status: {backup_settings.automation_status}"
+                ),
+            )
             messages.success(request, "Configuración automática actualizada correctamente.")
         else:
             messages.error(request, "Revise la hora configurada para la comprobación diaria.")
@@ -125,6 +158,14 @@ class BackupUploadView(AccountingOnlyMixin, TemplateView):
         except BackupError as exc:
             messages.error(request, str(exc))
             return self.render_to_response({"form": form})
+        audit_event(
+            user=request.user,
+            action="Cargado",
+            entity="Copia de seguridad",
+            obj=result.record,
+            description="Copia externa cargada.",
+            context={"Archivo": result.record.file_name, "Tipo": result.record.get_backup_type_display()},
+        )
         messages.success(request, result.message)
         return redirect("backup_detail", pk=result.record.pk)
 
@@ -150,6 +191,13 @@ class BackupDownloadView(AccountingOnlyMixin, View):
         except BackupError as exc:
             messages.error(request, str(exc))
             return redirect("backup_detail", pk=backup.pk)
+        audit_event(
+            user=request.user,
+            action="Descargado",
+            entity="Copia de seguridad",
+            obj=backup,
+            context={"Archivo": backup.file_name, "Tipo": backup.get_backup_type_display()},
+        )
         return FileResponse(path.open("rb"), as_attachment=True, filename=backup.file_name)
 
 
@@ -173,6 +221,14 @@ class BackupRestoreView(AccountingOnlyMixin, View):
             messages.error(request, str(exc))
             return redirect("backup_restore_confirm", pk=backup.pk)
         messages.success(request, "Restauración completada correctamente. La reversión preventiva quedó disponible.")
+        audit_event(
+            user=request.user,
+            action="Restaurado",
+            entity="Copia de seguridad",
+            obj=backup,
+            description="Restauracion manual ejecutada.",
+            context={"Archivo": backup.file_name, "Tipo": backup.get_backup_type_display()},
+        )
         return redirect("backup_list")
 
 
@@ -192,5 +248,11 @@ class BackupRevertView(AccountingOnlyMixin, View):
         except BackupError as exc:
             messages.error(request, str(exc))
             return redirect("backup_revert_confirm")
+        audit_event(
+            user=request.user,
+            action="Revertido",
+            entity="Restauracion de copia de seguridad",
+            description="Reversion manual de restauracion ejecutada.",
+        )
         messages.success(request, "La restauración fue revertida correctamente.")
         return redirect("backup_list")

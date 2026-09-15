@@ -343,7 +343,7 @@ def _fiduciary_historical_month_keys_for_units(units: list[PropertyUnit]) -> lis
         for assignment in unit.fiduciary_assignments.all():
             for payment in assignment.payments.all():
                 item = _payment_export_item(payment)
-                if not _is_historical_fiduciary_ordinary_payment(item):
+                if not _is_fiduciary_ordinary_payment(item):
                     continue
                 key = _payment_period_key(payment)
                 if key:
@@ -351,10 +351,9 @@ def _fiduciary_historical_month_keys_for_units(units: list[PropertyUnit]) -> lis
     return sorted(keys)
 
 
-def _is_historical_fiduciary_ordinary_payment(item: PaymentExportItem) -> bool:
+def _is_fiduciary_ordinary_payment(item: PaymentExportItem) -> bool:
     return (
-        item.is_historical
-        and item.category in {"ordinary", "other"}
+        item.category in {"ordinary", "other"}
         and item.destination == Payment.Destination.FIDUCIARIA
         and item.amount_text
     )
@@ -957,7 +956,7 @@ def _main_date_sequence(payments: list[PaymentExportItem]) -> str:
 def _receipt_sequence(payments: list[PaymentExportItem], *, destination: str | None = None) -> str:
     receipt_items = []
     for index, item in enumerate(payments):
-        if not item.is_historical or not item.has_receipt:
+        if not item.has_receipt:
             continue
         if destination == Payment.Destination.FIDUCIARIA:
             if item.category not in {"ordinary", "other"} or item.destination != Payment.Destination.FIDUCIARIA:
@@ -993,8 +992,7 @@ def _received_amount_sequence(payments: list[PaymentExportItem]) -> object:
     filtered = [
         item.amount_text
         for item in payments
-        if item.is_historical
-        and item.category in {"ordinary", "other"}
+        if item.category in {"ordinary", "other"}
         and item.destination == Payment.Destination.CONSTRUCTORA
         and item.amount_text != ""
     ]
@@ -1007,15 +1005,15 @@ def _monthly_amount_sequence(
     month: int,
     destination: str,
 ) -> object:
-    return _amount_sequence(
-        [
-            item
-            for item in payments
-            if item.is_historical and item.period_key == (year, month) and item.destination == destination
-        ],
-        {"ordinary", "other"},
-        include_separator=False,
-    )
+    filtered = [
+        item.amount_text
+        for item in payments
+        if item.period_key == (year, month)
+        and item.destination == destination
+        and item.category in {"ordinary", "other"}
+        and item.amount_text != ""
+    ]
+    return _join_amount_values(filtered)
 
 
 def _sequence(payments: list[PaymentExportItem], categories: set[str], attr: str, *, include_separator: bool) -> str:
@@ -1086,6 +1084,9 @@ def _is_number_text(value: str) -> bool:
 
 
 def _receipt_from_concept(concept: str) -> str:
+    cleaned = concept.strip()
+    if re.match(r"^[A-Z]{1,8}\d+[A-Z0-9-]*$", cleaned, flags=re.IGNORECASE):
+        return _clean_receipt(cleaned)
     match = re.search(r"\bRecibo\s+([A-Z0-9-]+)", concept, flags=re.IGNORECASE)
     if match:
         return _clean_receipt(match.group(1))

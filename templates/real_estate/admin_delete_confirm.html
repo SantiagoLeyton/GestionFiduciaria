@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}{{ action_label }} | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div>
+          <h1>{{ action_label }}</h1>
+          <p>{{ object }}</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{{ cancel_url }}">Cancelar</a>
+      </div>
+      <section class="data-section">
+        <p>{{ warning }}</p>
+        <h2>Informacion afectada</h2>
+        <ul>
+          {% for label, count in summary_items %}
+            {% if count %}<li>{{ label }}: {{ count }}</li>{% endif %}
+          {% endfor %}
+        </ul>
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="confirm" value="yes">
+          <div class="mb-3">
+            <label class="form-label" for="change_reason">Motivo</label>
+            <textarea class="form-control" id="change_reason" name="change_reason" rows="3" required></textarea>
+          </div>
+          <button class="btn btn-danger" type="submit">{{ action_label }}</button>
+          <a class="btn btn-outline-secondary" href="{{ cancel_url }}">Cancelar</a>
+        </form>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

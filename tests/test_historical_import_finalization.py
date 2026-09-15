@@ -17,7 +17,7 @@ from django.db.models import Q
 from django.urls import reverse
 
 from fiduciary.exporters import export_historical_workbook
-from fiduciary.imports.historical import DuplicateHistoricalImportError, analyze_historical_import, store_historical_import_file
+from fiduciary.imports.historical import analyze_historical_import, store_historical_import_file
 from fiduciary.imports.historical.finalize import (
     HistoricalImportFinalizationError,
     _FinalizationContext,
@@ -33,6 +33,7 @@ from fiduciary.imports.historical.finalize import (
 )
 from fiduciary.imports.historical.normalize import normalize_text
 from fiduciary.imports.historical.resolutions import auto_resolve_new_units, auto_resolve_units_for_group_resolution, update_batch_resolution_state
+from fiduciary.imports.reversion import revert_import_batch
 from fiduciary.models import (
     Client,
     DetectedStructureElement,
@@ -287,6 +288,43 @@ def build_reconstructible_payments_workbook(path: Path) -> Path:
         archive.writestr("xl/_rels/workbook.xml.rels", _xlsx_workbook_rels(1))
         archive.writestr("xl/styles.xml", _xlsx_styles())
         archive.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml("PROYECTO MANZANA - Torre 1", headers, rows))
+    return path
+
+
+def build_incremental_payments_workbook(path: Path, *, payment_count: int, same_day_new_payments: bool = False) -> Path:
+    receipts = [f"INC{index:03d}" for index in range(1, payment_count + 1)]
+    dates = [f"ENE.{index}/26" for index in range(1, payment_count + 1)]
+    values = [index * 100000 for index in range(1, payment_count + 1)]
+    if same_day_new_payments and payment_count >= 5:
+        dates[-2:] = ["ENE.1/26", "ENE.1/26"]
+        values[-2:] = [100000, 100000]
+    headers = [
+        "APTO",
+        "ENCARGO FIDUCIARIO",
+        "CEDULA CLIENTE",
+        "NOMBRE CLIENTE",
+        "RECIBOS",
+        "FECHA",
+        "RECIBIDO",
+    ]
+    rows = [
+        (
+            "101",
+            "EF-INCREMENTAL-101",
+            "9101",
+            "Cliente Incremental",
+            "-".join(receipts),
+            "-".join(dates),
+            {"formula": "+".join(str(value) for value in values), "value": sum(values)},
+        )
+    ]
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", _xlsx_content_types(1))
+        archive.writestr("_rels/.rels", _xlsx_root_rels())
+        archive.writestr("xl/workbook.xml", _xlsx_workbook(["T1"]))
+        archive.writestr("xl/_rels/workbook.xml.rels", _xlsx_workbook_rels(1))
+        archive.writestr("xl/styles.xml", _xlsx_styles())
+        archive.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml("PROYECTO INCREMENTAL - Torre 1", headers, rows))
     return path
 
 
@@ -1055,6 +1093,118 @@ def test_finalize_historical_import_materializes_reconstructed_payments_without_
     assert "SUBSIDIO | Recibo NCR2051SUB" in content
 
 
+def _analyze_and_finalize_incremental_workbook(path: Path, user, project: Project, grouping_type: GroupingType):
+    batch = ImportBatch.objects.create(
+        initiated_by=user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.ANALYZING,
+        total_files=1,
+    )
+    analysis = analyze_historical_import(batch=batch, file_path=path, grouping_type_hint="Torre")
+    store_historical_import_file(imported_file=analysis.imported_file, source_path=path)
+    if StructuralGroup.objects.filter(project=project).exists():
+        resolve_detected_structure_to_existing(batch, user, project, grouping_type)
+    else:
+        resolve_detected_groups_for_creation(batch, user, project, grouping_type)
+    auto_resolve_new_units(batch, user=user)
+    update_batch_resolution_state(batch)
+    batch.refresh_from_db()
+    assert batch.status == ImportBatch.Status.READY
+    result = finalize_historical_import(batch_id=batch.pk, user=user)
+    batch.refresh_from_db()
+    return batch, result
+
+
+def test_historical_reimport_adds_only_new_incremental_payments(tmp_path, accounting_admin_user):
+    project = Project.objects.create(code="Incremental", name="Incremental")
+    grouping_type = GroupingType.objects.create(code="Torre", name="Torre")
+    v1 = build_incremental_payments_workbook(tmp_path / "LIBRO_Incremental_v1.xlsx", payment_count=3)
+    v2 = build_incremental_payments_workbook(
+        tmp_path / "LIBRO_Incremental_v2.xlsx",
+        payment_count=5,
+        same_day_new_payments=True,
+    )
+
+    first_batch, first = _analyze_and_finalize_incremental_workbook(v1, accounting_admin_user, project, grouping_type)
+    assignment = FiduciaryAssignment.objects.get(assignment_number="EF-INCREMENTAL-101")
+    assert first.created_payments == 3
+    assert Payment.objects.filter(assignment=assignment).count() == 3
+
+    duplicate_v1_batch, duplicate_v1 = _analyze_and_finalize_incremental_workbook(
+        v1,
+        accounting_admin_user,
+        project,
+        grouping_type,
+    )
+    assert duplicate_v1.created_payments == 0
+    assert duplicate_v1.duplicate_payments == 3
+    assert Payment.objects.filter(assignment=assignment).count() == 3
+
+    second_batch, second = _analyze_and_finalize_incremental_workbook(v2, accounting_admin_user, project, grouping_type)
+    assert second.created_payments == 2
+    assert second.duplicate_payments == 3
+    assert Payment.objects.filter(assignment=assignment).count() == 5
+    assert list(
+        Payment.objects.filter(assignment=assignment, exact_date=date(2026, 1, 1), amount=100000)
+        .order_by("concept")
+        .values_list("concept", flat=True)
+    ) == [
+        "ORDINARIO | Recibo INC001",
+        "ORDINARIO | Recibo INC004",
+        "ORDINARIO | Recibo INC005",
+    ]
+
+    duplicate_v2_batch, duplicate_v2 = _analyze_and_finalize_incremental_workbook(
+        v2,
+        accounting_admin_user,
+        project,
+        grouping_type,
+    )
+    assert duplicate_v2.created_payments == 0
+    assert duplicate_v2.duplicate_payments == 5
+    assert Payment.objects.filter(assignment=assignment).count() == 5
+
+    assert first_batch.status == ImportBatch.Status.COMPLETED
+    assert duplicate_v1_batch.status == ImportBatch.Status.COMPLETED
+    assert second_batch.status == ImportBatch.Status.COMPLETED
+    assert duplicate_v2_batch.status == ImportBatch.Status.COMPLETED
+
+
+def test_revert_historical_import_removes_only_created_payments_and_allows_reimport(
+    tmp_path,
+    accounting_admin_user,
+):
+    project = Project.objects.create(code="Incremental", name="Incremental")
+    grouping_type = GroupingType.objects.create(code="Torre", name="Torre")
+    source = build_incremental_payments_workbook(tmp_path / "LIBRO_UndoHist.xlsx", payment_count=3)
+
+    batch, result = _analyze_and_finalize_incremental_workbook(source, accounting_admin_user, project, grouping_type)
+    assignment = FiduciaryAssignment.objects.get(assignment_number="EF-INCREMENTAL-101")
+    client_id = Client.objects.get(document_number="9101").pk
+    assert result.created_payments == 3
+    assert Payment.objects.filter(assignment=assignment).count() == 3
+
+    summary = revert_import_batch(batch=batch, user=accounting_admin_user, reason="carga errada")
+
+    batch.refresh_from_db()
+    assert batch.status == ImportBatch.Status.REVERTED
+    assert summary.payments == 3
+    assert Payment.objects.filter(assignment=assignment).count() == 0
+    assert Client.objects.filter(pk=client_id).exists()
+
+    reimport_batch, reimport_result = _analyze_and_finalize_incremental_workbook(
+        source,
+        accounting_admin_user,
+        project,
+        grouping_type,
+    )
+    reimported_assignment = FiduciaryAssignment.objects.get(assignment_number="EF-INCREMENTAL-101")
+    assert reimport_batch.status == ImportBatch.Status.COMPLETED
+    assert reimport_result.created_payments == 3
+    assert Payment.objects.filter(assignment=reimported_assignment).count() == 3
+
+
 def test_roundtrip_exported_workbook_with_separator_keeps_payments_idempotent(
     tmp_path,
     accounting_admin_user,
@@ -1203,8 +1353,15 @@ def test_roundtrip_exported_workbook_with_separator_keeps_payments_idempotent(
         status=ImportBatch.Status.ANALYZING,
         total_files=1,
     )
-    with pytest.raises(DuplicateHistoricalImportError):
-        analyze_historical_import(batch=second_batch, file_path=source_path, grouping_type_hint="Torre")
+    second_analysis = analyze_historical_import(batch=second_batch, file_path=source_path, grouping_type_hint="Torre")
+    store_historical_import_file(imported_file=second_analysis.imported_file, source_path=source_path)
+    resolve_detected_structure_to_existing(second_batch, accounting_admin_user, project, grouping_type)
+    auto_resolve_new_units(second_batch, user=accounting_admin_user)
+    update_batch_resolution_state(second_batch)
+    second_batch.refresh_from_db()
+    assert second_batch.status == ImportBatch.Status.READY
+    second_result = finalize_historical_import(batch_id=second_batch.pk, user=accounting_admin_user)
+    assert second_result.created_payments == 0
     assert list(
         Payment.objects.filter(assignment=assignment).order_by("exact_date", "amount").values_list(
             "exact_date",

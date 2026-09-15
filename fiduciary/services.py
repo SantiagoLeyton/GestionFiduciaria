@@ -37,13 +37,8 @@ def create_imported_client(
     doc_type = document_type or Client.DocumentType.UNKNOWN
     doc_number = (document_number or "").strip() or None
     phone = (phone or "").strip()
-    email = (email or "").strip()
+    email = normalize_valid_imported_email(email)
     contact_name = (contact_name or "").strip()
-    if email:
-        try:
-            validate_email(email)
-        except ValidationError:
-            email = ""
 
     if not name:
         return ImportedClientResult(status="invalid", errors=["Registre el nombre del cliente importado."])
@@ -99,6 +94,24 @@ def create_imported_client(
     except (ValidationError, IntegrityError) as exc:
         return ImportedClientResult(status="invalid", errors=[str(exc)])
     return ImportedClientResult(status="created", client=client)
+
+
+def normalize_imported_email(value: str | None) -> str:
+    email = str(value or "").strip()
+    if email.lower().startswith("mailto:"):
+        email = email[7:].strip()
+    return email.lower()
+
+
+def normalize_valid_imported_email(value: str | None) -> str:
+    email = normalize_imported_email(value)
+    if not email:
+        return ""
+    try:
+        validate_email(email)
+    except ValidationError:
+        return ""
+    return email
 
 
 def split_imported_full_name(full_name: str) -> tuple[str, str]:

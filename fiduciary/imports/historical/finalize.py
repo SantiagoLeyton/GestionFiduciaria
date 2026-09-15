@@ -30,8 +30,9 @@ from fiduciary.models import (
     Payment,
     UnitOwnership,
 )
+from fiduciary.imports.audit import create_import_audit_event
 from fiduciary.permissions import can_import_fiduciary
-from fiduciary.services import create_imported_client
+from fiduciary.services import create_imported_client, normalize_valid_imported_email
 from real_estate.models import GroupingType, Project, PropertyUnit, StructuralGroup
 
 from .normalize import MONTHS, clean_text, normalize_text
@@ -165,6 +166,15 @@ def finalize_historical_import(*, batch_id: int, user, progress_callback=None) -
         parse_started = time.perf_counter()
         workbook = HistoricalWorkbookParser(path, progress_callback=progress_callback).parse()
         parse_seconds = time.perf_counter() - parse_started
+        parse_blocking_issues = [issue for issue in workbook.issues if issue.severity == "blocking"]
+        if parse_blocking_issues:
+            first_issue = parse_blocking_issues[0]
+            raise HistoricalImportFinalizationError(
+                "El libro contiene incidencias bloqueantes detectadas durante la importacion definitiva: "
+                f"{first_issue.code} en {first_issue.sheet_name or '-'}"
+                f"{f' fila {first_issue.row_number}' if first_issue.row_number else ''}. "
+                f"{first_issue.message}"
+            )
         if has_open_blocking_issues(batch):
             raise HistoricalImportFinalizationError("El lote contiene incidencias bloqueantes abiertas.")
 
@@ -232,6 +242,34 @@ def finalize_historical_import(*, batch_id: int, user, progress_callback=None) -
             imported_file.processed_rows = workbook.statistics.valid_rows
             imported_file.save(update_fields=["status", "processing_finished_at", "processed_rows"])
             result = context.result()
+            created_projects = _created_record_count(batch, ImportAppliedRecord.EntityKind.PROJECT)
+            created_grouping_types = _created_record_count(batch, ImportAppliedRecord.EntityKind.GROUPING_TYPE)
+            created_structural_groups = _created_record_count(batch, ImportAppliedRecord.EntityKind.STRUCTURAL_GROUP)
+            created_property_units = _created_record_count(batch, ImportAppliedRecord.EntityKind.PROPERTY_UNIT)
+            create_import_audit_event(
+                batch=batch,
+                imported_file=imported_file,
+                entity_kind=ImportAppliedRecord.EntityKind.PROJECT,
+                action="Importado",
+                entity="Libro historico",
+                lines=[
+                    "Descripcion: Importacion historica definitiva completada.",
+                    f"Archivo: {imported_file.original_name}",
+                    f"Resultado: {batch.get_status_display()}",
+                    f"Proyectos creados: {created_projects}",
+                    f"Tipos de agrupacion creados: {created_grouping_types}",
+                    f"Agrupaciones creadas: {created_structural_groups}",
+                    f"Unidades creadas: {created_property_units}",
+                    f"Clientes creados: {result.created_clients}",
+                    f"Titularidades creadas: {result.created_ownerships}",
+                    f"Encargos fiduciarios creados: {result.created_assignments}",
+                    f"Titulares de encargo creados: {result.created_assignment_holders}",
+                    f"Pagos creados: {result.created_payments}",
+                    f"Pagos existentes/omitidos: {result.duplicate_payments}",
+                    f"Novedades importadas: {result.imported_novelties}",
+                    f"Observaciones importadas: {result.imported_observations}",
+                ],
+            )
         logger.info(
             "Historical import finalization completed for batch %s in %.2fs (parse %.2fs, materialize %.2fs, rows %s, timings %s).",
             batch_id,
@@ -243,6 +281,7 @@ def finalize_historical_import(*, batch_id: int, user, progress_callback=None) -
         )
         return result
     except Exception as exc:
+        logger.exception("Historical import finalization failed for batch %s.", batch_id)
         _mark_batch_failed(batch_id, exc)
         raise
 
@@ -650,8 +689,9 @@ class _FinalizationContext:
         if historical_client.phone and not client.phone:
             client.phone = historical_client.phone
             update_fields.append("phone")
-        if historical_client.email and not client.email:
-            client.email = historical_client.email
+        email = normalize_valid_imported_email(historical_client.email)
+        if email and not client.email:
+            client.email = email
             update_fields.append("email")
         if historical_client.contact_name and not client.address:
             client.address = historical_client.contact_name
@@ -927,6 +967,8 @@ class _FinalizationContext:
             exact_date=exact_date,
             period_year=period_year,
             period_month=period_month,
+            concept=concept,
+            destination=destination,
             source_file=source_file,
             source_sheet=source_sheet,
             source_row=source_row,
@@ -973,6 +1015,8 @@ class _FinalizationContext:
                 period_month,
                 date_precision,
                 amount,
+                concept,
+                destination,
                 source_file_id,
                 source_sheet,
                 source_row,
@@ -986,6 +1030,8 @@ class _FinalizationContext:
                 "period_month",
                 "date_precision",
                 "amount",
+                "concept",
+                "destination",
                 "source_file_id",
                 "source_sheet",
                 "source_row",
@@ -993,7 +1039,7 @@ class _FinalizationContext:
                 "source_header",
             ):
                 if date_precision == Payment.DatePrecision.EXACT:
-                    keys.add((Payment.DatePrecision.EXACT, exact_date, amount))
+                    keys.add((Payment.DatePrecision.EXACT, exact_date, amount, concept or "", destination or ""))
                 elif date_precision == Payment.DatePrecision.MONTH:
                     keys.add((Payment.DatePrecision.MONTH, period_year, period_month, amount))
                 else:
@@ -1020,6 +1066,8 @@ class _FinalizationContext:
         exact_date=None,
         period_year=None,
         period_month=None,
+        concept=None,
+        destination=None,
         source_file=None,
         source_sheet=None,
         source_row=None,
@@ -1027,7 +1075,7 @@ class _FinalizationContext:
         source_header=None,
     ) -> tuple:
         if date_precision == Payment.DatePrecision.EXACT:
-            return (Payment.DatePrecision.EXACT, exact_date, amount)
+            return (Payment.DatePrecision.EXACT, exact_date, amount, (concept or "").strip(), destination or "")
         if date_precision == Payment.DatePrecision.MONTH:
             return (Payment.DatePrecision.MONTH, period_year, period_month, amount)
         if date_precision == Payment.DatePrecision.AMBIGUOUS:
@@ -1616,7 +1664,7 @@ class _FinalizationContext:
         documents = _split_document_values(str(document).strip() if document else "")
         phones = _split_phone_values(str(phone).strip() if phone else "")
         emails = _split_contact_values(str(email).strip() if email else "", separators=("/", ";", ","))
-        email = str(email).strip() if email else ""
+        email = normalize_valid_imported_email(email)
         phone = str(phone).strip() if phone else ""
         contact_name = str(contact_name).strip() if contact_name else ""
         clients = []
@@ -1710,6 +1758,7 @@ class _FinalizationContext:
         if phone and not client.phone:
             client.phone = phone
             update_fields.append("phone")
+        email = normalize_valid_imported_email(email)
         if email and not client.email:
             client.email = email
             update_fields.append("email")
@@ -1916,7 +1965,7 @@ def _mark_batch_failed(batch_id: int, exc: Exception) -> None:
     ImportedFile.objects.filter(batch_id=batch_id, status=ImportedFile.Status.PROCESSING).update(
         status=ImportedFile.Status.FAILED,
         processing_finished_at=timezone.now(),
-        result_message="No fue posible completar la importacion historica definitiva.",
+        result_message=f"No fue posible completar la importacion historica definitiva: {_safe_error(exc)}",
     )
 
 
@@ -1928,6 +1977,18 @@ def _safe_error(exc: Exception) -> str:
 
 def _created_action(created: bool) -> str:
     return ImportAppliedRecord.Action.CREATED if created else ImportAppliedRecord.Action.REUSED
+
+
+def _created_record_count(batch: ImportBatch, entity_kind: str) -> int:
+    return (
+        ImportAppliedRecord.objects.filter(
+            batch=batch,
+            entity_kind=entity_kind,
+            action=ImportAppliedRecord.Action.CREATED,
+        )
+        .exclude(source_column="__AUDIT__")
+        .count()
+    )
 
 
 def _summary_detail_from_cells(cells: list[dict]) -> tuple[str, str]:

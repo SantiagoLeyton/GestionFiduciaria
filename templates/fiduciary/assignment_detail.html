@@ -12,7 +12,9 @@
       {% include "includes/messages.html" %}
       <div class="page-heading">
         <div><h1>Encargo {{ assignment.assignment_number }}</h1><p>{{ assignment.property_unit.project.name }} | {% if assignment.property_unit.structural_group %}{{ assignment.property_unit.structural_group }} | {% endif %}{{ assignment.property_unit }}</p></div>
-        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_list' %}">Volver</a>
+        <div class="actions-cell">
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_list' %}">Volver</a>
+        </div>
       </div>
       <section class="data-section">
         <h2>Datos del encargo</h2>
@@ -32,9 +34,6 @@
       <section class="data-section">
         <div class="section-header">
           <h2>Informacion contractual</h2>
-          {% if can_update %}
-            <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_update' assignment.pk %}">Actualizar informacion contractual</a>
-          {% endif %}
         </div>
         <div class="row g-3 mb-3">
           <div class="col"><strong>{% if assignment.adhesion_contract_date %}{{ assignment.adhesion_contract_date|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</strong><br><span class="text-muted">Contrato de adhesion</span></div>
@@ -73,7 +72,7 @@
         {% if movements %}
           <div class="table-responsive">
             <table class="table data-table align-middle">
-              <thead><tr><th>Fecha</th><th>Valor</th><th>Concepto</th><th>Pagador</th><th>Tipo</th><th>Recibido por</th><th>Origen</th></tr></thead>
+              <thead><tr><th>Fecha</th><th>Valor</th><th>Concepto</th><th>Pagador</th><th>Recibido por</th><th>Origen</th></tr></thead>
               <tbody>
                 {% for movement in movements %}
                   <tr>
@@ -93,7 +92,6 @@
                       {% endwith %}
                       {% else %}-{% endif %}
                     </td>
-                    <td>{{ movement.type_label }}</td>
                     <td>{% if movement.payment %}{{ movement.payment.get_destination_display|default:"-" }}{% else %}-{% endif %}</td>
                     <td>{{ movement.source }}</td>
                   </tr>

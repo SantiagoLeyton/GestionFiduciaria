@@ -19,6 +19,19 @@
       <form class="form-panel" method="post" novalidate data-unit-hierarchy>
         {% csrf_token %}
         {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+        {% if readonly_context %}
+          <section class="data-section mb-3">
+            <h2>Contexto de la observacion</h2>
+            <dl class="row mb-0">
+              {% for label, value in readonly_context.items %}
+                {% if value %}
+                  <dt class="col-sm-3">{{ label }}</dt>
+                  <dd class="col-sm-9">{{ value }}</dd>
+                {% endif %}
+              {% endfor %}
+            </dl>
+          </section>
+        {% endif %}
         <div class="form-grid">
           {% for field in form %}
             <div>
