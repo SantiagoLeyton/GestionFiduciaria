@@ -1,0 +1,81 @@
+name: Phase 3 historical hotfix
+
+on:
+  push:
+    branches: [fix/fase-3-historico]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: ${{ !contains(github.event.head_commit.message, '[fase3-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/fase-3-historico
+          fetch-depth: 0
+
+      - name: Apply narrowly scoped phase 3 fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('fiduciary/imports/historical/parser.py')
+          text = path.read_text(encoding='utf-8')
+
+          old = 'clients = self._extract_clients(sheet, row_number, columns, document_number)'
+          new = 'clients = self._extract_clients(sheet, row_number, columns, document_number, context=context)'
+          if old not in text:
+              raise SystemExit('Expected _extract_clients call not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    def _extract_clients(\n        self,\n        sheet: RawSheet,\n        row_number: int,\n        columns: dict[str, DetectedColumn],\n        document_number: str | None,\n    ) -> list[HistoricalClient]:'''
+          new = '''    def _extract_clients(\n        self,\n        sheet: RawSheet,\n        row_number: int,\n        columns: dict[str, DetectedColumn],\n        document_number: str | None,\n        *,\n        context: str = "main_table",\n    ) -> list[HistoricalClient]:'''
+          if old not in text:
+              raise SystemExit('Expected _extract_clients signature not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        names = []\n        for column in name_columns:\n            names.extend(_split_client_name_values(self._value(sheet, row_number, column)))'''
+          new = '''        names = []\n        for column in name_columns:\n            # En bloques historicos NOMBRE CLIENTE2 se reutiliza como resumen de\n            # la novedad. No debe entrar al pipeline de clientes. Los titulares\n            # reales de esas filas permanecen en NOMBRE CLIENTE (incluidos los\n            # casos con dos nombres separados por "/").\n            if context != "main_table" and compact_normalized(column.header) == "nombrecliente2":\n                continue\n            names.extend(_split_client_name_values(self._value(sheet, row_number, column)))'''
+          if old not in text:
+              raise SystemExit('Expected client-name loop not found')
+          text = text.replace(old, new, 1)
+
+          old = '''            destination=destination or _payment_destination_from_pair(pair) or _payment_destination_from_header(column.header),'''
+          new = '''            destination=(\n                PAYMENT_DESTINATION_CONSTRUCTORA\n                if category == RECEIPT_CATEGORY_CESSION\n                else destination or _payment_destination_from_pair(pair) or _payment_destination_from_header(column.header)\n            ),'''
+          if old not in text:
+              raise SystemExit('Expected reconstructed-payment destination not found')
+          text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Django checks
+        run: |
+          python manage.py check
+          python manage.py makemigrations --check --dry-run
+
+      - name: Historical regression tests
+        run: |
+          pytest -q tests/test_historical_phase2.py tests/test_historical_workbook_parser.py
+
+      - name: Commit validated fixes
+        shell: bash
+        run: |
+          if git diff --quiet -- fiduciary/imports/historical/parser.py; then
+            echo 'No parser changes to commit.'
+            exit 0
+          fi
+          git config user.name 'ChatGPT Phase 3'
+          git config user.email 'actions@users.noreply.github.com'
+          git add fiduciary/imports/historical/parser.py
+          git commit -m 'fix: historical novelty clients and cession destination [fase3-applied]'
+          git push origin HEAD:fix/fase-3-historico
