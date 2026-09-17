@@ -968,7 +968,7 @@ class HistoricalWorkbookParser:
         assignment_number = new_assignment_number or previous_assignment_number
         document_number = self._value(sheet, row_number, columns.get("document_number"))
         observation = self._value(sheet, row_number, columns.get("observations")) or ""
-        clients = self._extract_clients(sheet, row_number, columns, document_number)
+        clients = self._extract_clients(sheet, row_number, columns, document_number, context=context)
         reconstructed_payments = self._reconstruct_payments(sheet, row_number, columns, payment_columns)
         interests = self._extract_interests(sheet, row_number, columns)
         has_receipt_tokens = bool(self._receipt_tokens(sheet, row_number, _receipt_columns(columns)))
@@ -1064,6 +1064,8 @@ class HistoricalWorkbookParser:
         row_number: int,
         columns: dict[str, DetectedColumn],
         document_number: str | None,
+        *,
+        context: str,
     ) -> list[HistoricalClient]:
         clients = []
         name_columns = [
@@ -1075,8 +1077,11 @@ class HistoricalWorkbookParser:
         email_parts = _split_contact_values(self._value(sheet, row_number, columns.get("email")), separators=("/", ";", ","))
         contact_value = self._value(sheet, row_number, columns.get("contact_name"))
         names = []
-        for column in name_columns:
-            names.extend(_split_client_name_values(self._value(sheet, row_number, column)))
+        for index, column in enumerate(name_columns):
+            value = self._value(sheet, row_number, column)
+            if context != "main_table" and index > 0 and _looks_like_historical_novelty_summary(value):
+                continue
+            names.extend(_split_client_name_values(value))
         for index, name in enumerate(names, start=1):
             if not name:
                 continue
@@ -2314,6 +2319,34 @@ def _split_client_name_values(value: str | None) -> list[str]:
     return [text]
 
 
+def _looks_like_historical_novelty_summary(value: str | None) -> bool:
+    text = clean_text(value)
+    if not text:
+        return False
+    normalized = normalize_text(text)
+    compact = normalized.replace(" ", "")
+    if text.strip().startswith("*"):
+        return True
+    keywords = {
+        "termin",
+        "terminacion",
+        "retiro",
+        "retirado",
+        "cesion",
+        "exclusion",
+        "sustitucion",
+        "anulacion",
+        "cambio",
+        "traslado",
+        "inclusion",
+        "desist",
+        "desistimiento",
+        "devol",
+        "devolucion",
+    }
+    return any(keyword in compact for keyword in keywords)
+
+
 def _looks_like_client_name_part(value: str) -> bool:
     normalized = normalize_text(value)
     if not normalized or "@" in value:
@@ -2630,6 +2663,8 @@ def _payment_destination_from_date_value(value: str | None) -> str:
 def _payment_destination_from_pair(pair: tuple[str, ReceiptToken, str]) -> str | None:
     category, token, date_value = pair
     if category == RECEIPT_CATEGORY_CREDIT:
+        return PAYMENT_DESTINATION_CONSTRUCTORA
+    if category == RECEIPT_CATEGORY_CESSION:
         return PAYMENT_DESTINATION_CONSTRUCTORA
     if category != RECEIPT_CATEGORY_ORDINARY:
         return None

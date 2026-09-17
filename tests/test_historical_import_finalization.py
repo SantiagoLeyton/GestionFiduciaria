@@ -415,6 +415,45 @@ def build_monetary_changes_workbook(path: Path) -> Path:
     return path
 
 
+def build_mediterraneo_like_summary_client2_workbook(path: Path) -> Path:
+    headers = [
+        "APTO",
+        "ENCARGO FIDUCIARIO",
+        "CEDULA CLIENTE",
+        "NOMBRE CLIENTE",
+        "NOMBRE CLIENTE2",
+        "OBSERVACIONES",
+    ]
+    rows = [
+        ("NOVEDADES", "", "", "", "", ""),
+        ("*TERMINACIONES", "", "", "", "", ""),
+        (
+            "301",
+            "60002008444158",
+            "41931089",
+            "SALCEDO SOLANO CLAUDIA PATRICIA",
+            "*TERMINAC/ARRAS/CESION",
+            "NC26162 JUL.2/25 TERMIN CLAUDIA SALCEDO *ARRAS $711.750 TRASL ANTIC A ZARA VALENCIA $192.172.500",
+        ),
+        (
+            "1501",
+            "60002008445111",
+            "1094934399/41932457",
+            "ALDANA OCAMPO KEVIN JOAN/OCAMPO MARTINEZ MILLER LANDY",
+            "*TERMINAC/ARRAS/DEVOL",
+            "NC26164 JUL.20/25 TERMIN KEVIN ALDANA/MILLER OCAMPO *ARRAS $14'235 DEVOL. $17.594.480",
+        ),
+    ]
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", _xlsx_content_types(1))
+        archive.writestr("_rels/.rels", _xlsx_root_rels())
+        archive.writestr("xl/workbook.xml", _xlsx_workbook(["T4"]))
+        archive.writestr("xl/_rels/workbook.xml.rels", _xlsx_workbook_rels(1))
+        archive.writestr("xl/styles.xml", _xlsx_styles())
+        archive.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml("PROYECTO MEDITERRANEO - T4", headers, rows))
+    return path
+
+
 def build_montecielo_transfer_date_workbook(path: Path) -> Path:
     headers = [
         "APTO",
@@ -1566,6 +1605,7 @@ def test_historical_flow_materializes_monetary_cession_and_transfer_with_histori
         "CESION | Recibo NC14131",
         "G",
     )
+    assert cession_payment.destination == Payment.Destination.CONSTRUCTORA
     assert Payment.objects.filter(date_precision=Payment.DatePrecision.MONTH).count() == 0
 
     client.force_login(accounting_admin_user)
@@ -2486,6 +2526,44 @@ def test_historical_import_splits_multiple_clients_from_single_cell(tmp_path, ac
     ]
     assert "/" not in first.full_name
     assert "/" not in second.full_name
+
+
+def test_historical_import_does_not_create_clients_from_summary_client2_cell(tmp_path, accounting_admin_user):
+    source_path = build_mediterraneo_like_summary_client2_workbook(tmp_path / "LIBRO_MEDITERRANEO_RESUMEN.xlsx")
+    project = Project.objects.create(code="MED", name="Mediterraneo")
+    grouping_type = GroupingType.objects.create(code="TOR", name="Torre")
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.ANALYZING,
+        total_files=1,
+    )
+
+    analysis = analyze_historical_import(batch=batch, file_path=source_path, grouping_type_hint="Torre")
+    rows = list(analysis.preview.workbook.sheets[0].rows)
+
+    assert [[client.name for client in row.clients] for row in rows] == [
+        ["SALCEDO SOLANO CLAUDIA PATRICIA"],
+        ["ALDANA OCAMPO KEVIN JOAN", "OCAMPO MARTINEZ MILLER LANDY"],
+    ]
+    assert all("*TERMINAC" not in client.name for row in rows for client in row.clients)
+
+    store_historical_import_file(imported_file=analysis.imported_file, source_path=source_path)
+    resolve_detected_groups_for_creation(batch, accounting_admin_user, project, grouping_type)
+    auto_resolve_new_units(batch, user=accounting_admin_user)
+    update_batch_resolution_state(batch)
+    batch.refresh_from_db()
+    assert batch.status == ImportBatch.Status.READY
+
+    finalize_historical_import(batch_id=batch.pk, user=accounting_admin_user)
+
+    assert Client.objects.filter(first_names__icontains="TERMIN").count() == 0
+    assert Client.objects.filter(first_names__icontains="ARRAS").count() == 0
+    assert Client.objects.filter(first_names__icontains="DEVOL").count() == 0
+    assert Client.objects.filter(document_number="41931089").exists()
+    assert Client.objects.filter(document_number="1094934399").exists()
+    assert Client.objects.filter(document_number="41932457").exists()
 
 
 def test_ksmp_t7_303_observation_fragments_that_exist_as_novelties_are_not_extra_observations(
