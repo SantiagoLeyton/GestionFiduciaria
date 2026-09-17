@@ -15,11 +15,15 @@ from django.test import Client, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from core.models import AuditEvent
 from fiduciary.exporters import export_historical_workbook
 from fiduciary.imports.historical import HistoricalWorkbookParser
 from fiduciary.imports.historical.readers import WorkbookReader
 from fiduciary.models import Client as FiduciaryClient
 from fiduciary.models import (
+    AssignmentCreditSubsidy,
+    AssignmentInterest,
+    AssignmentLegalDocumentation,
     FiduciaryAssignment,
     FiduciaryAssignmentHolder,
     ImportAppliedRecord,
@@ -1725,11 +1729,13 @@ def test_assignment_detail_shows_real_payments(accounting_client, accounting_adm
     assert "Pagos registrados" in content
     assert "LIBRO.xlsx" in content
     assert "T2 fila 5" in content
+    assert "Primer pago" not in content
+    assert "Ultimo pago" not in content
     assert "No se han realizado pagos." not in content
 
 
 @pytest.mark.django_db
-def test_assignment_detail_blocks_free_update_and_delete(accounting_client, active_client, secondary_client, unit, second_unit):
+def test_assignment_detail_allows_contractual_update_and_blocks_delete(accounting_client, active_client, secondary_client, unit, second_unit):
     create_ownership(active_client, unit, True)
     create_ownership(secondary_client, second_unit, True)
     assignment = create_assignment(unit, active_client)
@@ -1760,7 +1766,7 @@ def test_assignment_detail_blocks_free_update_and_delete(accounting_client, acti
     assert "Registrar cambio de encargo" not in data_section
     assert "Registrar novedad" in content
     assert "Registrar observacion" in content
-    assert reverse("fiduciary:assignment_update", args=[assignment.pk]) not in content
+    assert reverse("fiduciary:assignment_update", args=[assignment.pk]) in content
     assert reverse("fiduciary:assignment_delete", args=[assignment.pk]) not in content
     assert reverse("fiduciary:novelty_create") in content
     assert reverse("fiduciary:observation_create") in content
@@ -1771,7 +1777,11 @@ def test_assignment_detail_blocks_free_update_and_delete(accounting_client, acti
     ).status_code == 200
 
     form_response = accounting_client.get(reverse("fiduciary:assignment_update", args=[assignment.pk]))
-    assert form_response.status_code == 403
+    assert form_response.status_code == 200
+    form_content = form_response.content.decode()
+    assert "Actualizar informacion contractual" in form_content
+    assert "adhesion_contract_date" in form_content
+    assert "assignment_number" not in form_content
     delete_get_response = accounting_client.get(reverse("fiduciary:assignment_delete", args=[assignment.pk]))
     delete_post_response = accounting_client.post(
         reverse("fiduciary:assignment_delete", args=[assignment.pk]),
@@ -1791,13 +1801,13 @@ def test_assignment_detail_blocks_free_update_and_delete(accounting_client, acti
         },
     )
 
-    assert update_response.status_code == 403
+    assert update_response.status_code == 302
     assignment.refresh_from_db()
     other_assignment.refresh_from_db()
-    assert assignment.adhesion_contract_date == date(2024, 1, 10)
-    assert assignment.promise_date == date(2024, 2, 20)
-    assert assignment.promised_delivery_date == date(2024, 3, 15)
-    assert assignment.actual_delivery_date == date(2024, 4, 1)
+    assert assignment.adhesion_contract_date == date(2024, 1, 11)
+    assert assignment.promise_date == date(2024, 2, 21)
+    assert assignment.promised_delivery_date is None
+    assert assignment.actual_delivery_date == date(2024, 4, 2)
     assert assignment.assignment_number == "EF-001"
     assert assignment.property_unit_id == unit.pk
     assert assignment.start_date == date(2026, 1, 1)
@@ -4062,6 +4072,760 @@ def test_assignment_financial_entity_blank_post_does_not_delete_existing_value(a
 
 
 @pytest.mark.django_db
+def test_assignment_financial_summary_without_credit_subsidies(accounting_client, accounting_admin_user, active_client, unit):
+    unit.property_value = Decimal("173000000")
+    unit.save(update_fields=["property_value"])
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-FIN-SUM")
+    _, imported_file = create_imported_file(accounting_admin_user)
+    Payment.objects.create(
+        assignment=assignment,
+        date_precision=Payment.DatePrecision.EXACT,
+        exact_date=date(2026, 1, 10),
+        amount=Decimal("30000000"),
+        concept="CESION",
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=5,
+    )
+    Payment.objects.create(
+        assignment=assignment,
+        date_precision=Payment.DatePrecision.EXACT,
+        exact_date=date(2026, 1, 11),
+        amount=Decimal("15000000"),
+        destination=Payment.Destination.FIDUCIARIA,
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=5,
+    )
+
+    response = accounting_client.get(reverse("fiduciary:assignment_detail", args=[assignment.pk]))
+    summary = response.context["financial_summary"]
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert summary["total_received"] == Decimal("45000000")
+    assert summary["balance_due"] == Decimal("128000000")
+    assert summary["own_resources"] == Decimal("128000000")
+    assert summary["cash_honor"] == Decimal("0")
+    assert "Pagos constructora" in content
+    assert "Pagos fiducia" in content
+    assert "Resumen financiero" in content
+    assert "Saldo por cobrar" in content
+    assert "Recursos propios" in content
+    assert "Valor del inmueble" in content
+    assert "VALOR DEL APARTAMENTO" not in content
+    assert "RECURSOS PROPIOS/CUOTA INICIAL" not in content
+    assert "Cantidad" not in content
+    assert 'placeholder="Ejemplo: Banco Caja Social"' in content
+    assert content.index("Resumen financiero") < content.index("Pagos registrados")
+    assert "Total recibido en pagos" in content
+    assert ">Total recibido</span>" not in content
+    assert content.index("Valor del inmueble") < content.index("Total recibido en pagos")
+    assert content.index("Total recibido en pagos") < content.index("Saldo por cobrar")
+    assert content.index("Pagos registrados") < content.index("Entidad financiera")
+    assert content.index("Entidad financiera") < content.index("Movimientos de pago")
+
+
+@pytest.mark.django_db
+def test_home_shows_allowed_modules_to_commercial_and_accounting(client, commercial_user, accounting_admin_user):
+    for user in (commercial_user, accounting_admin_user):
+        client.force_login(user)
+        content = client.get(reverse("home")).content.decode()
+        assert "Importar CBR" in content
+        assert reverse("fiduciary:cbr_import_list") in content
+        assert "Exportacion" in content
+        assert reverse("fiduciary:export_home") in content
+        client.logout()
+
+
+@pytest.mark.django_db
+def test_commercial_quick_permissions_and_buttons(
+    commercial_client,
+    commercial_user,
+    active_client,
+    unit,
+):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-COM-UI")
+    observation = ImportedHistoricalObservation.objects.create(
+        project=unit.project,
+        property_unit=unit,
+        assignment=assignment,
+        origin=ImportedHistoricalObservation.Origin.MANUAL,
+        status=ImportedHistoricalObservation.Status.IMPORTED,
+        imported_by=commercial_user,
+        summary="Observacion manual",
+        detail="Detalle",
+    )
+    novelty = OperationalNovelty.objects.create(
+        property_unit=unit,
+        historical_assignment=assignment,
+        novelty_type=OperationalNovelty.NoveltyType.HISTORICAL,
+        origin=OperationalNovelty.Origin.MANUAL,
+        status=OperationalNovelty.Status.DESCRIPTIVE,
+        effective_date=date(2026, 1, 1),
+        summary="Novedad manual",
+        created_by=commercial_user,
+    )
+    completed_batch = ImportBatch.objects.create(
+        initiated_by=commercial_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.COMPLETED,
+    )
+
+    historical_list = commercial_client.get(reverse("fiduciary:historical_import_list")).content.decode()
+    assert "Deshacer importaci" not in historical_list
+    assert commercial_client.get(reverse("fiduciary:historical_import_revert", args=[completed_batch.pk])).status_code == 403
+    assert commercial_client.post(reverse("fiduciary:historical_import_revert", args=[completed_batch.pk]), {"change_reason": "x"}).status_code == 403
+
+    cbr_list = commercial_client.get(reverse("fiduciary:cbr_import_list")).content.decode()
+    assert "Nuevo CBR" in cbr_list
+    assert commercial_client.get(reverse("fiduciary:cbr_import_create")).status_code == 200
+
+    observation_list = commercial_client.get(reverse("fiduciary:observation_list")).content.decode()
+    assert "Nueva observacion" in observation_list
+    assert commercial_client.get(reverse("fiduciary:observation_create")).status_code == 200
+    assert commercial_client.get(reverse("fiduciary:observation_update", args=[observation.pk])).status_code == 403
+    assert commercial_client.get(reverse("fiduciary:observation_delete", args=[observation.pk])).status_code == 403
+
+    novelty_list = commercial_client.get(reverse("fiduciary:novelty_list")).content.decode()
+    assert "Registrar novedad" in novelty_list
+    assert commercial_client.get(reverse("fiduciary:novelty_create")).status_code == 200
+    assert commercial_client.get(reverse("fiduciary:novelty_update", args=[novelty.pk])).status_code == 403
+    assert commercial_client.get(reverse("fiduciary:novelty_delete", args=[novelty.pk])).status_code == 403
+
+
+@pytest.mark.django_db
+def test_quick_ui_filters_columns_and_assignment_holder_finalize_removed(
+    accounting_client,
+    accounting_admin_user,
+    active_client,
+    unit,
+):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-UI-FILTERS")
+    holder = assignment.holders.get(client=active_client)
+    _, imported_file = create_imported_file(accounting_admin_user)
+    Payment.objects.create(
+        assignment=assignment,
+        exact_date=date(2026, 9, 17),
+        date_precision=Payment.DatePrecision.EXACT,
+        amount=Decimal("15000000"),
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=1,
+    )
+
+    assignment_content = accounting_client.get(reverse("fiduciary:assignment_list")).content.decode()
+    assignment_filters = assignment_content.split('<form class="filter-panel', 1)[1].split("</form>", 1)[0]
+    assert "Cliente" not in assignment_filters
+
+    detail_content = accounting_client.get(reverse("fiduciary:assignment_detail", args=[assignment.pk])).content.decode()
+    holders_section = detail_content.split("<h2>Titulares del encargo</h2>", 1)[1].split("<h2>Resumen financiero</h2>", 1)[0]
+    assert "Finalizar" not in holders_section
+    assert accounting_client.post(
+        reverse("fiduciary:holder_finalize", args=[holder.pk]),
+        {"change_reason": "No disponible", "end_date": "2026-09-17"},
+    ).status_code == 403
+
+    observation_content = accounting_client.get(reverse("fiduciary:observation_list")).content.decode()
+    observation_filters = observation_content.split('<form class="filter-panel', 1)[1].split("</form>", 1)[0]
+    observation_header = observation_content.split("<thead>", 1)[1].split("</thead>", 1)[0]
+    assert "Cliente" not in observation_filters
+    assert "<th>Fecha</th>" not in observation_header
+
+    novelty_content = accounting_client.get(reverse("fiduciary:novelty_list")).content.decode()
+    novelty_filters = novelty_content.split('<form class="filter-panel', 1)[1].split("</form>", 1)[0]
+    novelty_header = novelty_content.split("<thead>", 1)[1].split("</thead>", 1)[0]
+    assert "Cliente" not in novelty_filters
+    assert "<th>Fecha</th>" not in novelty_header
+
+    payment_content = accounting_client.get(reverse("fiduciary:payment_list"), {"assignment_number": assignment.assignment_number}).content.decode()
+    payment_filters = payment_content.split('<form class="filter-panel', 1)[1].split("</form>", 1)[0]
+    assert "Cliente" not in payment_filters
+    assert "Total recibido en pagos" in detail_content
+
+
+@pytest.mark.django_db
+def test_unit_list_shows_total_paid_across_historical_and_active_assignments(
+    accounting_client,
+    accounting_admin_user,
+    active_client,
+    secondary_client,
+    project,
+):
+    unit = PropertyUnit.objects.create(project=project, code="101", name="101")
+    old_assignment = FiduciaryAssignment.objects.create(
+        assignment_number="EF-OLD-TOTAL",
+        property_unit=unit,
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 12, 31),
+        is_active=False,
+    )
+    create_ownership(secondary_client, unit, True)
+    current_assignment = create_assignment(unit, secondary_client, "EF-NEW-TOTAL")
+    _, imported_file = create_imported_file(accounting_admin_user)
+    Payment.objects.create(
+        assignment=old_assignment,
+        exact_date=date(2025, 9, 17),
+        date_precision=Payment.DatePrecision.EXACT,
+        amount=Decimal("30000000"),
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=1,
+    )
+    Payment.objects.create(
+        assignment=current_assignment,
+        exact_date=date(2026, 9, 17),
+        date_precision=Payment.DatePrecision.EXACT,
+        amount=Decimal("15000000"),
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=2,
+    )
+
+    content = accounting_client.get(reverse("real_estate:property_unit_list"), {"project": project.pk}).content.decode()
+
+    assert "Total pagado" in content
+    assert "Ultimo pago" not in content
+    assert "45.000.000" in content
+    assert "17 de Septiembre de 2026" not in content
+
+
+@pytest.mark.django_db
+def test_pending_resolution_structural_level_shows_simplified_fields(accounting_client, accounting_admin_user, project):
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.AWAITING_RESOLUTION,
+    )
+    element = DetectedStructureElement.objects.create(
+        batch=batch,
+        raw_value="T1",
+        normalized_value="t1",
+        inferred_kind=DetectedStructureElement.InferredKind.GROUPING_TYPE,
+        status=DetectedStructureElement.Status.NEEDS_REVIEW,
+        structural_context={
+            "missing_grouping_type": True,
+            "project_id": project.pk,
+            "project_name": project.name,
+            "grouping_name": "T1",
+        },
+    )
+    ImportResolution.objects.create(detected_element=element)
+
+    content = accounting_client.get(reverse("fiduciary:historical_import_resolve", args=[batch.pk, element.pk])).content.decode()
+
+    for label in ("Clasificacion", "Decision", "Proyecto existente", "Tipo existente", "Codigo para crear", "Nombre para crear"):
+        assert label in content
+    for label in ("Agrupacion existente", "Unidad existente", "Proyecto padre", "Tipo padre", "Agrupacion padre"):
+        assert label not in content
+
+
+@pytest.mark.django_db
+def test_assignment_financial_summary_with_credit_and_subsidy_records(accounting_client, accounting_admin_user, active_client, unit):
+    unit.property_value = Decimal("200000000")
+    unit.save(update_fields=["property_value"])
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-FIN-FULL")
+    _, imported_file = create_imported_file(accounting_admin_user)
+    Payment.objects.create(
+        assignment=assignment,
+        date_precision=Payment.DatePrecision.EXACT,
+        exact_date=date(2026, 2, 1),
+        amount=Decimal("15000000"),
+        destination=Payment.Destination.CONSTRUCTORA,
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=5,
+    )
+    Payment.objects.create(
+        assignment=assignment,
+        date_precision=Payment.DatePrecision.EXACT,
+        exact_date=date(2026, 2, 2),
+        amount=Decimal("25000000"),
+        destination=Payment.Destination.FIDUCIARIA,
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=5,
+    )
+    AssignmentCreditSubsidy.objects.create(
+        assignment=assignment,
+        date=date(2026, 2, 10),
+        entry_type=AssignmentCreditSubsidy.EntryType.CREDIT,
+        amount=Decimal("100000000"),
+        entity="BANCO A",
+    )
+    AssignmentCreditSubsidy.objects.create(
+        assignment=assignment,
+        date=date(2026, 2, 12),
+        entry_type=AssignmentCreditSubsidy.EntryType.GOVERNMENT_SUBSIDY,
+        amount=Decimal("20000000"),
+        entity="ENTIDAD X",
+    )
+    AssignmentCreditSubsidy.objects.create(
+        assignment=assignment,
+        date=date(2026, 2, 13),
+        entry_type=AssignmentCreditSubsidy.EntryType.BOX_SUBSIDY,
+        amount=Decimal("10000000"),
+        entity="COMFENALCO",
+    )
+
+    response = accounting_client.get(reverse("fiduciary:assignment_detail", args=[assignment.pk]))
+    summary = response.context["financial_summary"]
+
+    assert response.status_code == 200
+    assert summary["credit"] == Decimal("100000000")
+    assert summary["government_subsidy"] == Decimal("20000000")
+    assert summary["box_subsidy"] == Decimal("10000000")
+    assert summary["total_subsidies"] == Decimal("30000000")
+    assert summary["balance_due"] == Decimal("160000000")
+    assert summary["own_resources"] == Decimal("30000000")
+    assert Payment.objects.count() == 2
+
+
+@pytest.mark.django_db
+def test_assignment_detail_displays_credit_subsidy_legal_documentation_and_interests(accounting_client, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-SECTIONS")
+    AssignmentCreditSubsidy.objects.create(
+        assignment=assignment,
+        date=date(2026, 2, 10),
+        entry_type=AssignmentCreditSubsidy.EntryType.CREDIT,
+        amount=Decimal("80000000"),
+        entity="BANCO X",
+    )
+    AssignmentLegalDocumentation.objects.create(
+        assignment=assignment,
+        registration_number="50C-123",
+        deed_date=date(2026, 3, 1),
+        deed_number="ESC-9",
+        notary="Notaria 10",
+        tradition_certificate_date=date(2026, 3, 5),
+        electronic_invoice="FE-001",
+    )
+    AssignmentInterest.objects.create(assignment=assignment, receipt="R-1", interest="Interes mora", amount=Decimal("120000"))
+    AssignmentInterest.objects.create(assignment=assignment, receipt="R-2", interest="Interes corriente", amount=Decimal("80000"))
+
+    response = accounting_client.get(reverse("fiduciary:assignment_detail", args=[assignment.pk]))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Créditos y subsidios" in content
+    assert "FECHA" in content and "TIPO" in content and "ENTIDAD/BANCO" in content
+    assert "BANCO X" in content
+    assert "Documentación legal" in content
+    assert "MATRÍCULA" in content
+    assert "FACTURA ELECTRÓNICA" in content
+    assert "FE-001" in content
+    assert "Intereses" in content
+    assert "R-1" in content
+    assert "R-2" in content
+
+
+@pytest.mark.django_db
+def test_assignment_detail_shows_unit_data_before_holders_and_links_unit(accounting_client, active_client, project, grouping_type):
+    tower = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="Torre 1")
+    unit = PropertyUnit.objects.create(
+        project=project,
+        structural_group=tower,
+        code="101",
+        name="101",
+        area=Decimal("65.20"),
+    )
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-UNIT-LINK")
+
+    response = accounting_client.get(reverse("fiduciary:assignment_detail", args=[assignment.pk]))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    expected_order = [
+        "Datos del encargo",
+        "Datos de la unidad",
+        "Titulares del encargo",
+        "Resumen financiero",
+        "Pagos registrados",
+        "Créditos y subsidios",
+        "Intereses",
+        "Informacion contractual",
+        "Documentaci",
+        "Observaciones relacionadas",
+        "Novedades relacionadas",
+    ]
+    positions = [content.index(label) for label in expected_order]
+    assert positions == sorted(positions)
+    assert project.name in content
+    assert grouping_type.name in content
+    assert "65,20 m2" in content
+    assert f"{reverse('real_estate:property_unit_history', args=[unit.pk])}?assignment={assignment.pk}" in content
+
+
+@pytest.mark.django_db
+def test_property_unit_history_shows_selected_assignment_and_total_paid(
+    accounting_client,
+    accounting_admin_user,
+    active_client,
+    secondary_client,
+    project,
+):
+    unit = PropertyUnit.objects.create(project=project, code="101", name="101")
+    old_assignment = FiduciaryAssignment.objects.create(
+        assignment_number="002010377777",
+        property_unit=unit,
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 12, 31),
+        is_active=False,
+        last_change_reason="Cesion historica",
+    )
+    FiduciaryAssignmentHolder.objects.create(
+        assignment=old_assignment,
+        client=active_client,
+        is_primary=True,
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 12, 31),
+        is_active=False,
+        last_change_reason="Cesion historica",
+    )
+    create_ownership(secondary_client, unit, True)
+    current_assignment = create_assignment(unit, secondary_client, "002010388888")
+    _, imported_file = create_imported_file(accounting_admin_user)
+    Payment.objects.create(
+        assignment=old_assignment,
+        exact_date=date(2025, 9, 15),
+        date_precision=Payment.DatePrecision.EXACT,
+        amount=Decimal("18400000"),
+        concept="NCR-A",
+        destination=Payment.Destination.CONSTRUCTORA,
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=5,
+    )
+    Payment.objects.create(
+        assignment=current_assignment,
+        exact_date=date(2026, 9, 15),
+        date_precision=Payment.DatePrecision.EXACT,
+        amount=Decimal("32600000"),
+        concept="NCR-B",
+        destination=Payment.Destination.FIDUCIARIA,
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=6,
+    )
+    AssignmentCreditSubsidy.objects.create(
+        assignment=old_assignment,
+        entry_type=AssignmentCreditSubsidy.EntryType.CREDIT,
+        amount=Decimal("90000000"),
+        entity="BANCO X",
+    )
+    AssignmentInterest.objects.create(assignment=old_assignment, receipt="INT-1", interest="Interes", amount=Decimal("1000000"))
+
+    old_response = accounting_client.get(
+        reverse("real_estate:property_unit_history", args=[unit.pk]),
+        {"assignment": old_assignment.pk},
+    )
+    old_content = old_response.content.decode()
+    current_response = accounting_client.get(
+        reverse("real_estate:property_unit_history", args=[unit.pk]),
+        {"assignment": current_assignment.pk},
+    )
+    current_content = current_response.content.decode()
+
+    assert old_response.status_code == 200
+    assert "Informaci" in old_content and "del encargo" in old_content
+    assert reverse("fiduciary:assignment_detail", args=[old_assignment.pk]) in old_content
+    assert "002010377777" in old_content
+    assert "18.400.000" in old_content
+    assert "109.400.000" not in old_content
+    assert current_response.status_code == 200
+    assert reverse("fiduciary:assignment_detail", args=[current_assignment.pk]) in current_content
+    assert "002010388888" in current_content
+    assert "32.600.000" in current_content
+
+
+@pytest.mark.django_db
+def test_accounting_can_register_financial_structures_without_creating_payments(accounting_client, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-MANUAL-FIN")
+
+    credit_response = accounting_client.post(
+        reverse("fiduciary:assignment_credit_subsidy_create", args=[assignment.pk]),
+        {
+            "date": "2026-02-10",
+            "entry_type": AssignmentCreditSubsidy.EntryType.CREDIT,
+            "amount": "80000000",
+            "entity": "BANCO X",
+        },
+    )
+    interest_response = accounting_client.post(
+        reverse("fiduciary:assignment_interest_create", args=[assignment.pk]),
+        {"receipt": "R-10", "date": "2026-02-11", "amount": "50000"},
+    )
+    legal_response = accounting_client.post(
+        reverse("fiduciary:assignment_legal_documentation_update", args=[assignment.pk]),
+        {
+            "registration_number": "50C-999",
+            "deed_date": "2026-04-01",
+            "deed_number": "ESC-10",
+            "notary": "Notaria 2",
+            "tradition_certificate_date": "2026-04-05",
+            "electronic_invoice": "FE-999",
+        },
+    )
+
+    assert credit_response.status_code == 302
+    assert interest_response.status_code == 302
+    assert legal_response.status_code == 302
+    assert AssignmentCreditSubsidy.objects.filter(assignment=assignment).count() == 1
+    assert AssignmentInterest.objects.filter(assignment=assignment).count() == 1
+    assert AssignmentLegalDocumentation.objects.filter(assignment=assignment).exists()
+    assert Payment.objects.count() == 0
+    assert AuditEvent.objects.filter(description="REGISTRAR_CREDITO_SUBSIDIO").exists()
+    assert AuditEvent.objects.filter(description="REGISTRAR_INTERES").exists()
+    assert AuditEvent.objects.filter(description="REGISTRAR_DOCUMENTACION_LEGAL").exists()
+
+
+@pytest.mark.django_db
+def test_credit_subsidy_required_unique_and_edit_reason(accounting_client, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-CREDIT-RULES")
+
+    missing_date = accounting_client.post(
+        reverse("fiduciary:assignment_credit_subsidy_create", args=[assignment.pk]),
+        {
+            "entry_type": AssignmentCreditSubsidy.EntryType.CREDIT,
+            "amount": "50000000",
+            "entity": "BANCO X",
+        },
+    )
+    assert missing_date.status_code == 200
+    assert not AssignmentCreditSubsidy.objects.exists()
+
+    for entry_type, amount, entity in (
+        (AssignmentCreditSubsidy.EntryType.CREDIT, "50000000", "BANCO X"),
+        (AssignmentCreditSubsidy.EntryType.BOX_SUBSIDY, "20000000", "CAJA X"),
+        (AssignmentCreditSubsidy.EntryType.GOVERNMENT_SUBSIDY, "10000000", "GOBIERNO X"),
+    ):
+        response = accounting_client.post(
+            reverse("fiduciary:assignment_credit_subsidy_create", args=[assignment.pk]),
+            {"date": "2026-02-10", "entry_type": entry_type, "amount": amount, "entity": entity},
+        )
+        assert response.status_code == 302
+    assert AssignmentCreditSubsidy.objects.filter(assignment=assignment).count() == 3
+
+    duplicate = accounting_client.post(
+        reverse("fiduciary:assignment_credit_subsidy_create", args=[assignment.pk]),
+        {
+            "date": "2026-03-10",
+            "entry_type": AssignmentCreditSubsidy.EntryType.CREDIT,
+            "amount": "30000000",
+            "entity": "BANCO Y",
+        },
+    )
+    assert duplicate.status_code == 200
+    assert "ya tiene un" in duplicate.content.decode()
+    assert AssignmentCreditSubsidy.objects.filter(assignment=assignment, entry_type=AssignmentCreditSubsidy.EntryType.CREDIT).count() == 1
+
+    credit = AssignmentCreditSubsidy.objects.get(assignment=assignment, entry_type=AssignmentCreditSubsidy.EntryType.CREDIT)
+    no_reason = accounting_client.post(
+        reverse("fiduciary:assignment_credit_subsidy_update", args=[assignment.pk, credit.pk]),
+        {
+            "date": "2026-02-11",
+            "entry_type": AssignmentCreditSubsidy.EntryType.CREDIT,
+            "amount": "51000000",
+            "entity": "BANCO X",
+        },
+    )
+    assert no_reason.status_code == 200
+    credit.refresh_from_db()
+    assert credit.amount == Decimal("50000000")
+
+    with_reason = accounting_client.post(
+        reverse("fiduciary:assignment_credit_subsidy_update", args=[assignment.pk, credit.pk]),
+        {
+            "date": "2026-02-11",
+            "entry_type": AssignmentCreditSubsidy.EntryType.CREDIT,
+            "amount": "51000000",
+            "entity": "BANCO X",
+            "change_reason": "Correccion de valor",
+        },
+    )
+    assert with_reason.status_code == 302
+    credit.refresh_from_db()
+    assert credit.amount == Decimal("51000000")
+    assert AuditEvent.objects.filter(description__contains="MODIFICAR_CREDITO_SUBSIDIO").filter(description__contains="Correccion de valor").exists()
+
+    box = AssignmentCreditSubsidy.objects.get(assignment=assignment, entry_type=AssignmentCreditSubsidy.EntryType.BOX_SUBSIDY)
+    type_collision = accounting_client.post(
+        reverse("fiduciary:assignment_credit_subsidy_update", args=[assignment.pk, box.pk]),
+        {
+            "date": "2026-02-10",
+            "entry_type": AssignmentCreditSubsidy.EntryType.CREDIT,
+            "amount": "20000000",
+            "entity": "CAJA X",
+            "change_reason": "Intento de cambio",
+        },
+    )
+    assert type_collision.status_code == 200
+    box.refresh_from_db()
+    assert box.entry_type == AssignmentCreditSubsidy.EntryType.BOX_SUBSIDY
+
+
+@pytest.mark.django_db
+def test_interest_form_uses_receipt_date_and_value(accounting_client, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-INTEREST-FORM")
+
+    form_response = accounting_client.get(reverse("fiduciary:assignment_interest_create", args=[assignment.pk]))
+    content = form_response.content.decode()
+    assert "Recibo" in content
+    assert "Fecha" in content
+    assert "Valor" in content
+    assert "Intereses" not in content
+
+    invalid = accounting_client.post(
+        reverse("fiduciary:assignment_interest_create", args=[assignment.pk]),
+        {"receipt": "NCR498", "amount": "1500000"},
+    )
+    assert invalid.status_code == 200
+    assert not AssignmentInterest.objects.exists()
+
+    valid = accounting_client.post(
+        reverse("fiduciary:assignment_interest_create", args=[assignment.pk]),
+        {"receipt": "NCR498", "date": "2026-04-14", "amount": "1500000"},
+    )
+    assert valid.status_code == 302
+    interest = AssignmentInterest.objects.get(assignment=assignment)
+    assert interest.receipt == "NCR498"
+    assert interest.interest == "2026-04-14"
+    assert interest.amount == Decimal("1500000")
+    detail = accounting_client.get(reverse("fiduciary:assignment_detail", args=[assignment.pk])).content.decode()
+    assert "NCR498" in detail
+    assert "2026-04-14" in detail
+
+
+@pytest.mark.django_db
+def test_payment_edit_simplified_context_required_fields_and_partial_protection(
+    accounting_client,
+    accounting_admin_user,
+    active_client,
+    unit,
+):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-PAY-EDIT")
+    _, imported_file = create_imported_file(accounting_admin_user)
+    payment = Payment.objects.create(
+        assignment=assignment,
+        exact_date=date(2026, 9, 17),
+        date_precision=Payment.DatePrecision.EXACT,
+        amount=Decimal("15000000"),
+        concept="NCR001",
+        destination=Payment.Destination.FIDUCIARIA,
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=1,
+    )
+
+    form_response = accounting_client.get(reverse("fiduciary:payment_update", args=[payment.pk]))
+    content = form_response.content.decode()
+    for label in ("Proyecto", "Tipo de agrupacion", "Agrupacion", "Unidad", "Encargo fiduciario", "Fecha del pago", "Valor del pago", "Concepto", "Recibido por", "Motivo"):
+        assert label in content
+    for technical in ("Tipo de fecha", "Ano del periodo", "Mes del periodo"):
+        assert technical not in content
+
+    invalid = accounting_client.post(
+        reverse("fiduciary:payment_update", args=[payment.pk]),
+        {"exact_date": "", "amount": "", "concept": "", "destination": "", "change_reason": ""},
+    )
+    assert invalid.status_code == 200
+    payment.refresh_from_db()
+    assert payment.amount == Decimal("15000000")
+
+    valid = accounting_client.post(
+        reverse("fiduciary:payment_update", args=[payment.pk]),
+        {
+            "exact_date": "2026-09-18",
+            "amount": "16000000",
+            "concept": "NCR001 AJUSTADO",
+            "destination": Payment.Destination.CONSTRUCTORA,
+            "change_reason": "Correccion manual",
+            "assignment": "",
+            "property_unit": "",
+        },
+    )
+    assert valid.status_code == 302
+    payment.refresh_from_db()
+    assert payment.assignment_id == assignment.pk
+    assert payment.exact_date == date(2026, 9, 18)
+    assert payment.amount == Decimal("16000000")
+    assert payment.concept == "NCR001 AJUSTADO"
+    assert payment.destination == Payment.Destination.CONSTRUCTORA
+    assert AuditEvent.objects.filter(description__contains="MODIFICAR_PAGO").filter(description__contains="Correccion manual").exists()
+
+    partial = Payment.objects.create(
+        assignment=assignment,
+        date_precision=Payment.DatePrecision.MONTH,
+        period_year=2026,
+        period_month=9,
+        amount=Decimal("1000000"),
+        concept="PARCIAL",
+        destination=Payment.Destination.FIDUCIARIA,
+        movement_type=Payment.MovementType.HISTORICAL_PAYMENT,
+        source_file=imported_file,
+        source_sheet="T1",
+        source_row=2,
+    )
+    partial_response = accounting_client.post(
+        reverse("fiduciary:payment_update", args=[partial.pk]),
+        {
+            "exact_date": "2026-09-01",
+            "amount": "2000000",
+            "concept": "PARCIAL EDITADO",
+            "destination": Payment.Destination.CONSTRUCTORA,
+            "change_reason": "Intento",
+        },
+    )
+    assert partial_response.status_code == 200
+    partial.refresh_from_db()
+    assert partial.date_precision == Payment.DatePrecision.MONTH
+    assert partial.period_year == 2026
+    assert partial.period_month == 9
+    assert partial.amount == Decimal("1000000")
+
+
+@pytest.mark.django_db
+def test_commercial_cannot_modify_assignment_financial_structures(commercial_client, active_client, unit):
+    create_ownership(active_client, unit, True)
+    assignment = create_assignment(unit, active_client, "EF-PERM-FIN")
+
+    response = commercial_client.post(
+        reverse("fiduciary:assignment_credit_subsidy_create", args=[assignment.pk]),
+        {
+            "date": "2026-02-10",
+            "entry_type": AssignmentCreditSubsidy.EntryType.CREDIT,
+            "amount": "80000000",
+            "entity": "BANCO X",
+        },
+    )
+
+    assert response.status_code == 403
+    assert not AssignmentCreditSubsidy.objects.filter(assignment=assignment).exists()
+
+
+@pytest.mark.django_db
 def test_payment_list_starts_empty_until_filter_is_selected(accounting_client, accounting_admin_user, active_client, unit):
     create_ownership(active_client, unit, True)
     assignment = create_assignment(unit, active_client, "EF-PAY-EMPTY")
@@ -4167,7 +4931,7 @@ def test_assignment_detail_shows_only_monetary_cession_transfer_in_payments_tabl
 
     response = accounting_client.get(reverse("fiduciary:assignment_detail", args=[assignment.pk]))
     content = response.content.decode()
-    payments_section = content.split("<h2>Pagos registrados</h2>", 1)[1].split("<h2>Titulares del encargo</h2>", 1)[0]
+    payments_section = content.split("<h2>Pagos registrados</h2>", 1)[1].split("<h2>Cr", 1)[0]
     novelties_section = content.split("<h2>Novedades relacionadas</h2>", 1)[1]
 
     assert response.status_code == 200
@@ -4175,8 +4939,9 @@ def test_assignment_detail_shows_only_monetary_cession_transfer_in_payments_tabl
     assert "CREDITO | Recibo NCR5727" in payments_section
     assert "*TRASLADO SIN VALOR" not in payments_section
     assert "*TRASLADO SIN VALOR" in novelties_section
-    assert "<strong>2</strong><br><span class=\"text-muted\">Cantidad</span>" in payments_section
-    assert "117.136.000" in payments_section
+    assert "Cantidad" not in payments_section
+    assert "Total recibido en pagos" in content
+    assert "117.136.000" in content
 
 
 @pytest.mark.django_db
@@ -4876,6 +5641,37 @@ def test_operational_novelty_cession_creates_new_assignment_and_secondary_holder
         previous_client=active_client,
         new_client=secondary_client,
     ).exists()
+
+
+@pytest.mark.django_db
+def test_operational_novelty_accepts_factual_date_before_current_relation(
+    accounting_client, active_client, secondary_client, unit
+):
+    create_ownership(active_client, unit)
+    current_assignment = create_assignment(unit, active_client, "EF-CESSION-DATE")
+
+    response = accounting_client.post(
+        reverse("fiduciary:novelty_create"),
+        {
+            "project": unit.project_id,
+            "property_unit": unit.pk,
+            "current_assignment": current_assignment.pk,
+            "current_client": active_client.pk,
+            "novelty_type": OperationalNovelty.NoveltyType.CESSION,
+            "effective_date": "2025-05-01",
+            "new_client": secondary_client.pk,
+            "new_assignment_number": "EF-CESSION-DATE-NEW",
+            "summary": "Cesion con fecha factual",
+            "detail": "La fecha factual no debe fallar por la fecha inicial de la relacion.",
+        },
+    )
+
+    assert response.status_code == 302
+    novelty = OperationalNovelty.objects.get(new_assignment__assignment_number="EF-CESSION-DATE-NEW")
+    assert novelty.effective_date == date(2025, 5, 1)
+    current_assignment.refresh_from_db()
+    assert current_assignment.is_active is False
+    assert current_assignment.end_date == current_assignment.start_date
 
 
 @pytest.mark.django_db

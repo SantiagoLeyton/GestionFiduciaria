@@ -201,6 +201,97 @@ class FiduciaryAssignment(DatedActiveRelation):
         return self.assignment_number
 
 
+class AssignmentCreditSubsidy(TimestampedModel):
+    class EntryType(models.TextChoices):
+        CREDIT = "credit", "CRÉDITO"
+        BOX_SUBSIDY = "box_subsidy", "SUBSIDIO DE CAJA"
+        GOVERNMENT_SUBSIDY = "government_subsidy", "SUBSIDIO DE GOBIERNO"
+
+    assignment = models.ForeignKey(FiduciaryAssignment, on_delete=models.PROTECT, related_name="credit_subsidies")
+    date = models.DateField("fecha", blank=True, null=True)
+    entry_type = models.CharField("tipo", max_length=32, choices=EntryType.choices)
+    amount = models.DecimalField("valor", max_digits=18, decimal_places=2)
+    entity = models.CharField("entidad/banco", max_length=180, blank=True)
+
+    class Meta:
+        ordering = ("date", "pk")
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gte=0), name="fiduciary_credit_subsidy_amount_positive"),
+            models.CheckConstraint(
+                condition=Q(entry_type__in=["credit", "box_subsidy", "government_subsidy"]),
+                name="fiduciary_credit_subsidy_type_valid",
+            ),
+            models.UniqueConstraint(fields=["assignment", "entry_type"], name="fiduciary_credit_subsidy_assignment_type_unique"),
+        ]
+
+    def clean(self):
+        super().clean()
+        self.entity = " ".join((self.entity or "").split())
+        errors = {}
+        if not self.date:
+            errors["date"] = "La fecha es obligatoria."
+        if not self.entity:
+            errors["entity"] = "La entidad/banco es obligatoria."
+        if self.assignment_id and self.entry_type:
+            duplicate = AssignmentCreditSubsidy.objects.filter(
+                assignment_id=self.assignment_id,
+                entry_type=self.entry_type,
+            )
+            if self.pk:
+                duplicate = duplicate.exclude(pk=self.pk)
+            if duplicate.exists():
+                errors["entry_type"] = f"Este encargo ya tiene un {self.get_entry_type_display().lower()} registrado."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self):
+        return f"{self.get_entry_type_display()} - {self.assignment}"
+
+
+class AssignmentLegalDocumentation(TimestampedModel):
+    assignment = models.OneToOneField(FiduciaryAssignment, on_delete=models.PROTECT, related_name="legal_documentation")
+    registration_number = models.CharField("matricula", max_length=120, blank=True)
+    deed_date = models.DateField("fecha esc", blank=True, null=True)
+    deed_number = models.CharField("escritura", max_length=120, blank=True)
+    notary = models.CharField("notaria", max_length=120, blank=True)
+    tradition_certificate_date = models.DateField("fecha c/trad", blank=True, null=True)
+    electronic_invoice = models.CharField("factura electronica", max_length=120, blank=True)
+
+    class Meta:
+        ordering = ("assignment__assignment_number",)
+
+    def clean(self):
+        super().clean()
+        self.registration_number = " ".join((self.registration_number or "").split())
+        self.deed_number = " ".join((self.deed_number or "").split())
+        self.notary = " ".join((self.notary or "").split())
+        self.electronic_invoice = " ".join((self.electronic_invoice or "").split())
+
+    def __str__(self):
+        return f"Documentacion legal - {self.assignment}"
+
+
+class AssignmentInterest(TimestampedModel):
+    assignment = models.ForeignKey(FiduciaryAssignment, on_delete=models.PROTECT, related_name="interests")
+    receipt = models.CharField("recibo", max_length=120, blank=True)
+    interest = models.CharField("intereses", max_length=180, blank=True)
+    amount = models.DecimalField("valor", max_digits=18, decimal_places=2)
+
+    class Meta:
+        ordering = ("pk",)
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gte=0), name="fiduciary_interest_amount_positive"),
+        ]
+
+    def clean(self):
+        super().clean()
+        self.receipt = " ".join((self.receipt or "").split())
+        self.interest = " ".join((self.interest or "").split())
+
+    def __str__(self):
+        return f"{self.receipt or 'Interes'} - {self.assignment}"
+
+
 class FiduciaryAssignmentHolder(DatedActiveRelation):
     assignment = models.ForeignKey(FiduciaryAssignment, on_delete=models.PROTECT, related_name="holders")
     client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name="fiduciary_assignment_holders")
@@ -491,6 +582,7 @@ class ImportBatch(models.Model):
     class ImportType(models.TextChoices):
         HISTORICAL = "historical", "Historico"
         REPORTS = "reports", "Reportes"
+        CBR = "cbr", "CBR"
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pendiente"
@@ -546,7 +638,7 @@ class ImportBatch(models.Model):
         ordering = ("-created_at",)
         constraints = [
             models.CheckConstraint(
-                condition=Q(import_type__in=["historical", "reports"]),
+                condition=Q(import_type__in=["historical", "reports", "cbr"]),
                 name="fiduciary_import_batch_type_valid",
             ),
             models.CheckConstraint(
@@ -563,6 +655,7 @@ class ImportedFile(models.Model):
     class FileType(models.TextChoices):
         HISTORICAL = "historical", "Historico"
         REPORT = "report", "Reporte"
+        CBR = "cbr", "CBR"
         UNKNOWN = "unknown", "Desconocido"
 
     class Status(models.TextChoices):
@@ -605,7 +698,7 @@ class ImportedFile(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["batch", "sha256"], name="fiduciary_imported_file_batch_sha_unique"),
             models.CheckConstraint(
-                condition=Q(file_type__in=["historical", "report", "unknown"]),
+                condition=Q(file_type__in=["historical", "report", "cbr", "unknown"]),
                 name="fiduciary_imported_file_type_valid",
             ),
         ]
@@ -1070,6 +1163,7 @@ class ImportAppliedRecord(models.Model):
         PAYMENT = "payment", "Pago"
         HISTORICAL_NOVELTY = "historical_novelty", "Novedad historica"
         DAILY_REPORT_ROW = "daily_report_row", "Fila de reporte diario"
+        CBR_IMPORT_ROW = "cbr_import_row", "Fila CBR"
 
     class Action(models.TextChoices):
         CREATED = "created", "Creado"
@@ -1253,6 +1347,68 @@ class DailyReportRow(models.Model):
         self.concept = self.concept.strip()
         self.message = self.message.strip()
         self.resolution_note = self.resolution_note.strip()
+
+    def __str__(self):
+        return f"{self.sheet_name}:{self.row_number} - {self.normalized_assignment_number or 'sin encargo'}"
+
+
+class CBRImportRow(models.Model):
+    class Status(models.TextChoices):
+        VALID = "valid", "Listo"
+        BLOCKED = "blocked", "Con incidencias"
+        IMPORTED = "imported", "Importado"
+        SKIPPED = "skipped", "Omitido"
+        FAILED = "failed", "Fallido"
+
+    batch = models.ForeignKey(ImportBatch, on_delete=models.PROTECT, related_name="cbr_rows")
+    imported_file = models.ForeignKey(ImportedFile, on_delete=models.PROTECT, related_name="cbr_rows")
+    sheet_result = models.ForeignKey(
+        ImportedSheetResult,
+        on_delete=models.PROTECT,
+        related_name="cbr_rows",
+        blank=True,
+        null=True,
+    )
+    sheet_name = models.CharField("hoja", max_length=150)
+    row_number = models.PositiveIntegerField("fila origen")
+    original_assignment_number = models.CharField("encargo original", max_length=120, blank=True)
+    normalized_assignment_number = models.CharField("encargo normalizado", max_length=120, blank=True)
+    assignment = models.ForeignKey(
+        FiduciaryAssignment,
+        on_delete=models.PROTECT,
+        related_name="cbr_rows",
+        blank=True,
+        null=True,
+    )
+    parsed_data = models.JSONField("datos CBR validados", default=dict, blank=True)
+    original_data = models.JSONField("datos originales sanitizados", default=dict, blank=True)
+    status = models.CharField("estado", max_length=16, choices=Status.choices)
+    message = models.TextField("mensaje", blank=True)
+    applied_summary = models.JSONField("resumen aplicado", default=dict, blank=True)
+    created_at = models.DateTimeField("fecha de creacion", auto_now_add=True)
+    updated_at = models.DateTimeField("fecha de actualizacion", auto_now=True)
+
+    class Meta:
+        ordering = ("imported_file", "sheet_name", "row_number")
+        indexes = [
+            models.Index(fields=["batch", "status"], name="fid_cbr_row_batch_status_idx"),
+            models.Index(fields=["normalized_assignment_number"], name="fid_cbr_row_assignment_idx"),
+            models.Index(fields=["assignment"], name="fid_cbr_row_assignment_fk_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["imported_file", "sheet_name", "row_number"], name="fid_cbr_row_file_sheet_row_unique"),
+            models.CheckConstraint(
+                condition=Q(status__in=["valid", "blocked", "imported", "skipped", "failed"]),
+                name="fid_cbr_row_status_valid",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        self.sheet_name = self.sheet_name.strip()
+        self.original_assignment_number = self.original_assignment_number.strip()
+        self.normalized_assignment_number = self.normalized_assignment_number.strip()
+        self.message = self.message.strip()
 
     def __str__(self):
         return f"{self.sheet_name}:{self.row_number} - {self.normalized_assignment_number or 'sin encargo'}"

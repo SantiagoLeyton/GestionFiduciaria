@@ -101,15 +101,18 @@
         <div class="section-header"><h2>Incidencias agrupadas</h2><span>{{ issue_groups|length }} grupo{{ issue_groups|length|pluralize }}</span></div>
         <div class="table-responsive">
           <table class="table data-table">
-            <thead><tr><th>Codigo</th><th>Severidad</th><th>Hoja</th><th>Cantidad</th><th>Acciones</th></tr></thead>
+            <thead><tr><th>Incidencia</th><th>Descripcion</th><th>Incidencias</th><th>Filas afectadas</th><th>Accion</th></tr></thead>
             <tbody>
               {% for issue in issue_groups %}
                 <tr>
-                  <td>{{ issue.code }}</td>
-                  <td>{{ issue.severity }}</td>
-                  <td>{{ issue.sheet_result__sheet_name|default:"-" }}</td>
+                  <td>
+                    <strong>{{ issue.title }}</strong>
+                    <div class="text-muted small">{{ issue.severity_label }}</div>
+                  </td>
+                  <td>{{ issue.description }}</td>
                   <td>{{ issue.total }}</td>
-                  <td><a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:historical_import_issues' batch.pk %}?code={{ issue.code|urlencode }}&severity={{ issue.severity|urlencode }}&sheet={{ issue.sheet_result__sheet_name|urlencode }}">Ver detalles</a></td>
+                  <td>{{ issue.affected_rows }}</td>
+                  <td><a class="btn btn-sm btn-outline-success" href="{% url 'fiduciary:historical_import_issues' batch.pk %}?{{ issue.query }}">Ver detalles</a></td>
                 </tr>
               {% empty %}
                 <tr><td colspan="5">No hay incidencias registradas.</td></tr>

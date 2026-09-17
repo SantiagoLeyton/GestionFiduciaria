@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}Importar CBR | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>Importar CBR</h1><p>Cargue y aplique informacion financiera, contractual, legal e intereses por encargo.</p></div>
+        {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:cbr_import_create' %}">Nuevo CBR</a>{% endif %}
+      </div>
+      <section class="data-section">
+        <div class="table-responsive">
+          <table class="table data-table">
+            <thead><tr><th>Fecha</th><th>Archivo</th><th>Estado</th><th>Filas</th><th>Incidencias</th><th>Acciones</th></tr></thead>
+            <tbody>
+              {% for batch in batches %}
+                {% with file=batch.files.all|first %}
+                  <tr>
+                    <td>{{ batch.created_at|date:"d/m/Y H:i" }}</td>
+                    <td>{{ file.original_name|default:"-" }}</td>
+                    <td>{{ batch.get_status_display }}</td>
+                    <td>{{ batch.total_rows }}</td>
+                    <td>{{ batch.issue_count }}</td>
+                    <td><a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:cbr_import_preview' batch.pk %}">Ver</a></td>
+                  </tr>
+                {% endwith %}
+              {% empty %}
+                <tr><td colspan="6">No hay importaciones CBR registradas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

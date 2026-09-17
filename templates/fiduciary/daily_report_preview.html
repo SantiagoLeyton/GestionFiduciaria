@@ -62,7 +62,8 @@
             <tbody>
               {% for row in rows %}
                 <tr>
-                  <td>{{ row.sheet_name }}</td><td>{{ row.row_number }}</td><td>{{ row.original_assignment_number }}</td>
+                  <td>{{ row.sheet_name }}</td><td>{{ row.row_number }}</td>
+                  <td>{% if row.assignment %}<a href="{% url 'fiduciary:assignment_detail' row.assignment.pk %}">{{ row.assignment.assignment_number }}</a>{% else %}{{ row.original_assignment_number }}{% endif %}</td>
                   <td>{{ row.payment_date|date:"d/m/Y"|default:"-" }}</td><td>{{ row.amount|money_co }}</td><td>{{ row.concept|default:"-" }}</td>
                   <td>{{ row.get_status_display }}</td>
                   <td>{% if row.status == "assignment_not_found" and can_import %}<a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:daily_report_resolve' batch.pk row.pk %}">Resolver</a>{% endif %}</td>

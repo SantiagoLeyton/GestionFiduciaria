@@ -5,7 +5,7 @@ import re
 import shutil
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -18,6 +18,7 @@ from django.utils import timezone
 from fiduciary.models import (
     Client,
     DetectedStructureElement,
+    AssignmentInterest,
     FiduciaryAssignment,
     FiduciaryAssignmentHolder,
     ImportAppliedRecord,
@@ -78,6 +79,8 @@ class HistoricalImportFinalizationResult:
     created_assignment_holders: int = 0
     created_payments: int = 0
     duplicate_payments: int = 0
+    created_interests: int = 0
+    duplicate_interests: int = 0
     preserved_novelties: int = 0
     imported_observations: int = 0
     imported_novelties: int = 0
@@ -266,6 +269,8 @@ def finalize_historical_import(*, batch_id: int, user, progress_callback=None) -
                     f"Titulares de encargo creados: {result.created_assignment_holders}",
                     f"Pagos creados: {result.created_payments}",
                     f"Pagos existentes/omitidos: {result.duplicate_payments}",
+                    f"Intereses creados: {result.created_interests}",
+                    f"Intereses existentes/omitidos: {result.duplicate_interests}",
                     f"Novedades importadas: {result.imported_novelties}",
                     f"Observaciones importadas: {result.imported_observations}",
                 ],
@@ -308,6 +313,8 @@ class _FinalizationContext:
         self.created_assignment_holders = 0
         self.created_payments = 0
         self.duplicate_payments = 0
+        self.created_interests = 0
+        self.duplicate_interests = 0
         self.preserved_novelties = 0
         self.imported_observations = 0
         self.imported_novelties = 0
@@ -339,27 +346,31 @@ class _FinalizationContext:
             sheet_result = sheet_results.get(sheet.name)
             for row in sheet.rows:
                 unit = self._time("rows.units", lambda: self._unit_for_row(row))
+                historical_context = _is_historical_context_row(row)
                 if not row.assignment or not row.assignment.assignment_number:
+                    if historical_context:
+                        continue
                     if not any([row.clients, row.payments, row.reconstructed_payments]):
                         continue
                     raise HistoricalImportFinalizationError(
                         f"La fila {row.row_number} de la hoja {row.sheet_name} no tiene numero de encargo."
                     )
                 clients = self._time("rows.clients", lambda: [self._client_for_historical_client(client) for client in row.clients])
-                assignment = self._time("rows.assignments", lambda: self._assignment_for_row(row, unit))
-                for client, historical_client in zip(clients, row.clients, strict=False):
-                    ownership = self._time(
-                        "rows.ownerships",
-                        lambda client=client, historical_client=historical_client: self._ownership_for_client(
-                            unit, client, historical_client.is_primary
-                        ),
-                    )
-                    self._time(
-                        "rows.holders",
-                        lambda client=client, historical_client=historical_client, ownership=ownership: self._assignment_holder_for_client(
-                            assignment, client, historical_client.is_primary, ownership
-                        ),
-                    )
+                assignment = self._time("rows.assignments", lambda: self._assignment_for_row(row, unit, historical=historical_context))
+                if not historical_context:
+                    for client, historical_client in zip(clients, row.clients, strict=False):
+                        ownership = self._time(
+                            "rows.ownerships",
+                            lambda client=client, historical_client=historical_client: self._ownership_for_client(
+                                unit, client, historical_client.is_primary
+                            ),
+                        )
+                        self._time(
+                            "rows.holders",
+                            lambda client=client, historical_client=historical_client, ownership=ownership: self._assignment_holder_for_client(
+                                assignment, client, historical_client.is_primary, ownership
+                            ),
+                        )
                 self._remember_historical_row_state(row, unit, assignment, clients, sheet_result)
                 if row.reconstructed_payments:
                     for payment in row.reconstructed_payments:
@@ -367,6 +378,8 @@ class _FinalizationContext:
                 else:
                     for payment in row.payments:
                         self._time("rows.payments", lambda payment=payment: self._payment_for_row(assignment, payment, sheet_result))
+                for interest in row.interests:
+                    self._time("rows.interests", lambda interest=interest: self._interest_for_row(assignment, interest, sheet_result))
                 self._time("rows.observations", lambda: self._main_row_observation(row, unit, assignment, sheet_result))
         self.batch.processed_rows = workbook.statistics.valid_rows
 
@@ -413,6 +426,8 @@ class _FinalizationContext:
             created_assignment_holders=self.created_assignment_holders,
             created_payments=self.created_payments,
             duplicate_payments=self.duplicate_payments,
+            created_interests=self.created_interests,
+            duplicate_interests=self.duplicate_interests,
             preserved_novelties=self.preserved_novelties,
             imported_observations=self.imported_observations,
             imported_novelties=self.imported_novelties,
@@ -475,6 +490,7 @@ class _FinalizationContext:
             f"agrupaciones creadas: {self.created_structural_groups}; unidades creadas: {self.created_property_units}; "
             f"clientes creados: {self.created_clients}; encargos creados: {self.created_assignments}; "
             f"pagos creados: {self.created_payments}; pagos duplicados omitidos: {self.duplicate_payments}; "
+            f"intereses creados: {self.created_interests}; intereses duplicados omitidos: {self.duplicate_interests}; "
             f"novedades preservadas: {self.preserved_novelties}; "
             f"observaciones historicas importadas: {self.imported_observations}."
         )
@@ -745,7 +761,7 @@ class _FinalizationContext:
         self._trace(ImportAppliedRecord.EntityKind.UNIT_OWNERSHIP, ImportAppliedRecord.Action.CREATED, ownership.pk)
         return ownership
 
-    def _assignment_for_row(self, row, unit: PropertyUnit) -> FiduciaryAssignment:
+    def _assignment_for_row(self, row, unit: PropertyUnit, *, historical: bool = False) -> FiduciaryAssignment:
         assignment_number = row.assignment.assignment_number.strip()
         imported_dates = _assignment_operational_dates(row.assignment)
         cache_key = normalize_text(assignment_number)
@@ -772,8 +788,10 @@ class _FinalizationContext:
             assignment_number=assignment_number,
             property_unit=unit,
             start_date=self.today,
+            end_date=self.today if historical else None,
+            is_active=not historical,
             **imported_dates,
-            observations="Creado desde importacion historica.",
+            observations="Encargo historico reconstruido desde contexto historico." if historical else "Creado desde importacion historica.",
             last_change_reason=_reason(self.batch),
         )
         self.created_assignments += 1
@@ -931,6 +949,27 @@ class _FinalizationContext:
             )
         else:
             raise HistoricalImportFinalizationError("; ".join(result.errors) or "No fue posible crear el pago reconstruido.")
+
+    def _interest_for_row(self, assignment: FiduciaryAssignment, interest, sheet_result) -> None:
+        _, created = AssignmentInterest.objects.get_or_create(
+            assignment=assignment,
+            receipt=interest.receipt,
+            interest=interest.date_iso,
+            amount=interest.amount,
+        )
+        if created:
+            self.created_interests += 1
+            self._trace(
+                ImportAppliedRecord.EntityKind.FIDUCIARY_ASSIGNMENT,
+                ImportAppliedRecord.Action.CREATED,
+                assignment.pk,
+                sheet_result=sheet_result,
+                source_row=interest.source_row,
+                source_column=interest.source_column,
+                summary=f"Interes historico importado: {interest.receipt}.",
+            )
+        else:
+            self.duplicate_interests += 1
 
     def _create_historical_payment(
         self,
@@ -1219,10 +1258,25 @@ class _FinalizationContext:
         clients = self._clients_from_imported_novelty(novelty)
         summary, detail = _summary_detail_from_cells(novelty.original_cells)
         historical_section = _cell_payload_value(novelty.original_cells, "__historical_section__") or ""
-        if not clients:
-            return []
         if not any([summary, detail, assignment]):
             return []
+        if not clients:
+            return [
+                _HistoricalNoveltyState(
+                    novelty=novelty,
+                    sheet_result=novelty.sheet_result,
+                    row_number=novelty.row_number,
+                    original_cells=novelty.original_cells or [],
+                    unit=unit,
+                    assignment=assignment,
+                    client=None,
+                    summary=summary,
+                    detail=detail,
+                    historical_section=historical_section,
+                    historical_month=_int_or_none(_cell_payload_value(novelty.original_cells, "__section_month__")),
+                    historical_year=_int_or_none(_cell_payload_value(novelty.original_cells, "__section_year__")),
+                )
+            ]
         states = []
         for index, client in enumerate(clients):
             if assignment:
@@ -1352,7 +1406,7 @@ class _FinalizationContext:
             if new_state:
                 new_assignment = new_state.assignment
                 new_client = new_state.client
-            elif not has_structured_chain:
+            elif not has_structured_chain or not event.new_mention:
                 new_assignment = self._new_assignment_for_historical_change(unit=unit, previous_assignment=previous_assignment)
                 new_client = self._new_client_for_historical_change(
                     new_assignment=new_assignment,
@@ -2200,6 +2254,10 @@ def _is_exportable_historical_novelty_type(novelty_type: str, other_type: str) -
     return bool(other_type)
 
 
+def _is_historical_context_row(row) -> bool:
+    return getattr(row, "context", "main_table") != "main_table"
+
+
 def _historical_event_key(
     *,
     unit: PropertyUnit,
@@ -2554,6 +2612,10 @@ def _assignment_operational_dates(assignment) -> dict[str, object]:
 
 
 def _parse_historical_payment_date(value):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
     text = _historical_payment_date_text(value)
     if not text:
         return None

@@ -14,7 +14,7 @@
           <h1>Observaciones</h1>
           <p>Consulte observaciones importadas y registre observaciones manuales sobre unidades.</p>
         </div>
-        {% if can_update %}<a class="btn btn-success" href="{% url 'fiduciary:observation_create' %}">Nueva observacion</a>{% endif %}
+        {% if can_create %}<a class="btn btn-success" href="{% url 'fiduciary:observation_create' %}">Nueva observacion</a>{% endif %}
       </div>
 
       <form class="filter-panel real-estate-filter" method="get" data-unit-hierarchy>
@@ -22,7 +22,6 @@
         <div><label class="form-label" for="{{ filter_form.grouping_type.id_for_label }}">{{ filter_form.grouping_type.label }}</label>{{ filter_form.grouping_type }}</div>
         <div><label class="form-label" for="{{ filter_form.structural_group.id_for_label }}">{{ filter_form.structural_group.label }}</label>{{ filter_form.structural_group }}</div>
         <div><label class="form-label" for="{{ filter_form.property_unit.id_for_label }}">{{ filter_form.property_unit.label }}</label>{{ filter_form.property_unit }}</div>
-        <div><label class="form-label" for="{{ filter_form.client.id_for_label }}">{{ filter_form.client.label }}</label>{{ filter_form.client }}</div>
         <div><label class="form-label" for="{{ filter_form.document.id_for_label }}">{{ filter_form.document.label }}</label>{{ filter_form.document }}</div>
         <div><label class="form-label" for="{{ filter_form.assignment_number.id_for_label }}">{{ filter_form.assignment_number.label }}</label>{{ filter_form.assignment_number }}</div>
         <div><label class="form-label" for="{{ filter_form.origin.id_for_label }}">{{ filter_form.origin.label }}</label>{{ filter_form.origin }}</div>
@@ -35,11 +34,10 @@
         <div class="section-header"><h2>Observaciones registradas</h2><span>{{ observations|length }} registro{{ observations|length|pluralize }}</span></div>
         <div class="table-responsive">
           <table class="table align-middle data-table">
-            <thead><tr><th>Fecha</th><th>Proyecto</th><th>Agrupacion</th><th>Unidad</th><th>Encargo</th><th>Detalle</th><th>Origen</th><th>Acciones</th></tr></thead>
+            <thead><tr><th>Proyecto</th><th>Agrupacion</th><th>Unidad</th><th>Encargo</th><th>Detalle</th><th>Origen</th><th>Acciones</th></tr></thead>
             <tbody>
               {% for observation in observations %}
                 <tr>
-                  <td>{{ observation.created_at|date:"d/m/Y H:i" }}</td>
                   <td>{{ observation.property_unit.project.name }}</td>
                   <td>{% if observation.property_unit.structural_group %}{{ observation.property_unit.structural_group }}{% else %}-{% endif %}</td>
                   <td><a href="{% url 'real_estate:property_unit_history' observation.property_unit.pk %}">{{ observation.property_unit.name|default:observation.property_unit.code }}</a></td>
@@ -54,7 +52,7 @@
                   </td>
                 </tr>
               {% empty %}
-                <tr><td colspan="8">No hay observaciones con los filtros seleccionados.</td></tr>
+                <tr><td colspan="7">No hay observaciones con los filtros seleccionados.</td></tr>
               {% endfor %}
             </tbody>
           </table>

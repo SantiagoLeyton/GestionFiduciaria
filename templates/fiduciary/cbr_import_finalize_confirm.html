@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Aplicar CBR | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>Aplicar CBR</h1><p>{{ imported_file.original_name|default:"Archivo CBR" }}</p></div>
+      </div>
+      <section class="data-section">
+        {% if can_finalize %}
+          <p>Esta operacion aplicara la informacion validada del CBR a los encargos existentes. No se crearan encargos nuevos ni pagos.</p>
+          <form method="post">
+            {% csrf_token %}
+            <a class="btn btn-outline-secondary" href="{% url 'fiduciary:cbr_import_preview' batch.pk %}">Volver</a>
+            <button class="btn btn-primary" type="submit">Si, aplicar CBR</button>
+          </form>
+        {% else %}
+          <div class="alert alert-warning">Este CBR no esta listo para aplicarse.</div>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:cbr_import_preview' batch.pk %}">Volver</a>
+        {% endif %}
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

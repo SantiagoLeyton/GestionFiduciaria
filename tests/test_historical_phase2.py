@@ -6,7 +6,15 @@ from django.conf import settings
 from django.urls import reverse
 
 from fiduciary.imports.historical import HistoricalWorkbookParser, analyze_historical_import
-from fiduciary.imports.historical.data import CellData, ReconstructedHistoricalPayment
+from fiduciary.imports.historical.data import (
+    CellData,
+    HistoricalAssignment,
+    HistoricalClient,
+    HistoricalRow,
+    ReconstructedHistoricalPayment,
+    SheetData,
+    WorkbookData,
+)
 from fiduciary.imports.historical.parser import (
     RECEIPT_CATEGORY_CREDIT,
     RECEIPT_CATEGORY_ORDINARY,
@@ -1433,6 +1441,124 @@ def test_multi_sheet_workbook_keeps_independent_sheet_results(monkeypatch):
     assert parsed.statistics.sheets_processed == 3
 
 
+def test_parser_keeps_unit_and_payment_row_inside_historical_context():
+    cells = {
+        (1, 1): CellData(1, 1, "A", "A1", "Proyecto Prueba - T1"),
+        (4, 1): CellData(4, 1, "A", "A4", "ENCARGO FIDUCIARIO"),
+        (4, 2): CellData(4, 2, "B", "B4", "APTO"),
+        (4, 3): CellData(4, 3, "C", "C4", "CEDULA CLIENTE"),
+        (4, 4): CellData(4, 4, "D", "D4", "NOMBRE CLIENTE"),
+        (4, 5): CellData(4, 5, "E", "E4", "RECIBOS"),
+        (4, 6): CellData(4, 6, "F", "F4", "RECIBOS FIDUBOGOTA"),
+        (4, 7): CellData(4, 7, "G", "G4", "FECHA"),
+        (4, 8): CellData(4, 8, "H", "H4", "RECIBO FIDUCIA ENE/2026"),
+        (6, 1): CellData(6, 1, "A", "A6", "NOVEDADES"),
+        (7, 8): CellData(7, 8, "H", "H7", "CESION"),
+        (8, 1): CellData(8, 1, "A", "A8", "EF-HIST-101"),
+        (8, 2): CellData(8, 2, "B", "B8", "101"),
+        (8, 3): CellData(8, 3, "C", "C8", "123"),
+        (8, 4): CellData(8, 4, "D", "D8", "TITULAR HISTORICO"),
+        (8, 6): CellData(8, 6, "F", "F8", "NCR1"),
+        (8, 7): CellData(8, 7, "G", "G8", "ENE.1/26F"),
+        (8, 8): CellData(8, 8, "H", "H8", 1000),
+    }
+    sheet = RawSheet("T1", 1, "visible", "A1:H8", cells, set(), set())
+
+    parsed = HistoricalWorkbookParser(Path("LIBRO Contexto.xlsx"))._parse_sheet(sheet)
+
+    historical_row = next(row for row in parsed.rows if row.row_number == 8)
+    assert historical_row.context == "cession"
+    assert historical_row.unit_code == "101"
+    assert historical_row.reconstructed_payments
+    assert len(parsed.novelties) == 1
+
+
+def test_historical_context_row_does_not_replace_active_holder(accounting_admin_user):
+    project = Project.objects.create(code="P1", name="Proyecto 1")
+    grouping_type = GroupingType.objects.create(code="TOR", name="Torre")
+    group = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="T1")
+    unit = PropertyUnit.objects.create(project=project, structural_group=group, code="101", name="101")
+    current_client = Client.objects.create(
+        first_names="JUAN",
+        last_names_or_company="ACTUAL",
+        document_type=Client.DocumentType.CITIZENSHIP_ID,
+        document_number="1",
+        phone="3000000000",
+    )
+    ownership = UnitOwnership.objects.create(
+        property_unit=unit,
+        client=current_client,
+        is_primary=True,
+        is_active=True,
+        start_date="2026-01-01",
+    )
+    current_assignment = FiduciaryAssignment.objects.create(
+        property_unit=unit,
+        assignment_number="EF-ACTUAL",
+        start_date="2026-01-01",
+    )
+    FiduciaryAssignmentHolder.objects.create(
+        assignment=current_assignment,
+        client=current_client,
+        is_primary=True,
+        is_active=True,
+        start_date="2026-01-01",
+    )
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+    )
+    imported_file = ImportedFile.objects.create(
+        batch=batch,
+        original_name="historico.xlsx",
+        extension=".xlsx",
+        size_bytes=1,
+        sha256="9" * 64,
+        file_type=ImportedFile.FileType.HISTORICAL,
+    )
+    sheet_result = ImportedSheetResult.objects.create(imported_file=imported_file, sheet_name="T1", sheet_index=1)
+    row = HistoricalRow(
+        sheet_name="T1",
+        row_number=8,
+        project=project.name,
+        grouping_type=grouping_type.name,
+        grouping_code=group.code,
+        grouping_name=group.name,
+        unit_code=unit.code,
+        unit_name=unit.name,
+        assignment=HistoricalAssignment("EF-HIST-101"),
+        clients=[HistoricalClient(order=1, name="PEDRO HISTORICO", document_number="2", document_type="cc", phone="3000000001", is_primary=True)],
+        context="cession",
+    )
+    workbook = WorkbookData(
+        Path("historico.xlsx"),
+        "xlsx",
+        sheets=[
+            SheetData(
+                name="T1",
+                index=1,
+                visibility="visible",
+                used_rows=8,
+                used_columns=8,
+                classification="processable",
+                rows=[row],
+            )
+        ],
+    )
+    context = _FinalizationContext(batch=batch, imported_file=imported_file, user=accounting_admin_user)
+    context.units_by_context[("t1", "101")] = unit
+    context._preload_active_ownerships()
+
+    context.import_rows(workbook)
+
+    assert UnitOwnership.objects.filter(property_unit=unit, is_active=True, is_primary=True).get().client == current_client
+    assert FiduciaryAssignmentHolder.objects.filter(assignment=current_assignment, is_active=True, is_primary=True).get().client == current_client
+    historical_assignment = FiduciaryAssignment.objects.get(assignment_number="EF-HIST-101")
+    assert historical_assignment.is_active is False
+    assert not FiduciaryAssignmentHolder.objects.filter(assignment=historical_assignment).exists()
+
+
 def test_analyzer_persists_issue_detail_fields(monkeypatch, tmp_path, accounting_admin_user):
     batch = ImportBatch.objects.create(
         initiated_by=accounting_admin_user,
@@ -1508,20 +1634,28 @@ def test_issue_group_detail_view_lists_individual_cases(accounting_client, accou
         file_type=ImportedFile.FileType.HISTORICAL,
     )
     sheet = ImportedSheetResult.objects.create(imported_file=imported_file, sheet_name="T4", sheet_index=1)
-    ImportRowIssue.objects.create(
-        imported_file=imported_file,
-        sheet_result=sheet,
-        row_number=127,
-        column_letter="F/E",
-        unit_code="1503",
-        field_name="FECHA / RECIBOS",
-        found_value="FECHA: 20 | RECIBOS: 21",
-        cause="20 fecha(s) y 21 recibo(s).",
-        severity=ImportRowIssue.Severity.BLOCKING,
-        code="HIST_PAYMENT_DATE_RECEIPT_MISMATCH",
-        message="La cantidad de fechas no coincide con la cantidad de recibos.",
-        extra_data={"grouping_name": "Torre 4", "scope": "cell"},
-    )
+    for cause in ["20 fecha(s) y 21 recibo(s).", "Evidencia adicional en la misma fila."]:
+        ImportRowIssue.objects.create(
+            imported_file=imported_file,
+            sheet_result=sheet,
+            row_number=127,
+            column_letter="F/E",
+            unit_code="1503",
+            field_name="FECHA / RECIBOS",
+            found_value="FECHA: 20 | RECIBOS: 21",
+            cause=cause,
+            severity=ImportRowIssue.Severity.BLOCKING,
+            code="HIST_PAYMENT_DATE_RECEIPT_MISMATCH",
+            message="La cantidad de fechas no coincide con la cantidad de recibos.",
+            extra_data={
+                "context": "main_table",
+                "destination": "constructora",
+                "evidence": [
+                    {"position": 1, "date": "DIC.22/23", "receipt": "NCR28", "value": "1500000"},
+                    {"position": 2, "date": "", "receipt": "NCR31", "value": "1400000"},
+                ],
+            },
+        )
 
     response = accounting_client.get(
         reverse("fiduciary:historical_import_issues", args=[batch.pk]),
@@ -1530,21 +1664,75 @@ def test_issue_group_detail_view_lists_individual_cases(accounting_client, accou
 
     assert response.status_code == 200
     content = response.content.decode()
-    assert "<th>Codigo</th>" in content
-    assert "<th>Severidad</th>" in content
+    assert "No coincide la cantidad de fechas y recibos" in content
     assert "<th>Hoja</th>" in content
     assert "<th>Fila</th>" in content
-    assert "<th>Columna</th>" in content
-    assert "<th>Valor encontrado</th>" in content
-    assert "<th>Causa</th>" in content
+    assert "<th>Contexto</th>" in content
+    assert "<th>Informacion encontrada</th>" in content
     assert "<th>Descripcion</th>" in content
-    assert "<th>Agrupacion</th>" not in content
-    assert "<th>Alcance</th>" not in content
-    assert "<th>Unidad</th>" not in content
+    assert "<th>Incidencias</th>" in content
     assert "FECHA: 20 | RECIBOS: 21" in content
-    assert "F/E" in content
-    assert "FECHA / RECIBOS" in content
-    assert "20 fecha(s) y 21 recibo(s)." in content
+    assert "TABLA PRINCIPAL" in content
+    assert ">2</td>" in content
+    assert content.count("<td>127</td>") == 1
+    assert "<th>Codigo</th>" not in content
+
+    detail_response = accounting_client.get(
+        reverse("fiduciary:historical_import_issues", args=[batch.pk]),
+        {
+            "code": "HIST_PAYMENT_DATE_RECEIPT_MISMATCH",
+            "severity": "blocking",
+            "sheet": "T4",
+            "row": "127",
+            "context": "main_table",
+        },
+    )
+
+    detail_content = detail_response.content.decode()
+    assert detail_response.status_code == 200
+    assert "Pagos recibidos por constructora" in detail_content
+    assert "DIC.22/23" in detail_content
+    assert "NCR28" in detail_content
+    assert "1.500.000" in detail_content
+    assert "⚠ FALTA" in detail_content
+
+
+def test_historical_preview_groups_issues_with_distinct_affected_rows(accounting_client, accounting_admin_user):
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.AWAITING_RESOLUTION,
+    )
+    imported_file = ImportedFile.objects.create(
+        batch=batch,
+        original_name="historico.xlsx",
+        extension=".xlsx",
+        size_bytes=1,
+        sha256="d" * 64,
+        file_type=ImportedFile.FileType.HISTORICAL,
+    )
+    sheet = ImportedSheetResult.objects.create(imported_file=imported_file, sheet_name="T4", sheet_index=1)
+    for row_number in [10, 10, 11]:
+        ImportRowIssue.objects.create(
+            imported_file=imported_file,
+            sheet_result=sheet,
+            row_number=row_number,
+            severity=ImportRowIssue.Severity.BLOCKING,
+            code="HIST_PAYMENT_VALUE_COUNT_MISMATCH",
+            message="La cantidad de valores no permite reconstruir pagos historicos individuales.",
+            extra_data={"context": "transfer" if row_number == 11 else "main_table"},
+        )
+
+    response = accounting_client.get(reverse("fiduciary:historical_import_preview", args=[batch.pk]))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "No coincide la cantidad de valores de pago" in content
+    assert "<th>Incidencias</th>" in content
+    assert "<th>Filas afectadas</th>" in content
+    assert ">3</td>" in content
+    assert ">2</td>" in content
 
 
 def test_issue_group_detail_view_renders_formula_column_issue(accounting_client, accounting_admin_user):
@@ -1582,14 +1770,10 @@ def test_issue_group_detail_view_renders_formula_column_issue(accounting_client,
 
     content = response.content.decode()
     assert response.status_code == 200
-    assert "FORMULA_WITH_CACHED_VALUE" in content
-    assert "Advertencia" in content
+    assert "Formula con valor calculado disponible" in content
     assert "T1" in content
     assert "No aplica" in content
-    assert "AA" in content
-    assert "RECIBIDO FIDUBOGOTA FEB/2022" in content
     assert "Una o más fórmulas con valor calculado disponible." in content
-    assert "La columna contiene fórmulas" in content
 
 
 def _assignment_context():
@@ -2283,6 +2467,106 @@ def test_novelty_person_name_does_not_contaminate_structured_client_identity(acc
     assert not Client.objects.filter(first_names__icontains="KRABS", last_names_or_company__icontains="GREEN").exists()
     assert not Client.objects.filter(first_names__icontains="GREEN", last_names_or_company__icontains="KRABS").exists()
     assert novelty_text in operational.summary or novelty_text in operational.detail
+
+
+@pytest.mark.parametrize(
+    ("novelty_text", "expected_type", "expected_other_type"),
+    [
+        (
+            "NC12345 SEP.17/26 CESION ANTIC SANTIAGO LEYTON A MARIA LEYTON",
+            OperationalNovelty.NoveltyType.CESSION,
+            "",
+        ),
+        (
+            "NC12345 SEP.17/26 TRASLADO ANTIC SANTIAGO LEYTON A MARIA LEYTON",
+            OperationalNovelty.NoveltyType.OTHER,
+            "TRASLADO",
+        ),
+    ],
+)
+def test_historical_assignment_change_resolves_new_client_and_assignment_from_later_unit_state(
+    accounting_admin_user,
+    novelty_text,
+    expected_type,
+    expected_other_type,
+):
+    project = Project.objects.create(code="MTC", name="Montecielo")
+    grouping_type = GroupingType.objects.create(code="TOR", name="Torre")
+    group = StructuralGroup.objects.create(project=project, grouping_type=grouping_type, code="T1", name="T1")
+    unit = PropertyUnit.objects.create(project=project, structural_group=group, code="101", name="101")
+    maria = Client.objects.create(
+        first_names="MARIA JOSE",
+        last_names_or_company="LEYTON GOMEZ",
+        document_type=Client.DocumentType.CITIZENSHIP_ID,
+        document_number="1092454658",
+        phone="3000000001",
+    )
+    current_ownership = UnitOwnership.objects.create(
+        property_unit=unit,
+        client=maria,
+        is_primary=True,
+        is_active=True,
+        start_date="2026-09-17",
+    )
+    current_assignment = FiduciaryAssignment.objects.create(
+        property_unit=unit,
+        assignment_number="002010388888",
+        start_date="2026-09-17",
+        is_active=True,
+    )
+    FiduciaryAssignmentHolder.objects.create(
+        assignment=current_assignment,
+        client=maria,
+        is_primary=True,
+        is_active=True,
+        start_date=current_ownership.start_date,
+    )
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+    )
+    imported_file = ImportedFile.objects.create(
+        batch=batch,
+        original_name="LIBRO MONTECIELO - copia.xlsx",
+        extension=".xlsx",
+        size_bytes=1,
+        sha256="e" * 64,
+        file_type=ImportedFile.FileType.HISTORICAL,
+    )
+    sheet_result = ImportedSheetResult.objects.create(imported_file=imported_file, sheet_name="T1", sheet_index=1)
+    novelty = ImportedHistoricalNovelty.objects.create(
+        batch=batch,
+        imported_file=imported_file,
+        sheet_result=sheet_result,
+        row_number=152,
+        project_name=project.name,
+        grouping_name=group.name,
+        unit_code=unit.code,
+        assignment_number="002010377777",
+        original_cells=[
+            {"header": "CEDULA CLIENTE", "value": "1092851952"},
+            {"header": "NOMBRE CLIENTE", "value": "LEYTON SANTIAGO"},
+            {"header": "OBSERVACIONES", "value": novelty_text},
+        ],
+    )
+    context = _FinalizationContext(batch=batch, imported_file=imported_file, user=accounting_admin_user)
+    context.units_by_context[(normalize_text(group.name), normalize_text(unit.code))] = unit
+
+    context._historical_novelty_observation(novelty)
+
+    operational = OperationalNovelty.objects.get(source_novelty=novelty)
+    previous_assignment = FiduciaryAssignment.objects.get(assignment_number="002010377777")
+    santiago = Client.objects.get(document_number="1092851952")
+    assert operational.novelty_type == expected_type
+    assert operational.other_type == expected_other_type
+    assert operational.previous_client == santiago
+    assert operational.previous_assignment == previous_assignment
+    assert operational.new_client == maria
+    assert operational.new_assignment == current_assignment
+    assert UnitOwnership.objects.filter(property_unit=unit, client=maria, is_active=True, is_primary=True).count() == 1
+    assert not UnitOwnership.objects.filter(property_unit=unit, client=santiago, is_active=True).exists()
+    assert FiduciaryAssignment.objects.filter(property_unit=unit).count() == 2
 
 
 def test_global_tables_show_grouping_for_repeated_unit_code(accounting_client, accounting_admin_user):

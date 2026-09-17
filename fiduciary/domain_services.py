@@ -33,6 +33,13 @@ MANUAL_INCLUSION_TYPE = "inclusion"
 ASSIGNMENT_CHANGE_WITHOUT_NEW_ASSIGNMENT = {"withdrawal", "exclusion"}
 
 
+def _technical_end_date_for_relation(relation, factual_date):
+    start_date = getattr(relation, "start_date", None)
+    if factual_date and start_date and factual_date < start_date:
+        return start_date
+    return factual_date
+
+
 @dataclass(frozen=True)
 class OperationalNoveltyResult:
     novelty: OperationalNovelty
@@ -108,7 +115,7 @@ def change_primary_ownership(
         if previous.client_id == new_client.pk:
             raise ValidationError("El nuevo titular principal debe ser diferente al titular vigente.")
         previous.is_active = False
-        previous.end_date = effective_date
+        previous.end_date = _technical_end_date_for_relation(previous, effective_date)
         previous.last_change_reason = _reason(novelty_type, reason)
         previous.full_clean()
         previous.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])
@@ -139,7 +146,7 @@ def sync_active_assignment_primary_holder(*, unit, client: Client, effective_dat
         return
     if active_primary:
         active_primary.is_active = False
-        active_primary.end_date = effective_date
+        active_primary.end_date = _technical_end_date_for_relation(active_primary, effective_date)
         active_primary.last_change_reason = reason
         active_primary.full_clean()
         active_primary.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])
@@ -224,7 +231,7 @@ def change_assignment(
             target_assignment.save(update_fields=["last_change_reason", "updated_at"])
         else:
             current.is_active = False
-            current.end_date = effective_date
+            current.end_date = _technical_end_date_for_relation(current, effective_date)
             current.last_change_reason = operation_reason
             current.full_clean()
             current.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])
@@ -309,14 +316,14 @@ def create_primary_ownership_with_assignment(
 
         if current_primary:
             current_primary.is_active = False
-            current_primary.end_date = effective_date
+            current_primary.end_date = _technical_end_date_for_relation(current_primary, effective_date)
             current_primary.last_change_reason = reason
             current_primary.full_clean()
             current_primary.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])
 
         if current_assignment:
             current_assignment.is_active = False
-            current_assignment.end_date = effective_date
+            current_assignment.end_date = _technical_end_date_for_relation(current_assignment, effective_date)
             current_assignment.last_change_reason = reason
             current_assignment.full_clean()
             current_assignment.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])
@@ -534,7 +541,7 @@ def apply_operational_novelty(
         if novelty_type in {OperationalNovelty.NoveltyType.WITHDRAWAL, OperationalNovelty.NoveltyType.EXCLUSION}:
             if selected_holder:
                 selected_holder.is_active = False
-                selected_holder.end_date = effective_date
+                selected_holder.end_date = _technical_end_date_for_relation(selected_holder, effective_date)
                 selected_holder.last_change_reason = operation_reason
                 selected_holder.full_clean()
                 selected_holder.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])
@@ -546,7 +553,7 @@ def apply_operational_novelty(
                 ).update(is_active=False, end_date=effective_date, last_change_reason=operation_reason, updated_at=timezone.now())
             elif current_primary:
                 current_primary.is_active = False
-                current_primary.end_date = effective_date
+                current_primary.end_date = _technical_end_date_for_relation(current_primary, effective_date)
                 current_primary.last_change_reason = operation_reason
                 current_primary.full_clean()
                 current_primary.save(update_fields=["is_active", "end_date", "last_change_reason", "updated_at"])

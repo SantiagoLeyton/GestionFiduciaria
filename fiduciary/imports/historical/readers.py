@@ -1,3 +1,4 @@
+import posixpath
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -140,8 +141,10 @@ class XlsxWorkbookReader:
         for sheet in workbook.findall("main:sheets/main:sheet", NS):
             relationship_id = sheet.attrib[f"{{{REL_NS}}}id"]
             target = target_by_id[relationship_id]
-            if not target.startswith("xl/"):
-                target = "xl/" + target
+            if target.startswith("/"):
+                target = target.lstrip("/")
+            elif not target.startswith("xl/"):
+                target = posixpath.normpath("xl/" + target)
             refs.append((sheet.attrib["name"], sheet.attrib.get("state", "visible"), target))
         return refs
 
@@ -181,10 +184,10 @@ class XlsxWorkbookReader:
                 formula = formula_node.text or shared_formulas.get(formula_node.attrib.get("si"), "")
             style_id = int(cell_node.attrib.get("s", "0")) if cell_node.attrib.get("s", "0").isdigit() else 0
             is_date = style_id in date_style_ids
+            raw_value = value_node.text if value_node is not None else None
             try:
                 value = self._cell_value(cell_node, value_node, shared_strings, is_date)
             except (OverflowError, ValueError) as exc:
-                raw_value = value_node.text if value_node is not None else ""
                 value = raw_value
                 issues.append(
                     ParserIssue(
@@ -206,6 +209,7 @@ class XlsxWorkbookReader:
                 letter=excel_column_name(column),
                 coordinate=reference,
                 value=value,
+                raw_value=raw_value,
                 formula=formula,
                 has_cached_value=value_node is not None and value_node.text not in (None, ""),
                 is_date=is_date,

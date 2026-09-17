@@ -1,6 +1,6 @@
 ﻿from pathlib import Path
 from types import SimpleNamespace
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 import shutil
 import tempfile
@@ -35,6 +35,7 @@ from fiduciary.imports.historical.normalize import normalize_text
 from fiduciary.imports.historical.resolutions import auto_resolve_new_units, auto_resolve_units_for_group_resolution, update_batch_resolution_state
 from fiduciary.imports.reversion import revert_import_batch
 from fiduciary.models import (
+    AssignmentInterest,
     Client,
     DetectedStructureElement,
     FiduciaryAssignment,
@@ -253,6 +254,32 @@ def build_operational_dates_workbook(
         archive.writestr("xl/_rels/workbook.xml.rels", _xlsx_workbook_rels(1))
         archive.writestr("xl/styles.xml", _xlsx_styles())
         archive.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml(f"PROYECTO {project_name} - Torre 1", headers, [tuple(row)]))
+    return path
+
+
+def build_historical_interest_workbook(
+    path: Path,
+    *,
+    assignment_number: str = "EF-INT-101",
+    interest_text: str = "NCR498ABR.14/26F",
+    value: object = 500000,
+) -> Path:
+    headers = [
+        "APTO",
+        "ENCARGO FIDUCIARIO",
+        "CEDULA CLIENTE",
+        "NOMBRE CLIENTE",
+        "INTERESES",
+        "VALOR",
+    ]
+    rows = [("101", assignment_number, "9101", "Cliente Interes", interest_text, value)]
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", _xlsx_content_types(1))
+        archive.writestr("_rels/.rels", _xlsx_root_rels())
+        archive.writestr("xl/workbook.xml", _xlsx_workbook(["T1"]))
+        archive.writestr("xl/_rels/workbook.xml.rels", _xlsx_workbook_rels(1))
+        archive.writestr("xl/styles.xml", _xlsx_styles())
+        archive.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml("PROYECTO Intereses - Torre 1", headers, rows))
     return path
 
 
@@ -1044,6 +1071,41 @@ def test_historical_import_accepts_blank_assignment_operational_date(tmp_path, a
     assert assignment.promise_date == date(2024, 2, 20)
     assert assignment.promised_delivery_date is None
     assert assignment.actual_delivery_date == date(2024, 4, 1)
+
+
+def test_historical_contract_dates_accept_excel_date_objects():
+    assert _parse_historical_payment_date(datetime(2024, 1, 10, 0, 0)) == date(2024, 1, 10)
+    assert _parse_historical_payment_date(date(2024, 2, 20)) == date(2024, 2, 20)
+
+
+def test_historical_import_materializes_interest_receipt_date_and_value(tmp_path, accounting_admin_user):
+    source_path = build_historical_interest_workbook(tmp_path / "LIBRO_Intereses.xlsx")
+    assignment = _finalize_operational_dates_workbook(source_path, accounting_admin_user, "Intereses", "EF-INT-101")
+
+    interest = AssignmentInterest.objects.get(assignment=assignment)
+
+    assert interest.receipt == "NCR498"
+    assert interest.interest == "2026-04-14"
+    assert interest.amount == Decimal("500000.00")
+
+
+def test_historical_interest_incomplete_value_is_blocking(tmp_path, accounting_admin_user):
+    batch = ImportBatch.objects.create(
+        initiated_by=accounting_admin_user,
+        import_type=ImportBatch.ImportType.HISTORICAL,
+        load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+        status=ImportBatch.Status.ANALYZING,
+        total_files=1,
+    )
+    source_path = build_historical_interest_workbook(tmp_path / "LIBRO_Interes_Incompleto.xlsx", value="")
+
+    result = analyze_historical_import(batch=batch, file_path=source_path, grouping_type_hint="Torre")
+    batch.refresh_from_db()
+
+    assert batch.status == ImportBatch.Status.AWAITING_RESOLUTION
+    issue = ImportRowIssue.objects.get(imported_file=result.imported_file, code="HIST_INTEREST_INCOMPLETE")
+    assert issue.row_number == 5
+    assert "recibo, fecha y valor" in issue.cause
 
 
 def test_finalize_historical_import_materializes_reconstructed_payments_without_monthly_duplicate(

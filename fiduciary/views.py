@@ -5,7 +5,9 @@ import tempfile
 import unicodedata
 import uuid
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlencode
 
 from django.contrib import messages
 from django.contrib.admin.models import ADDITION, CHANGE, DELETION, LogEntry
@@ -32,10 +34,14 @@ from real_estate.querysets import with_natural_unit_order
 
 from .forms import (
     AssignmentFilterForm,
+    AssignmentCreditSubsidyForm,
     AssignmentFinancialEntityForm,
     AssignmentHolderForm,
+    AssignmentInterestForm,
+    AssignmentLegalDocumentationForm,
     AssignmentChangeForm,
     AddSecondaryAssignmentHolderForm,
+    CBRUploadForm,
     ClientFilterForm,
     ClientForm,
     ClientUpdateForm,
@@ -102,6 +108,7 @@ from .imports.cancellation import CANCELABLE_BATCH_STATUSES, cancel_import_batch
 from .imports.audit import AUDIT_SOURCE_COLUMN
 from .imports.reversion import import_reversion_summary, revert_import_batch
 from .imports.daily import analyze_daily_report_import, finalize_daily_report_import, reanalyze_daily_report_import, resolve_daily_report_assignment
+from .imports.cbr import analyze_cbr_import, finalize_cbr_import
 from .imports.historical.resolutions import (
     ImmediateResolutionError,
     apply_resolution_to_current_element,
@@ -118,6 +125,10 @@ from .imports.historical.resolutions import (
     update_batch_resolution_state,
 )
 from .models import (
+    AssignmentCreditSubsidy,
+    AssignmentInterest,
+    AssignmentLegalDocumentation,
+    CBRImportRow,
     Client,
     DailyReportRow,
     DetectedStructureElement,
@@ -197,6 +208,10 @@ def historical_batches():
 
 def daily_report_batches():
     return ImportBatch.objects.filter(import_type=ImportBatch.ImportType.REPORTS).select_related("initiated_by").order_by("-created_at", "-pk")
+
+
+def cbr_batches():
+    return ImportBatch.objects.filter(import_type=ImportBatch.ImportType.CBR).select_related("initiated_by").order_by("-created_at", "-pk")
 
 
 def _validation_error_text(exc: ValidationError) -> str:
@@ -700,11 +715,7 @@ class HistoricalImportPreviewView(FiduciaryReadRequiredMixin, DetailView):
         context["imported_file"] = imported_file
         context["summary"] = _historical_content_summary(batch, imported_file)
         context["sheets"] = imported_file.sheet_results.all() if imported_file else []
-        context["issue_groups"] = (
-            imported_file.row_issues.values("code", "severity", "sheet_result__sheet_name").annotate(total=Count("id")).order_by("code")
-            if imported_file
-            else []
-        )
+        context["issue_groups"] = _historical_issue_groups(imported_file) if imported_file else []
         context["project_element"] = detected.filter(inferred_kind=DetectedStructureElement.InferredKind.PROJECT).first()
         context["grouping_type_element"] = detected.filter(inferred_kind=DetectedStructureElement.InferredKind.GROUPING_TYPE).first()
         context["groups"] = detected.filter(inferred_kind=DetectedStructureElement.InferredKind.STRUCTURAL_GROUP).order_by(
@@ -773,7 +784,6 @@ class HistoricalImportIssueDetailView(FiduciaryReadRequiredMixin, QueryStringMix
     model = ImportRowIssue
     template_name = "fiduciary/import_issue_detail.html"
     context_object_name = "issues"
-    paginate_by = 25
 
     def dispatch(self, request, *args, **kwargs):
         self.batch = get_object_or_404(historical_batches(), pk=kwargs["pk"])
@@ -787,12 +797,16 @@ class HistoricalImportIssueDetailView(FiduciaryReadRequiredMixin, QueryStringMix
         self.code = self.request.GET.get("code", "")
         self.severity = self.request.GET.get("severity", "")
         self.sheet_name = self.request.GET.get("sheet", "")
+        self.row_number = self.request.GET.get("row", "")
+        self.issue_context = self.request.GET.get("context", "")
         if self.code:
             queryset = queryset.filter(code=self.code)
         if self.severity:
             queryset = queryset.filter(severity=self.severity)
         if self.sheet_name:
             queryset = queryset.filter(sheet_result__sheet_name=self.sheet_name)
+        if self.row_number:
+            queryset = queryset.filter(row_number=self.row_number)
         return queryset.order_by("sheet_result__sheet_index", "row_number", "column_letter", "pk")
 
     def get_context_data(self, **kwargs):
@@ -802,6 +816,22 @@ class HistoricalImportIssueDetailView(FiduciaryReadRequiredMixin, QueryStringMix
         context["code"] = self.code
         context["severity"] = self.severity
         context["sheet_name"] = self.sheet_name
+        context["issue_title"] = _issue_title(self.code)
+        context["issue_description"] = _issue_description(self.code)
+        issues = list(context["issues"])
+        if self.issue_context:
+            issues = [issue for issue in issues if _issue_context_key(issue) == self.issue_context]
+        if self.row_number:
+            context["issues"] = issues
+            context["selected_row"] = issues[0] if issues else None
+            context["selected_context_label"] = _issue_context_label(self.issue_context or (_issue_context_key(issues[0]) if issues else "main_table"))
+            context["constructora_evidence"] = _evidence_for_destination(issues, "constructora")
+            context["fiducia_evidence"] = _evidence_for_destination(issues, "fiduciaria")
+            context["other_evidence"] = _evidence_for_destination(issues, "other")
+            context["is_row_detail"] = True
+        else:
+            context["row_groups"] = _historical_issue_row_groups(issues)
+            context["is_row_detail"] = False
         return context
 
 
@@ -873,7 +903,7 @@ class HistoricalImportCancelView(FiduciaryImportRequiredMixin, DetailView):
         return context
 
 
-class ImportRevertView(FiduciaryImportRequiredMixin, DetailView):
+class ImportRevertView(FiduciaryUpdateRequiredMixin, DetailView):
     template_name = "fiduciary/import_revert_confirm.html"
     context_object_name = "batch"
     list_url_name = ""
@@ -1223,7 +1253,198 @@ def _historical_content_summary(batch: ImportBatch, imported_file: ImportedFile 
     for key, value in batch_summary.items():
         if key in content_keys or key not in summary:
             summary[key] = value
+    if batch.status in {ImportBatch.Status.COMPLETED, ImportBatch.Status.COMPLETED_WITH_ISSUES, ImportBatch.Status.REVERTED}:
+        summary["payment_entries"] = Payment.objects.filter(source_file__batch=batch).count()
     return summary
+
+
+_ISSUE_TITLES = {
+    "HIST_INVALID_DATE_HEADER": "Fecha o encabezado de fecha invalido",
+    "HIST_PAYMENT_DATE_RECEIPT_MISMATCH": "No coincide la cantidad de fechas y recibos",
+    "HIST_PAYMENT_VALUE_COUNT_MISMATCH": "No coincide la cantidad de valores de pago",
+    "HIST_PAYMENT_FORMULA_NOT_RECONSTRUCTIBLE": "Formula de pago no reconstruible",
+    "HIST_CESSION_VALUE_RECEIPT_MISMATCH": "No coincide la informacion de cesion",
+    "HIST_TRANSFER_VALUE_RECEIPT_MISMATCH": "No coincide la informacion de traslado",
+    "HIST_CREDIT_VALUE_RECEIPT_MISMATCH": "No coincide la informacion de credito/subsidio",
+    "FORMULA_WITH_CACHED_VALUE": "Formula con valor calculado disponible",
+    "FORMULA_WITHOUT_CACHED_VALUE": "Formula sin valor calculado disponible",
+    "UNKNOWN_HEADER": "Encabezado no reconocido",
+    "INVALID_HISTORICAL_ROW": "Fila historica incompleta",
+}
+
+
+_ISSUE_DESCRIPTIONS = {
+    "HIST_INVALID_DATE_HEADER": "El libro contiene una fecha o encabezado de fecha que no cumple el formato esperado.",
+    "HIST_PAYMENT_DATE_RECEIPT_MISMATCH": "Se encontraron diferencias entre los recibos y sus fechas.",
+    "HIST_PAYMENT_VALUE_COUNT_MISMATCH": "Se encontraron diferencias entre los movimientos reconstruidos y sus valores.",
+    "HIST_PAYMENT_FORMULA_NOT_RECONSTRUCTIBLE": "Una formula de pago no pudo separarse con seguridad en valores individuales.",
+    "HIST_CESSION_VALUE_RECEIPT_MISMATCH": "La informacion de cesion no permite emparejar con seguridad recibos, fechas y valores.",
+    "HIST_TRANSFER_VALUE_RECEIPT_MISMATCH": "La informacion de traslado no permite emparejar con seguridad recibos, fechas y valores.",
+    "HIST_CREDIT_VALUE_RECEIPT_MISMATCH": "La informacion de credito o subsidio no coincide con los soportes asociados.",
+    "FORMULA_WITH_CACHED_VALUE": "La columna contiene formulas y se conserva el valor calculado disponible.",
+    "FORMULA_WITHOUT_CACHED_VALUE": "La columna contiene formulas pero no trae valor calculado disponible.",
+    "UNKNOWN_HEADER": "Se encontro un encabezado que el importador no usa para el analisis historico.",
+    "INVALID_HISTORICAL_ROW": "La fila no tiene la informacion minima necesaria para interpretarse como registro historico.",
+}
+
+
+def _issue_title(code: str) -> str:
+    return _ISSUE_TITLES.get(code, code or "Incidencia")
+
+
+def _issue_description(code: str) -> str:
+    return _ISSUE_DESCRIPTIONS.get(code, "Revise la evidencia detectada en el libro.")
+
+
+def _issue_context_key(issue: ImportRowIssue) -> str:
+    extra_data = issue.extra_data if isinstance(issue.extra_data, dict) else {}
+    context = (extra_data.get("context") or "main_table").strip()
+    return context or "main_table"
+
+
+def _issue_context_label(context: str) -> str:
+    labels = {
+        "main_table": "TABLA PRINCIPAL",
+        "cession": "CESION",
+        "transfer": "TRASLADO",
+        "novelty": "NOVEDAD",
+    }
+    return labels.get(context or "main_table", (context or "TABLA PRINCIPAL").upper())
+
+
+def _historical_issue_groups(imported_file: ImportedFile) -> list[dict]:
+    grouped = {}
+    issues = imported_file.row_issues.select_related("sheet_result").order_by(
+        "code",
+        "severity",
+        "sheet_result__sheet_index",
+        "row_number",
+        "pk",
+    )
+    for issue in issues:
+        key = (issue.code, issue.severity)
+        group = grouped.setdefault(
+            key,
+            {
+                "code": issue.code,
+                "severity": issue.severity,
+                "severity_label": issue.get_severity_display(),
+                "title": _issue_title(issue.code),
+                "description": _issue_description(issue.code),
+                "total": 0,
+                "affected_rows": set(),
+                "query": urlencode({"code": issue.code, "severity": issue.severity}),
+            },
+        )
+        group["total"] += 1
+        group["affected_rows"].add(
+            (
+                issue.sheet_result.sheet_name if issue.sheet_result_id else "",
+                issue.row_number or 0,
+                _issue_context_key(issue),
+            )
+        )
+    result = []
+    for group in grouped.values():
+        group["affected_rows"] = len(group["affected_rows"])
+        result.append(group)
+    return result
+
+
+def _historical_issue_row_groups(issues: list[ImportRowIssue]) -> list[dict]:
+    grouped = {}
+    for issue in issues:
+        context_key = _issue_context_key(issue)
+        sheet_name = issue.sheet_result.sheet_name if issue.sheet_result_id else ""
+        key = (sheet_name, issue.row_number or 0, context_key)
+        row_group = grouped.setdefault(
+            key,
+            {
+                "sheet_name": sheet_name or "-",
+                "row_number": issue.row_number,
+                "context_key": context_key,
+                "context_label": _issue_context_label(context_key),
+                "total": 0,
+                "found": issue.found_value or issue.cause or issue.message,
+                "description": issue.message or _issue_description(issue.code),
+                "query": urlencode(
+                    {
+                        "code": issue.code,
+                        "severity": issue.severity,
+                        "sheet": sheet_name,
+                        "row": issue.row_number or "",
+                        "context": context_key,
+                    }
+                ),
+            },
+        )
+        row_group["total"] += 1
+    return list(grouped.values())
+
+
+def _evidence_for_destination(issues: list[ImportRowIssue], destination: str) -> list[dict]:
+    rows = []
+    for issue in issues:
+        extra_data = issue.extra_data if isinstance(issue.extra_data, dict) else {}
+        for evidence in extra_data.get("evidence") or []:
+            evidence_destination = _evidence_destination(issue, evidence)
+            if evidence_destination != destination:
+                continue
+            rows.append(
+                {
+                    "position": evidence.get("position") or len(rows) + 1,
+                    "date": _missing_label(evidence.get("date")),
+                    "receipt": _missing_label(evidence.get("receipt")),
+                    "value": _format_evidence_money(evidence.get("value")),
+                    "source": evidence.get("value_header") or evidence.get("receipt_header") or evidence.get("value_column") or "-",
+                }
+            )
+    if rows:
+        return rows
+    if destination == "other":
+        for index, issue in enumerate(issues, start=1):
+            rows.append(
+                {
+                    "position": index,
+                    "date": "-",
+                    "receipt": issue.column_letter or issue.field_name or "-",
+                    "value": issue.found_value or "-",
+                    "source": issue.cause or issue.message or "-",
+                }
+            )
+    return rows
+
+
+def _evidence_destination(issue: ImportRowIssue, evidence: dict) -> str:
+    extra_data = issue.extra_data if isinstance(issue.extra_data, dict) else {}
+    destination = (extra_data.get("destination") or evidence.get("destination") or "").lower()
+    if destination in {"fiduciaria", "fiducia"}:
+        return "fiduciaria"
+    if destination in {"constructora", "constructor"}:
+        return "constructora"
+    date_value = str(evidence.get("date") or "").upper()
+    source = str(evidence.get("value_header") or evidence.get("receipt_header") or "").upper()
+    if date_value.endswith("F") or "FIDUCIA" in source or "FIDUBOGOTA" in source:
+        return "fiduciaria"
+    if evidence.get("value") or evidence.get("receipt") or evidence.get("date"):
+        return "constructora"
+    return "other"
+
+
+def _missing_label(value) -> str:
+    return str(value).strip() if value not in (None, "") else "\u26a0 FALTA"
+
+
+def _format_evidence_money(value) -> str:
+    if value in (None, ""):
+        return "\u26a0 FALTA"
+    try:
+        amount = Decimal(str(value))
+    except Exception:
+        return str(value)
+    if amount == amount.to_integral_value():
+        return f"{int(amount):,}".replace(",", ".")
+    return f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 class DailyReportBatchListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
@@ -1361,8 +1582,19 @@ class DailyReportPreviewView(FiduciaryReadRequiredMixin, DetailView):
         context["can_import"] = can_import_fiduciary(self.request.user)
         context["imported_file"] = imported_file
         context["rows"] = rows[:50]
-        context["summary"] = _load_import_summary(batch.summary)
-        context["valid_count"] = rows.filter(status=DailyReportRow.Status.VALID).count()
+        summary = _load_import_summary(batch.summary)
+        valid_statuses = [DailyReportRow.Status.VALID, DailyReportRow.Status.IMPORTED]
+        if not summary:
+            applied_rows = rows.filter(status=DailyReportRow.Status.IMPORTED)
+            summary = {
+                "total": rows.count(),
+                "valid": rows.filter(status__in=valid_statuses).count(),
+                "duplicate": rows.filter(status=DailyReportRow.Status.DUPLICATE).count(),
+                "valid_amount": str(sum((row.amount for row in applied_rows if row.amount), start=0)),
+                "payments": applied_rows.filter(payment__isnull=False).count(),
+            }
+        context["summary"] = summary
+        context["valid_count"] = rows.filter(status__in=valid_statuses).count()
         context["duplicate_count"] = rows.filter(status=DailyReportRow.Status.DUPLICATE).count()
         context["assignment_not_found_count"] = rows.filter(status=DailyReportRow.Status.ASSIGNMENT_NOT_FOUND).count()
         context["invalid_date_count"] = rows.filter(status=DailyReportRow.Status.INVALID_DATE).count()
@@ -1505,6 +1737,127 @@ class DailyReportFinalizeView(FiduciaryImportRequiredMixin, DetailView):
             f"Reporte diario aplicado. Pagos creados: {result.imported_rows}. Duplicados omitidos: {result.duplicate_rows}.",
         )
         return redirect("fiduciary:daily_report_preview", pk=self.object.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["imported_file"] = self.object.files.order_by("order", "original_name").first()
+        context["can_finalize"] = self.object.status == ImportBatch.Status.READY
+        return context
+
+
+class CBRImportBatchListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView):
+    model = ImportBatch
+    template_name = "fiduciary/cbr_import_list.html"
+    context_object_name = "batches"
+    paginate_by = 15
+
+    def get_queryset(self):
+        return cbr_batches().prefetch_related("files")
+
+    def get_context_data(self, **kwargs):
+        return self.add_common_context(super().get_context_data(**kwargs))
+
+
+class CBRImportCreateView(FiduciaryImportRequiredMixin, FormView):
+    form_class = CBRUploadForm
+    template_name = "fiduciary/cbr_import_form.html"
+
+    def form_valid(self, form):
+        uploaded_file = form.cleaned_data["file"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = _copy_upload_to_temp(uploaded_file, temp_dir, 1)
+            batch = ImportBatch.objects.create(
+                initiated_by=self.request.user,
+                import_type=ImportBatch.ImportType.CBR,
+                load_mode=ImportBatch.LoadMode.SINGLE_FILE,
+                status=ImportBatch.Status.ANALYZING,
+                total_files=1,
+            )
+            try:
+                analyze_cbr_import(batch=batch, file_path=path)
+            except Exception:
+                logger.exception("CBR import analysis failed for batch %s and file %s.", batch.pk, uploaded_file.name)
+                batch.status = ImportBatch.Status.FAILED
+                batch.summary = "No se pudo leer o analizar el archivo CBR."
+                batch.save(update_fields=["status", "summary"])
+                messages.error(self.request, "No se pudo leer o analizar el archivo CBR.")
+            else:
+                messages.success(self.request, "Archivo CBR analizado. Revise la previsualizacion antes de aplicar.")
+            return redirect("fiduciary:cbr_import_preview", pk=batch.pk)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = "Importar CBR"
+        context["back_url"] = "fiduciary:cbr_import_list"
+        return context
+
+
+class CBRImportPreviewView(FiduciaryReadRequiredMixin, DetailView):
+    model = ImportBatch
+    template_name = "fiduciary/cbr_import_preview.html"
+    context_object_name = "batch"
+
+    def get_queryset(self):
+        return cbr_batches().prefetch_related("files", "cbr_rows", "files__row_issues")
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        batch = self.object
+        imported_file = batch.files.order_by("order", "original_name").first()
+        rows = batch.cbr_rows.select_related("assignment").order_by("sheet_name", "row_number")
+        summary = _load_import_summary(batch.summary)
+        context["imported_file"] = imported_file
+        context["rows"] = rows[:100]
+        context["summary"] = summary
+        context["valid_count"] = rows.filter(status=CBRImportRow.Status.VALID).count()
+        context["blocked_count"] = rows.filter(status=CBRImportRow.Status.BLOCKED).count()
+        context["imported_count"] = rows.filter(status=CBRImportRow.Status.IMPORTED).count()
+        context["issue_groups"] = (
+            ImportRowIssue.objects.filter(imported_file=imported_file)
+            .values("code", "message", "sheet_result__sheet_name")
+            .annotate(total=Count("id"))
+            .order_by("code", "sheet_result__sheet_name")
+            if imported_file
+            else []
+        )
+        context["issues"] = (
+            ImportRowIssue.objects.filter(imported_file=imported_file)
+            .select_related("sheet_result")
+            .order_by("sheet_result__sheet_name", "row_number", "field_name", "pk")[:100]
+            if imported_file
+            else []
+        )
+        context["can_finalize"] = can_import_fiduciary(self.request.user) and batch.status == ImportBatch.Status.READY
+        return context
+
+
+class CBRImportFinalizeView(FiduciaryImportRequiredMixin, DetailView):
+    model = ImportBatch
+    template_name = "fiduciary/cbr_import_finalize_confirm.html"
+    context_object_name = "batch"
+
+    def get_queryset(self):
+        return cbr_batches().prefetch_related("files", "cbr_rows")
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        try:
+            result = finalize_cbr_import(batch_id=self.object.pk, user=request.user)
+        except PermissionDenied:
+            raise
+        except Exception as exc:
+            messages.error(request, str(exc))
+            return redirect("fiduciary:cbr_import_preview", pk=self.object.pk)
+        messages.success(
+            request,
+            (
+                "CBR aplicado. "
+                f"Encargos afectados: {result.affected_assignments}. "
+                f"Creditos/subsidios creados: {result.credit_subsidies_created}. "
+                f"Intereses creados: {result.interests_created}."
+            ),
+        )
+        return redirect("fiduciary:cbr_import_preview", pk=self.object.pk)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -1907,7 +2260,7 @@ class ObservationListView(FiduciaryReadRequiredMixin, QueryStringMixin, ListView
         return context
 
 
-class ObservationCreateView(FiduciaryManagementRequiredMixin, CreateView):
+class ObservationCreateView(FiduciaryCreateRequiredMixin, CreateView):
     model = ImportedHistoricalObservation
     form_class = ObservationForm
     template_name = "fiduciary/observation_form.html"
@@ -1997,6 +2350,8 @@ class ObservationDeleteView(AdministrativeDeleteConfirmView):
     warning = "Esta accion eliminara la observacion seleccionada. No elimina clientes, unidades, encargos ni pagos."
 
     def dispatch(self, request, *args, **kwargs):
+        if not can_update_fiduciary(request.user):
+            raise PermissionDenied
         self.object = get_object_or_404(
             ImportedHistoricalObservation.objects.exclude(origin="historical_novelty"),
             pk=kwargs["pk"],
@@ -2320,7 +2675,7 @@ class NoveltyDeleteView(AdministrativeDeleteConfirmView):
         raise PermissionDenied("La eliminacion manual de novedades no esta permitida.")
 
 
-class NoveltyCreateView(FiduciaryManagementRequiredMixin, QueryStringMixin, FormView):
+class NoveltyCreateView(FiduciaryCreateRequiredMixin, QueryStringMixin, FormView):
     form_class = OperationalNoveltyForm
     template_name = "fiduciary/novelty_form.html"
     success_url = reverse_lazy("fiduciary:novelty_list")
@@ -2513,10 +2868,7 @@ class PaymentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
         return Payment.objects.select_related("assignment", "assignment__property_unit", "source_file")
 
     def form_valid(self, form):
-        reason = self.request.POST.get("change_reason", "").strip()
-        if not reason:
-            form.add_error(None, "Registre el motivo de la modificacion.")
-            return self.form_invalid(form)
+        reason = form.cleaned_data["change_reason"].strip()
         try:
             with transaction.atomic():
                 before = _audit_snapshot(
@@ -2550,6 +2902,15 @@ class PaymentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
         context = super().get_context_data(**kwargs)
         context["title"] = "Editar pago"
         context["payment"] = self.object
+        unit = self.object.assignment.property_unit
+        group = unit.structural_group
+        context["readonly_context"] = {
+            "Proyecto": unit.project,
+            "Tipo de agrupacion": group.grouping_type if group else None,
+            "Agrupacion": group,
+            "Unidad": unit,
+            "Encargo fiduciario": self.object.assignment.assignment_number,
+        }
         return context
 
 
@@ -2882,7 +3243,10 @@ class AssignmentDetailView(FiduciaryReadRequiredMixin, DetailView):
 
     def get_queryset(self):
         return FiduciaryAssignment.objects.select_related(
-            "property_unit", "property_unit__project", "property_unit__structural_group"
+            "property_unit",
+            "property_unit__project",
+            "property_unit__structural_group",
+            "property_unit__structural_group__grouping_type",
         ).prefetch_related(
             Prefetch("holders", queryset=FiduciaryAssignmentHolder.objects.select_related("client")),
             Prefetch(
@@ -2891,6 +3255,8 @@ class AssignmentDetailView(FiduciaryReadRequiredMixin, DetailView):
                     "exact_date", "period_year", "period_month", "source_row", "pk"
                 ),
             ),
+            Prefetch("credit_subsidies", queryset=AssignmentCreditSubsidy.objects.order_by("date", "pk")),
+            Prefetch("interests", queryset=AssignmentInterest.objects.order_by("pk")),
             Prefetch(
                 "historical_observations",
                 queryset=ImportedHistoricalObservation.objects.exclude(origin="historical_novelty").select_related("property_unit").order_by("-created_at", "-pk"),
@@ -2916,8 +3282,41 @@ class AssignmentDetailView(FiduciaryReadRequiredMixin, DetailView):
         context["movements"] = _assignment_movement_rows(payments)
         context["payment_count"] = stats["count"] or 0
         context["payment_total"] = stats["total"] or 0
-        context["first_payment"] = payments[0] if payments else None
-        context["last_payment"] = payments[-1] if payments else None
+        payment_totals = self.object.payments.aggregate(
+            constructora=Sum("amount", filter=Q(destination=Payment.Destination.CONSTRUCTORA)),
+            fiducia=Sum("amount", filter=Q(destination=Payment.Destination.FIDUCIARIA)),
+        )
+        support_totals = self.object.credit_subsidies.aggregate(
+            credit=Sum("amount", filter=Q(entry_type=AssignmentCreditSubsidy.EntryType.CREDIT)),
+            box_subsidy=Sum("amount", filter=Q(entry_type=AssignmentCreditSubsidy.EntryType.BOX_SUBSIDY)),
+            government_subsidy=Sum("amount", filter=Q(entry_type=AssignmentCreditSubsidy.EntryType.GOVERNMENT_SUBSIDY)),
+        )
+        apartment_value = self.object.property_unit.property_value or Decimal("0")
+        total_received = stats["total"] or Decimal("0")
+        constructora_total = payment_totals["constructora"] or Decimal("0")
+        fiducia_total = payment_totals["fiducia"] or Decimal("0")
+        credit_total = support_totals["credit"] or Decimal("0")
+        box_subsidy_total = support_totals["box_subsidy"] or Decimal("0")
+        government_subsidy_total = support_totals["government_subsidy"] or Decimal("0")
+        total_subsidies = box_subsidy_total + government_subsidy_total
+        cash_honor_total = Decimal("0")
+        balance_due = apartment_value - total_received
+        context["financial_summary"] = {
+            "apartment_value": apartment_value,
+            "total_received": total_received,
+            "balance_due": balance_due,
+            "constructora_payments": constructora_total,
+            "fiducia_payments": fiducia_total,
+            "credit": credit_total,
+            "box_subsidy": box_subsidy_total,
+            "government_subsidy": government_subsidy_total,
+            "total_subsidies": total_subsidies,
+            "cash_honor": cash_honor_total,
+            "own_resources": balance_due - credit_total - cash_honor_total - government_subsidy_total - box_subsidy_total,
+        }
+        context["credit_subsidies"] = list(self.object.credit_subsidies.all())
+        context["interests"] = list(self.object.interests.all())
+        context["legal_documentation"] = getattr(self.object, "legal_documentation", None)
         context["financial_entity_form"] = AssignmentFinancialEntityForm(
             initial={"financial_entity": self.object.property_unit.financial_entity or ""}
         )
@@ -2982,6 +3381,190 @@ class AssignmentFinancialEntityUpdateView(FiduciaryUpdateRequiredMixin, View):
         else:
             messages.info(request, "La entidad financiera se conserva sin cambios.")
         return redirect("fiduciary:assignment_detail", pk=assignment.pk)
+
+
+class AssignmentRelatedFormMixin(FiduciaryManagementRequiredMixin):
+    template_name = "fiduciary/assignment_related_form.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.assignment = get_object_or_404(
+            FiduciaryAssignment.objects.select_related(
+                "property_unit",
+                "property_unit__project",
+                "property_unit__structural_group",
+            ),
+            pk=kwargs["pk"],
+        )
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_success_url(self):
+        return reverse("fiduciary:assignment_detail", args=[self.assignment.pk])
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["assignment"] = self.assignment
+        context.setdefault("title", self.title)
+        return context
+
+    def audit_context(self):
+        return {
+            "Proyecto": self.assignment.property_unit.project,
+            "Agrupacion": self.assignment.property_unit.structural_group,
+            "Unidad": self.assignment.property_unit,
+            "Encargo": self.assignment.assignment_number,
+        }
+
+
+class AssignmentCreditSubsidyCreateView(AssignmentRelatedFormMixin, CreateView):
+    model = AssignmentCreditSubsidy
+    form_class = AssignmentCreditSubsidyForm
+    title = "Registrar credito o subsidio"
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["assignment"] = self.assignment
+        return kwargs
+
+    def form_valid(self, form):
+        form.instance.assignment = self.assignment
+        try:
+            response = super().form_valid(form)
+            audit_event(
+                user=self.request.user,
+                action="Registrado",
+                entity="Credito/Subsidio",
+                obj=self.object,
+                description="REGISTRAR_CREDITO_SUBSIDIO",
+                context=self.audit_context(),
+                after=_audit_snapshot(self.object, ("date", "entry_type", "amount", "entity")),
+            )
+        except IntegrityError:
+            form.add_error("entry_type", "Este encargo ya tiene un registro de este tipo.")
+            return self.form_invalid(form)
+        messages.success(self.request, "Credito o subsidio registrado correctamente.")
+        return response
+
+
+class AssignmentCreditSubsidyUpdateView(AssignmentRelatedFormMixin, UpdateView):
+    model = AssignmentCreditSubsidy
+    form_class = AssignmentCreditSubsidyForm
+    pk_url_kwarg = "record_pk"
+    title = "Modificar credito o subsidio"
+
+    def get_queryset(self):
+        return AssignmentCreditSubsidy.objects.filter(assignment=self.assignment)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["assignment"] = self.assignment
+        kwargs["require_change_reason"] = True
+        return kwargs
+
+    def form_valid(self, form):
+        before = _audit_snapshot(self.object, ("date", "entry_type", "amount", "entity"))
+        reason = form.cleaned_data["change_reason"].strip()
+        try:
+            response = super().form_valid(form)
+            audit_event(
+                user=self.request.user,
+                action="Modificado",
+                entity="Credito/Subsidio",
+                obj=self.object,
+                description=f"MODIFICAR_CREDITO_SUBSIDIO | Motivo: {reason}",
+                context=self.audit_context(),
+                before=before,
+                after=_audit_snapshot(self.object, ("date", "entry_type", "amount", "entity")),
+            )
+        except IntegrityError:
+            form.add_error("entry_type", "Este encargo ya tiene un registro de este tipo.")
+            return self.form_invalid(form)
+        messages.success(self.request, "Credito o subsidio actualizado correctamente.")
+        return response
+
+
+class AssignmentLegalDocumentationUpdateView(AssignmentRelatedFormMixin, FormView):
+    form_class = AssignmentLegalDocumentationForm
+    title = "Editar documentacion legal"
+
+    def get_documentation(self):
+        return getattr(self.assignment, "legal_documentation", None)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["instance"] = self.get_documentation()
+        return kwargs
+
+    def form_valid(self, form):
+        documentation = self.get_documentation()
+        before = _audit_snapshot(
+            documentation,
+            ("registration_number", "deed_date", "deed_number", "notary", "tradition_certificate_date", "electronic_invoice"),
+        ) if documentation else ""
+        self.object = form.save(commit=False)
+        self.object.assignment = self.assignment
+        self.object.save()
+        audit_event(
+            user=self.request.user,
+            action="Modificado" if documentation else "Registrado",
+            entity="Documentacion legal",
+            obj=self.object,
+            description="MODIFICAR_DOCUMENTACION_LEGAL" if documentation else "REGISTRAR_DOCUMENTACION_LEGAL",
+            context=self.audit_context(),
+            before=before,
+            after=_audit_snapshot(
+                self.object,
+                ("registration_number", "deed_date", "deed_number", "notary", "tradition_certificate_date", "electronic_invoice"),
+            ),
+        )
+        messages.success(self.request, "Documentacion legal actualizada correctamente.")
+        return redirect(self.get_success_url())
+
+
+class AssignmentInterestCreateView(AssignmentRelatedFormMixin, CreateView):
+    model = AssignmentInterest
+    form_class = AssignmentInterestForm
+    title = "Registrar interes"
+
+    def form_valid(self, form):
+        form.instance.assignment = self.assignment
+        response = super().form_valid(form)
+        audit_event(
+            user=self.request.user,
+            action="Registrado",
+            entity="Interes",
+            obj=self.object,
+            description="REGISTRAR_INTERES",
+            context=self.audit_context(),
+            after=_audit_snapshot(self.object, ("receipt", "interest", "amount")),
+        )
+        messages.success(self.request, "Interes registrado correctamente.")
+        return response
+
+
+class AssignmentInterestUpdateView(AssignmentRelatedFormMixin, UpdateView):
+    model = AssignmentInterest
+    form_class = AssignmentInterestForm
+    pk_url_kwarg = "record_pk"
+    title = "Modificar interes"
+
+    def get_queryset(self):
+        return AssignmentInterest.objects.filter(assignment=self.assignment)
+
+    def form_valid(self, form):
+        before = _audit_snapshot(self.object, ("receipt", "interest", "amount"))
+        response = super().form_valid(form)
+        audit_event(
+            user=self.request.user,
+            action="Modificado",
+            entity="Interes",
+            obj=self.object,
+            description="MODIFICAR_INTERES",
+            context=self.audit_context(),
+            before=before,
+            after=_audit_snapshot(self.object, ("receipt", "interest", "amount")),
+        )
+        messages.success(self.request, "Interes actualizado correctamente.")
+        return response
 
 
 class AssignmentPaymentCreateView(FiduciaryCreateRequiredMixin, FormView):
@@ -3380,9 +3963,6 @@ class AssignmentUpdateView(FiduciaryManagementRequiredMixin, UpdateView):
     template_name = "fiduciary/form.html"
     success_url = reverse_lazy("fiduciary:assignment_list")
 
-    def dispatch(self, request, *args, **kwargs):
-        raise PermissionDenied("La edicion manual directa de encargos fiduciarios no esta permitida.")
-
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["title"] = "Actualizar informacion contractual"
@@ -3627,29 +4207,4 @@ class AssignmentHolderCreateView(FiduciaryCreateRequiredMixin, View):
 
 class AssignmentHolderFinalizeView(FiduciaryManagementRequiredMixin, View):
     def post(self, request, pk):
-        holder = get_object_or_404(FiduciaryAssignmentHolder, pk=pk)
-        form = StatusReasonForm(request.POST)
-        if not form.is_valid() or not form.cleaned_data.get("end_date"):
-            messages.error(request, "Debe registrar motivo y fecha de finalizacion.")
-            return redirect("fiduciary:assignment_detail", pk=holder.assignment_id)
-        if holder.assignment.is_active and holder.is_primary:
-            messages.error(request, "No puede finalizar el titular principal mientras el encargo siga vigente.")
-            return redirect("fiduciary:assignment_detail", pk=holder.assignment_id)
-        with transaction.atomic():
-            before = _audit_snapshot(holder, ("is_active", "end_date", "last_change_reason"))
-            holder.is_active = False
-            holder.end_date = form.cleaned_data["end_date"]
-            holder.last_change_reason = form.cleaned_data["change_reason"]
-            holder.save()
-            audit_event(
-                user=request.user,
-                action="Modificado",
-                entity="Titular de encargo",
-                obj=holder,
-                description="Titular finalizado.",
-                context={"Cliente": holder.client, "Encargo": holder.assignment.assignment_number, "Motivo": holder.last_change_reason},
-                before=before,
-                after=_audit_snapshot(holder, ("is_active", "end_date", "last_change_reason")),
-            )
-        messages.success(request, "Titular finalizado correctamente.")
-        return redirect("fiduciary:assignment_detail", pk=holder.assignment_id)
+        raise PermissionDenied("La finalizacion manual de titulares de encargo no esta disponible.")

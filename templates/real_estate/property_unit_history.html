@@ -55,6 +55,24 @@
         </div>
       </form>
 
+      <section class="data-section mb-4">
+        <div class="section-header">
+          <h2>Información del encargo</h2>
+        </div>
+        <dl class="row mb-0">
+          <dt class="col-sm-3">Encargo</dt>
+          <dd class="col-sm-9">
+            {% if selected_assignment %}
+              <a href="{% url 'fiduciary:assignment_detail' selected_assignment.pk %}">{{ selected_assignment.assignment_number }}</a>
+            {% else %}
+              -
+            {% endif %}
+          </dd>
+          <dt class="col-sm-3">Total pagado</dt>
+          <dd class="col-sm-9">{{ selected_assignment_total_paid|money_co }}</dd>
+        </dl>
+      </section>
+
       <section class="data-section">
         <div class="section-header">
           <h2>Observaciones</h2>

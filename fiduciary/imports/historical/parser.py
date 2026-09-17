@@ -11,6 +11,7 @@ from .data import (
     DetectedPaymentColumn,
     HistoricalAssignment,
     HistoricalClient,
+    HistoricalInterest,
     HistoricalMonthlyPayment,
     HistoricalNovelty,
     HistoricalNoveltyCell,
@@ -115,6 +116,8 @@ HISTORICAL_HEADER_EXPECTED = {
     "promise_date": "FECHA DE PROMESA",
     "promised_delivery_date": "ENTREGA S/PROMESA",
     "actual_delivery_date": "ENTREGA REAL",
+    "interest_details": "INTERESES",
+    "interest_values": "VALOR",
 }
 
 HISTORICAL_HEADER_ALIASES = {
@@ -124,6 +127,7 @@ HISTORICAL_HEADER_ALIASES = {
     "phone": {"TELÉFONO", "TEL", "CELULAR"},
     "email": {"EMAIL", "CORREO", "CORREO ELECTRONICO"},
     "observations": {"OBSERVACION"},
+    "promised_delivery_date": {"FECHA ENTREGA SEGUN PROMESA", "FECHA ENTREGA SEGÚN PROMESA", "ENTREGA SEGUN PROMESA"},
 }
 
 HISTORICAL_HEADER_RESOLVER = HeaderResolver(
@@ -609,8 +613,33 @@ class HistoricalWorkbookParser:
                 )
                 if novelty:
                     novelties.append(novelty)
-                ignored_rows += 1
-                ignored_reasons["novelty"] += 1
+                row_added = False
+                row = self._extract_row(
+                    sheet,
+                    row_number,
+                    project,
+                    grouping_code,
+                    grouping_name,
+                    columns,
+                    payment_columns,
+                    context=_historical_row_context(novelty_section),
+                )
+                if row is not None and (row.unit_code or row.payments or row.reconstructed_payments):
+                    has_payment_signal = bool(row.payments or row.reconstructed_payments or _row_has_receipt_or_date_context(sheet, row_number, columns))
+                    date_format_issues = self._historical_date_format_issues(sheet, row_number, columns, row) if has_payment_signal else []
+                    issues.extend(date_format_issues)
+                    if has_payment_signal and not date_format_issues:
+                        issues.extend(self._receipt_date_issues(sheet, row_number, columns, row))
+                        issues.extend(self._payment_reconstruction_issues(sheet, row_number, columns, payment_columns, row))
+                        formula_issues, cached_columns = self._formula_issues_for_row(sheet, row_number, payment_columns, row)
+                        issues.extend(formula_issues)
+                        formula_cached_columns.update(cached_columns)
+                    issues.extend(self._interest_issues(sheet, row_number, columns, row))
+                    rows.append(row)
+                    row_added = True
+                if not row_added:
+                    ignored_rows += 1
+                    ignored_reasons["novelty"] += 1
                 novelty_rows += 1
                 continue
             if self._is_decorative_or_total_row(sheet, row_number):
@@ -651,10 +680,12 @@ class HistoricalWorkbookParser:
             date_format_issues = self._historical_date_format_issues(sheet, row_number, columns, row)
             issues.extend(date_format_issues)
             if date_format_issues:
+                issues.extend(self._interest_issues(sheet, row_number, columns, row))
                 rows.append(row)
                 continue
             issues.extend(self._receipt_date_issues(sheet, row_number, columns, row))
             issues.extend(self._payment_reconstruction_issues(sheet, row_number, columns, payment_columns, row))
+            issues.extend(self._interest_issues(sheet, row_number, columns, row))
             rows.append(row)
             formula_issues, cached_columns = self._formula_issues_for_row(sheet, row_number, payment_columns, row)
             issues.extend(formula_issues)
@@ -743,6 +774,8 @@ class HistoricalWorkbookParser:
                         "date_header": dates_column.header if dates_column else "",
                         "receipt_headers": [column.header for column in receipt_columns],
                         "grouping_name": row.grouping_name,
+                        "context": row.context,
+                        "evidence": _payment_evidence_from_pairs_values(group_dates, ordinary_receipts, []),
                         "scope": "cell",
                     },
                 )
@@ -924,6 +957,7 @@ class HistoricalWorkbookParser:
         grouping_name: str,
         columns: dict[str, DetectedColumn],
         payment_columns: list[DetectedPaymentColumn],
+        context: str = "main_table",
     ) -> HistoricalRow | None:
         unit = self._value(sheet, row_number, columns.get("unit"))
         area = parse_decimal(self._value(sheet, row_number, columns.get("area")))
@@ -936,11 +970,16 @@ class HistoricalWorkbookParser:
         observation = self._value(sheet, row_number, columns.get("observations")) or ""
         clients = self._extract_clients(sheet, row_number, columns, document_number)
         reconstructed_payments = self._reconstruct_payments(sheet, row_number, columns, payment_columns)
+        interests = self._extract_interests(sheet, row_number, columns)
         has_receipt_tokens = bool(self._receipt_tokens(sheet, row_number, _receipt_columns(columns)))
-        payments = [] if reconstructed_payments or has_receipt_tokens else self._extract_payments(sheet, row_number, columns, payment_columns)
+        has_payment_dates = bool(_split_historical_date_values(self._value(sheet, row_number, columns.get("payment_dates"))))
+        if context != "main_table" and not (reconstructed_payments or has_receipt_tokens or has_payment_dates):
+            payments = []
+        else:
+            payments = [] if reconstructed_payments or has_receipt_tokens else self._extract_payments(sheet, row_number, columns, payment_columns)
 
         has_minimal_unit_data = bool(unit and area is not None and property_value is not None)
-        if not any([has_minimal_unit_data, unit, assignment_number, document_number, clients, payments, reconstructed_payments]):
+        if not any([has_minimal_unit_data, unit, assignment_number, document_number, clients, payments, reconstructed_payments, interests]):
             return None
 
         return HistoricalRow(
@@ -970,7 +1009,54 @@ class HistoricalWorkbookParser:
             clients=clients,
             payments=payments,
             reconstructed_payments=reconstructed_payments,
+            interests=interests,
+            context=context,
         )
+
+    def _extract_interests(
+        self,
+        sheet: RawSheet,
+        row_number: int,
+        columns: dict[str, DetectedColumn],
+    ) -> list[HistoricalInterest]:
+        details_column = columns.get("interest_details")
+        values_column = columns.get("interest_values")
+        if not details_column or not values_column:
+            return []
+        descriptors = self._interest_descriptors(sheet, row_number, details_column)
+        values = self._individual_special_payment_values(sheet, row_number, [values_column])
+        if not descriptors or len(descriptors) != len(values):
+            return []
+        interests = []
+        for descriptor, value in zip(descriptors, values, strict=False):
+            parsed = _split_historical_interest_descriptor(descriptor)
+            if not parsed:
+                return []
+            receipt, date_value = parsed
+            parsed_date = _historical_payment_date_as_date(date_value)
+            if not receipt or not parsed_date:
+                return []
+            value_column = value["column"]
+            interests.append(
+                HistoricalInterest(
+                    receipt=receipt,
+                    date_value=date_value,
+                    date_iso=parsed_date.isoformat(),
+                    amount=value["amount"],
+                    source_row=row_number,
+                    source_column=details_column.letter,
+                    source_header=details_column.header,
+                    value_source_column=value_column.letter,
+                    value_source_header=value_column.header,
+                    value_had_formula=value["has_formula"],
+                    value_formula=value["formula"],
+                )
+            )
+        return interests
+
+    def _interest_descriptors(self, sheet: RawSheet, row_number: int, column: DetectedColumn) -> list[str]:
+        raw_value = self._value(sheet, row_number, column)
+        return _split_interest_descriptors(raw_value)
 
     def _extract_clients(
         self,
@@ -1276,7 +1362,7 @@ class HistoricalWorkbookParser:
                     field_name=column.header,
                     found_value=_formula_text(cell.formula)[:500] if cell else "",
                     cause="La formula contiene operaciones o referencias que no se pueden descomponer de forma segura sin interpretar Excel.",
-                    extra_data={"scope": "cell", "header": column.header},
+                    extra_data={"scope": "cell", "header": column.header, "context": row.context},
                 )
             )
         special_value_columns = {
@@ -1354,6 +1440,8 @@ class HistoricalWorkbookParser:
                         len(received_values),
                         len(constructora_pairs),
                         destination=PAYMENT_DESTINATION_CONSTRUCTORA,
+                        pairs=constructora_pairs,
+                        values=received_values,
                     )
                 )
         fiducia_columns = [
@@ -1401,6 +1489,8 @@ class HistoricalWorkbookParser:
                     len(pairs),
                     code=code,
                     destination=destination,
+                    pairs=pairs,
+                    values=values,
                 )
             ]
 
@@ -1537,6 +1627,8 @@ class HistoricalWorkbookParser:
         destination: str,
         year: int | None = None,
         month: int | None = None,
+        pairs: list[tuple[str, ReceiptToken, str]] | None = None,
+        values: list[dict] | None = None,
     ) -> ParserIssue:
         return ParserIssue(
             code=code,
@@ -1556,6 +1648,8 @@ class HistoricalWorkbookParser:
                 "destination": destination,
                 "year": year,
                 "month": month,
+                "context": row.context,
+                "evidence": _payment_evidence_from_pairs_values([], pairs or [], values or []),
             },
         )
 
@@ -1602,8 +1696,88 @@ class HistoricalWorkbookParser:
                 "receipt": pair[1].raw_value,
                 "date_value": pair[2],
                 "value_column": column.header,
+                "context": row.context,
+                "evidence": _payment_evidence_from_pairs_values([], [pair], [value]),
             },
         )
+
+    def _interest_issues(
+        self,
+        sheet: RawSheet,
+        row_number: int,
+        columns: dict[str, DetectedColumn],
+        row: HistoricalRow,
+    ) -> list[ParserIssue]:
+        details_column = columns.get("interest_details")
+        values_column = columns.get("interest_values")
+        if not details_column and not values_column:
+            return []
+        raw_details = self._value(sheet, row_number, details_column)
+        raw_values = self._value(sheet, row_number, values_column)
+        descriptors = _split_interest_descriptors(raw_details)
+        values = self._individual_special_payment_values(sheet, row_number, [values_column]) if values_column else []
+        has_details = bool(descriptors)
+        has_values = bool(values)
+        if not has_details and not has_values:
+            return []
+        columns_text = " / ".join(column.header for column in (details_column, values_column) if column)
+        letters = "/".join(column.letter for column in (details_column, values_column) if column)
+        found_value = f"INTERESES={clean_text(raw_details) or '-'} | VALOR={clean_text(raw_values) or '-'}"
+        if not has_details or not has_values:
+            return [
+                ParserIssue(
+                    code="HIST_INTEREST_INCOMPLETE",
+                    severity="blocking",
+                    message="El interes historico esta incompleto.",
+                    sheet_name=sheet.name,
+                    row_number=row_number,
+                    column_letter=letters,
+                    unit_code=row.unit_code or "",
+                    field_name=columns_text,
+                    found_value=found_value,
+                    cause="Un interes historico requiere recibo, fecha y valor.",
+                    extra_data={"context": row.context},
+                )
+            ]
+        parsed_descriptors = [_split_historical_interest_descriptor(descriptor) for descriptor in descriptors]
+        invalid_descriptors = [
+            descriptor
+            for descriptor, parsed in zip(descriptors, parsed_descriptors, strict=False)
+            if not parsed or not parsed[0] or not _historical_payment_date_as_date(parsed[1])
+        ]
+        if invalid_descriptors:
+            return [
+                ParserIssue(
+                    code="HIST_INTEREST_INVALID",
+                    severity="blocking",
+                    message="No fue posible separar recibo y fecha del interes historico.",
+                    sheet_name=sheet.name,
+                    row_number=row_number,
+                    column_letter=letters,
+                    unit_code=row.unit_code or "",
+                    field_name=columns_text,
+                    found_value=" | ".join(invalid_descriptors),
+                    cause="La celda INTERESES debe contener recibo y una fecha historica valida.",
+                    extra_data={"context": row.context},
+                )
+            ]
+        if len(descriptors) != len(values):
+            return [
+                ParserIssue(
+                    code="HIST_INTEREST_VALUE_COUNT_MISMATCH",
+                    severity="blocking",
+                    message="No coincide la cantidad de intereses y valores.",
+                    sheet_name=sheet.name,
+                    row_number=row_number,
+                    column_letter=letters,
+                    unit_code=row.unit_code or "",
+                    field_name=columns_text,
+                    found_value=f"{len(descriptors)} intereses / {len(values)} valores",
+                    cause="La cantidad de recibos/fechas de interes no coincide con la cantidad de valores.",
+                    extra_data={"context": row.context},
+                )
+            ]
+        return []
 
     def _separator_payment_reconstruction_issues(
         self,
@@ -1725,6 +1899,8 @@ class HistoricalWorkbookParser:
                         "payment_pair_count": len(category_pairs),
                         "receipt_count": len(category_receipts),
                         "value_count": len(category_values),
+                        "context": row.context,
+                        "evidence": _payment_evidence_from_pairs_values([], category_pairs, category_values),
                     },
                 )
             )
@@ -2164,6 +2340,49 @@ def _normalize_contact_value(value: str) -> str:
     return text.lower() if "@" in text else text
 
 
+def _historical_row_context(section: str | None) -> str:
+    normalized = normalize_text(section)
+    if "cesion" in normalized:
+        return "cession"
+    if "traslado" in normalized or "trasl" in normalized:
+        return "transfer"
+    if normalized:
+        return "novelty"
+    return "novelty"
+
+
+def _payment_evidence_from_pairs_values(date_values, receipts_or_pairs, values: list[dict]) -> list[dict]:
+    dates = list(date_values or [])
+    receipts = []
+    if receipts_or_pairs:
+        first = receipts_or_pairs[0]
+        if isinstance(first, tuple):
+            for _, token, date_value in receipts_or_pairs:
+                receipts.append(token)
+                dates.append(date_value)
+        else:
+            receipts = list(receipts_or_pairs)
+    count = max(len(dates), len(receipts), len(values))
+    evidence = []
+    for index in range(count):
+        receipt = receipts[index] if index < len(receipts) else None
+        value = values[index] if index < len(values) else None
+        column = value.get("column") if value else None
+        evidence.append(
+            {
+                "position": index + 1,
+                "date": dates[index] if index < len(dates) else "",
+                "receipt": getattr(receipt, "raw_value", "") if receipt else "",
+                "receipt_column": getattr(receipt, "source_column", "") if receipt else "",
+                "receipt_header": getattr(receipt, "source_header", "") if receipt else "",
+                "value": str(value.get("amount")) if value else "",
+                "value_column": getattr(column, "letter", "") if column else "",
+                "value_header": getattr(column, "header", "") if column else "",
+            }
+        )
+    return evidence
+
+
 def _split_phone_values(value: str | None) -> list[str]:
     text = clean_text(value)
     if not text:
@@ -2195,6 +2414,38 @@ def _split_receipt_values(value: str | None) -> list[str]:
             continue
         parts.extend(part.strip() for part in re.split(r"\s*/\s*", hyphen_part) if part.strip())
     return parts
+
+
+def _split_interest_descriptors(value: str | None) -> list[str]:
+    text = clean_text(value)
+    if not text:
+        return []
+    parts = [
+        part.strip()
+        for part in re.split(r"\s*(?:\r?\n|;|\||\s+-\s+)\s*", text)
+        if part.strip()
+    ]
+    return parts or [text]
+
+
+def _split_historical_interest_descriptor(value: str | None) -> tuple[str, str] | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    month_pattern = "|".join(STRICT_HISTORICAL_DATE_MONTHS)
+    match = re.search(
+        rf"(?P<date>(?P<month>{month_pattern})\.\d{{1,2}}/\d{{2}}F?)",
+        re.sub(r"\s+", "", text).upper(),
+    )
+    if not match:
+        return None
+    compact_text = re.sub(r"\s+", "", text)
+    date_start = match.start("date")
+    receipt = compact_text[:date_start].strip(" -/;|")
+    date_value = compact_text[date_start:match.end("date")]
+    if not receipt or not _is_valid_strict_historical_date(date_value):
+        return None
+    return receipt, date_value
 
 
 def _looks_like_embedded_historical_date_marker(value: str | None) -> bool:

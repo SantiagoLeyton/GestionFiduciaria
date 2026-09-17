@@ -515,7 +515,7 @@ def test_permissions_and_no_business_entities_created(tmp_path, accounting_admin
 
 
 def test_views_for_daily_report_flow(client, accounting_admin_user, tmp_path):
-    make_assignment("00123")
+    assignment = make_assignment("00123")
     path = tmp_path / "upload.xlsx"
     write_xlsx(path, [["N° Encargo", "Fecha Mov", "Adicion"], ["00123", "25/07/2026", 1000]])
     client.force_login(accounting_admin_user)
@@ -529,6 +529,10 @@ def test_views_for_daily_report_flow(client, accounting_admin_user, tmp_path):
     assert "Previsualizacion de reporte diario" in content
     assert f"Lote #{batch.pk}" not in content
     assert "Estado:" in content
+    assert reverse("fiduciary:assignment_detail", args=[assignment.pk]) in content
+    assert "00123" in content
+    assert "<strong>Validos</strong><div>1</div>" in content
+    assert "1.000" in content
     response = client.get(reverse("fiduciary:daily_report_finalize", args=[batch.pk]))
     assert response.status_code == 200
 

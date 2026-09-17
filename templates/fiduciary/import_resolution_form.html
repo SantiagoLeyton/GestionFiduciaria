@@ -35,13 +35,25 @@
         {% csrf_token %}
         {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
         <div class="form-grid">
-          {% for field in form %}
-            <div>
-              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
-              {{ field }}
-              {{ field.errors }}
-            </div>
-          {% endfor %}
+          {% if element.structural_context.missing_grouping_type %}
+            {% for field in form %}
+              {% if field.name == "target_kind" or field.name == "action" or field.name == "target_project" or field.name == "target_grouping_type" or field.name == "create_code" or field.name == "create_name" %}
+                <div>
+                  <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                  {{ field }}
+                  {{ field.errors }}
+                </div>
+              {% endif %}
+            {% endfor %}
+          {% else %}
+            {% for field in form %}
+              <div>
+                <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {{ field.errors }}
+              </div>
+            {% endfor %}
+          {% endif %}
         </div>
         {% if equivalent_count %}
           <div class="alert alert-warning mt-3">

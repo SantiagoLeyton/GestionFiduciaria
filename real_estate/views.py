@@ -1,6 +1,6 @@
 from django.contrib import messages
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.db.models import Prefetch
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
@@ -497,6 +497,7 @@ class PropertyUnitListView(EntityListView):
             queryset = queryset.filter(is_active=True)
         elif status == "inactive":
             queryset = queryset.filter(is_active=False)
+        queryset = queryset.annotate(total_paid=Sum("fiduciary_assignments__payments__amount"))
         return with_natural_unit_order(queryset)
 
     def get_context_data(self, **kwargs):
@@ -565,6 +566,7 @@ class PropertyUnitHistoryView(RealEstateReadRequiredMixin, DetailView):
         context = super().get_context_data(**kwargs)
         assignment_id = self.request.GET.get("assignment")
         assignments = FiduciaryAssignment.objects.filter(property_unit=self.object).order_by("-is_active", "assignment_number")
+        selected_assignment = assignments.filter(pk=assignment_id).first() if assignment_id else assignments.first()
         observations = (
             ImportedHistoricalObservation.objects.filter(property_unit=self.object).exclude(origin="historical_novelty")
             .select_related("client", "assignment", "imported_file", "batch", "sheet_result")
@@ -591,4 +593,8 @@ class PropertyUnitHistoryView(RealEstateReadRequiredMixin, DetailView):
         context["novelties"] = novelties
         context["assignment_filter_options"] = assignments
         context["selected_assignment_id"] = str(assignment_id or "")
+        context["selected_assignment"] = selected_assignment
+        context["selected_assignment_total_paid"] = (
+            selected_assignment.payments.aggregate(total=Sum("amount"))["total"] if selected_assignment else 0
+        ) or 0
         return context

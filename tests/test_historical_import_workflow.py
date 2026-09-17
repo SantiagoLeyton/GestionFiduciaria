@@ -719,7 +719,7 @@ def test_historical_preview_content_summary_uses_analyzed_file_counts_after_comp
     assert "Titulares detectados" in content
     assert "<strong>Titulares detectados</strong><div>4</div>" in content
     assert "<strong>Encargos</strong><div>4</div>" in content
-    assert "<strong>Pagos</strong><div>4</div>" in content
+    assert "<strong>Pagos</strong><div>0</div>" in content
     assert "<strong>Novedades historicas</strong><div>0</div>" in content
 
 

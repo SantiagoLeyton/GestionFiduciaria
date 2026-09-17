@@ -1,4 +1,5 @@
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from django import forms
@@ -18,6 +19,9 @@ from .domain_services import (
     validate_unit_primary_available,
 )
 from .models import (
+    AssignmentCreditSubsidy,
+    AssignmentInterest,
+    AssignmentLegalDocumentation,
     Client,
     DailyReportRow,
     DetectedStructureElement,
@@ -1107,44 +1111,58 @@ class GlobalManualPaymentForm(ManualPaymentForm):
 
 
 class PaymentEditForm(forms.ModelForm):
+    change_reason = forms.CharField(
+        label="Motivo",
+        widget=forms.Textarea(attrs={"class": "form-control", "rows": 3}),
+    )
+
     class Meta:
         model = Payment
-        fields = ("date_precision", "exact_date", "period_year", "period_month", "amount", "concept", "destination")
+        fields = ("exact_date", "amount", "concept", "destination")
         widgets = {
-            "date_precision": forms.Select(attrs={"class": "form-select"}),
             "exact_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
-            "period_year": forms.NumberInput(attrs={"class": "form-control", "min": "2000", "max": "2099"}),
-            "period_month": forms.NumberInput(attrs={"class": "form-control", "min": "1", "max": "12"}),
             "amount": forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "min": "0"}),
             "concept": forms.TextInput(attrs={"class": "form-control"}),
             "destination": forms.Select(attrs={"class": "form-select"}),
         }
         labels = {
-            "date_precision": "Tipo de fecha",
-            "exact_date": "Fecha exacta",
-            "period_year": "Ano del periodo",
-            "period_month": "Mes del periodo",
-            "amount": "Valor",
+            "exact_date": "Fecha del pago",
+            "amount": "Valor del pago",
             "concept": "Concepto",
             "destination": "Recibido por",
         }
 
     def clean_concept(self):
-        return " ".join((self.cleaned_data.get("concept") or "").split()) or None
+        concept = " ".join((self.cleaned_data.get("concept") or "").split())
+        if not concept:
+            raise ValidationError("El concepto es obligatorio.")
+        return concept
 
     def clean(self):
         cleaned = super().clean()
-        precision = cleaned.get("date_precision")
-        if precision == Payment.DatePrecision.EXACT:
-            cleaned["period_year"] = None
-            cleaned["period_month"] = None
-        elif precision == Payment.DatePrecision.MONTH:
-            cleaned["exact_date"] = None
-        elif precision == Payment.DatePrecision.AMBIGUOUS:
-            cleaned["exact_date"] = None
-            cleaned["period_year"] = None
-            cleaned["period_month"] = None
+        if self.instance and self.instance.pk and self.instance.date_precision != Payment.DatePrecision.EXACT:
+            raise ValidationError(
+                "Este pago tiene una fecha historica parcial y no puede editarse desde el formulario simplificado."
+            )
+        if not cleaned.get("exact_date"):
+            self.add_error("exact_date", "La fecha del pago es obligatoria.")
+        if cleaned.get("amount") is None:
+            self.add_error("amount", "El valor del pago es obligatorio.")
+        if not cleaned.get("destination"):
+            self.add_error("destination", "Recibido por es obligatorio.")
+        if not cleaned.get("change_reason", "").strip():
+            self.add_error("change_reason", "El motivo es obligatorio.")
         return cleaned
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        instance.date_precision = Payment.DatePrecision.EXACT
+        instance.period_year = None
+        instance.period_month = None
+        if commit:
+            instance.save()
+            self.save_m2m()
+        return instance
 
 
 class AuditFilterForm(forms.Form):
@@ -1856,11 +1874,155 @@ class AssignmentFinancialEntityForm(forms.Form):
     financial_entity = forms.CharField(
         label="Entidad financiera",
         required=False,
-        widget=forms.TextInput(attrs={"class": "form-control", "placeholder": "BANCO CAJA SOCIAL"}),
+        widget=forms.TextInput(attrs={"class": "form-control", "placeholder": "Ejemplo: Banco Caja Social"}),
     )
 
     def clean_financial_entity(self):
         return " ".join((self.cleaned_data.get("financial_entity") or "").split())
+
+
+class AssignmentCreditSubsidyForm(forms.ModelForm):
+    change_reason = forms.CharField(
+        label="Motivo",
+        required=False,
+        widget=forms.Textarea(attrs={"class": "form-control", "rows": 3}),
+    )
+
+    class Meta:
+        model = AssignmentCreditSubsidy
+        fields = ("date", "entry_type", "amount", "entity")
+        widgets = {
+            "date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+            "entry_type": forms.Select(attrs={"class": "form-select"}),
+            "amount": forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "min": "0"}),
+            "entity": forms.TextInput(attrs={"class": "form-control"}),
+        }
+        labels = {
+            "date": "Fecha",
+            "entry_type": "Tipo",
+            "amount": "Valor",
+            "entity": "Entidad/Banco",
+        }
+
+    def __init__(self, *args, assignment=None, require_change_reason=False, **kwargs):
+        self.assignment = assignment or getattr(kwargs.get("instance"), "assignment", None)
+        self.require_change_reason = require_change_reason
+        super().__init__(*args, **kwargs)
+        self.fields["date"].required = True
+        self.fields["entry_type"].required = True
+        self.fields["amount"].required = True
+        self.fields["entity"].required = True
+        self.fields["entity"].widget.attrs["required"] = "required"
+        self.fields["date"].widget.attrs["required"] = "required"
+        if self.require_change_reason:
+            self.fields["change_reason"].required = True
+            self.fields["change_reason"].widget.attrs["required"] = "required"
+        else:
+            self.fields.pop("change_reason")
+
+    def clean_amount(self):
+        amount = self.cleaned_data["amount"]
+        if amount < 0:
+            raise ValidationError("El valor no puede ser negativo.")
+        return amount
+
+    def clean_entity(self):
+        entity = " ".join((self.cleaned_data.get("entity") or "").split())
+        if not entity:
+            raise ValidationError("La entidad/banco es obligatoria.")
+        return entity
+
+    def clean(self):
+        cleaned = super().clean()
+        entry_type = cleaned.get("entry_type")
+        if self.assignment and entry_type:
+            duplicate = AssignmentCreditSubsidy.objects.filter(assignment=self.assignment, entry_type=entry_type)
+            if self.instance.pk:
+                duplicate = duplicate.exclude(pk=self.instance.pk)
+            if duplicate.exists():
+                display = dict(AssignmentCreditSubsidy.EntryType.choices).get(entry_type, "registro").lower()
+                self.add_error("entry_type", f"Este encargo ya tiene un {display} registrado.")
+        if self.require_change_reason and not cleaned.get("change_reason", "").strip():
+            self.add_error("change_reason", "El motivo es obligatorio.")
+        return cleaned
+
+
+class AssignmentLegalDocumentationForm(forms.ModelForm):
+    class Meta:
+        model = AssignmentLegalDocumentation
+        fields = (
+            "registration_number",
+            "deed_date",
+            "deed_number",
+            "notary",
+            "tradition_certificate_date",
+            "electronic_invoice",
+        )
+        widgets = {
+            "registration_number": forms.TextInput(attrs={"class": "form-control"}),
+            "deed_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+            "deed_number": forms.TextInput(attrs={"class": "form-control"}),
+            "notary": forms.TextInput(attrs={"class": "form-control"}),
+            "tradition_certificate_date": forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+            "electronic_invoice": forms.TextInput(attrs={"class": "form-control"}),
+        }
+        labels = {
+            "registration_number": "Matricula",
+            "deed_date": "Fecha esc",
+            "deed_number": "Escritura",
+            "notary": "Notaria",
+            "tradition_certificate_date": "Fecha C/Trad",
+            "electronic_invoice": "Factura electronica",
+        }
+
+
+class AssignmentInterestForm(forms.ModelForm):
+    date = forms.DateField(
+        label="Fecha",
+        widget=forms.DateInput(attrs={"class": "form-control", "type": "date"}),
+    )
+
+    class Meta:
+        model = AssignmentInterest
+        fields = ("receipt", "amount")
+        widgets = {
+            "receipt": forms.TextInput(attrs={"class": "form-control"}),
+            "amount": forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "min": "0"}),
+        }
+        labels = {
+            "receipt": "Recibo",
+            "amount": "Valor",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["receipt"].required = True
+        self.fields["amount"].required = True
+        if self.instance and self.instance.pk and self.instance.interest:
+            try:
+                self.fields["date"].initial = date.fromisoformat(self.instance.interest)
+            except ValueError:
+                self.fields["date"].initial = None
+
+    def clean_receipt(self):
+        receipt = " ".join((self.cleaned_data.get("receipt") or "").split())
+        if not receipt:
+            raise ValidationError("El recibo es obligatorio.")
+        return receipt
+
+    def clean_amount(self):
+        amount = self.cleaned_data["amount"]
+        if amount < 0:
+            raise ValidationError("El valor no puede ser negativo.")
+        return amount
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        instance.interest = self.cleaned_data["date"].isoformat()
+        if commit:
+            instance.save()
+            self.save_m2m()
+        return instance
 
 
 class OwnershipFinalizeForm(forms.Form):
@@ -2271,6 +2433,22 @@ class DailyReportUploadForm(forms.Form):
         if len(files) > MAX_IMPORT_FILES:
             raise ValidationError("Seleccione maximo 25 archivos por carga.")
         return files
+
+
+class CBRUploadForm(forms.Form):
+    file = forms.FileField(
+        label="Archivo CBR",
+        widget=forms.ClearableFileInput(attrs={"class": "form-control", "accept": ".xlsx,.xls", "data-file-list": "cbr-files"}),
+    )
+
+    def clean_file(self):
+        uploaded_file = self.cleaned_data["file"]
+        name = uploaded_file.name.lower()
+        if not (name.endswith(".xlsx") or name.endswith(".xls")):
+            raise ValidationError("Seleccione un archivo Excel .xlsx o .xls.")
+        if uploaded_file.size > MAX_IMPORT_FILE_SIZE_BYTES:
+            raise ValidationError("El archivo supera el tamano maximo permitido.")
+        return uploaded_file
 
 
 class DailyReportAssignmentResolutionForm(forms.ModelForm):

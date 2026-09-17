@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% load money %}
+
+{% block title %}Previsualizacion CBR | Centenario Gestion Fiduciaria{% endblock %}
+
+{% block body %}
+<div class="app-shell">
+  {% include "includes/sidebar.html" %}
+  <main class="main-content">
+    {% include "includes/topbar.html" %}
+    <section class="content">
+      {% include "includes/messages.html" %}
+      <div class="page-heading">
+        <div><h1>Previsualizacion CBR</h1><p>Estado: {{ batch.get_status_display }}</p></div>
+        <div class="actions-cell">
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:cbr_import_list' %}">Volver</a>
+          {% if can_finalize %}<a class="btn btn-primary" href="{% url 'fiduciary:cbr_import_finalize' batch.pk %}">Aplicar CBR</a>{% endif %}
+        </div>
+      </div>
+      <section class="data-section">
+        <div class="section-header"><h2>Resumen</h2><span>{{ imported_file.original_name|default:"Sin archivo" }}</span></div>
+        <div class="row g-3">
+          <div class="col-md-2"><strong>{{ summary.total|default:0 }}</strong><br><span class="text-muted">Filas</span></div>
+          <div class="col-md-2"><strong>{{ valid_count }}</strong><br><span class="text-muted">Listas</span></div>
+          <div class="col-md-2"><strong>{{ blocked_count }}</strong><br><span class="text-muted">Bloqueadas</span></div>
+          <div class="col-md-2"><strong>{{ imported_count }}</strong><br><span class="text-muted">Importadas</span></div>
+          <div class="col-md-2"><strong>{{ summary.assignments|default:0 }}</strong><br><span class="text-muted">Encargos resueltos</span></div>
+        </div>
+        {% if blocked_count %}<div class="alert alert-warning mt-3">El CBR tiene incidencias bloqueantes. Corrija el archivo y vuelva a analizarlo.</div>{% endif %}
+      </section>
+      <section class="data-section">
+        <div class="section-header"><h2>Incidencias</h2><span>{{ issues|length }} registros</span></div>
+        <div class="table-responsive">
+          <table class="table data-table">
+            <thead><tr><th>Hoja</th><th>Fila</th><th>Encargo/dato</th><th>Concepto</th><th>Problema</th><th>Valor encontrado</th></tr></thead>
+            <tbody>
+              {% for issue in issues %}
+                <tr>
+                  <td>{{ issue.sheet_result.sheet_name|default:"-" }}</td>
+                  <td>{{ issue.row_number|default:"-" }}</td>
+                  <td>{{ issue.unit_code|default:"-" }}</td>
+                  <td>{{ issue.field_name|default:"-" }}</td>
+                  <td>{{ issue.message }}</td>
+                  <td>{{ issue.found_value|default:"-" }}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="6">No hay incidencias bloqueantes.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="data-section">
+        <div class="section-header"><h2>Filas analizadas</h2><span>Primeras 100</span></div>
+        <div class="table-responsive">
+          <table class="table data-table align-middle">
+            <thead><tr><th>Hoja</th><th>Fila</th><th>Encargo</th><th>Informacion a aplicar</th><th>Estado</th></tr></thead>
+            <tbody>
+              {% for row in rows %}
+                <tr>
+                  <td>{{ row.sheet_name }}</td>
+                  <td>{{ row.row_number }}</td>
+                  <td>{% if row.assignment %}<a href="{% url 'fiduciary:assignment_detail' row.assignment.pk %}">{{ row.assignment.assignment_number }}</a>{% else %}{{ row.normalized_assignment_number|default:"-" }}{% endif %}</td>
+                  <td>
+                    {% if row.parsed_data.credit_subsidies %}
+                      <div><strong>Creditos/subsidios:</strong> {{ row.parsed_data.credit_subsidies|length }}</div>
+                    {% endif %}
+                    {% if row.parsed_data.contract %}
+                      <div><strong>Informacion contractual:</strong> {{ row.parsed_data.contract|length }} dato{{ row.parsed_data.contract|length|pluralize }}</div>
+                    {% endif %}
+                    {% if row.parsed_data.legal %}
+                      <div><strong>Documentacion legal:</strong> {{ row.parsed_data.legal|length }} dato{{ row.parsed_data.legal|length|pluralize }}</div>
+                    {% endif %}
+                    {% if row.parsed_data.interest %}
+                      <div><strong>Intereses:</strong> {{ row.parsed_data.interest.amount|money_co }} - {{ row.parsed_data.interest.receipt }} - {{ row.parsed_data.interest.date }}</div>
+                    {% endif %}
+                    {% if not row.parsed_data.credit_subsidies and not row.parsed_data.contract and not row.parsed_data.legal and not row.parsed_data.interest %}-{% endif %}
+                  </td>
+                  <td>{{ row.get_status_display }}{% if row.message %}<br><span class="text-muted">{{ row.message }}</span>{% endif %}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="5">No hay filas CBR analizadas.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</div>
+{% endblock %}

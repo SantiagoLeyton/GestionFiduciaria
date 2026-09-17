@@ -12,20 +12,19 @@
       <div class="page-heading">
         <div>
           <h1>{{ title }}</h1>
-          <p>Encargo {{ payment.assignment.assignment_number }} | {{ payment.assignment.property_unit }}</p>
+          <p>Encargo {{ assignment.assignment_number }} | {{ assignment.property_unit.project.name }} | {{ assignment.property_unit }}</p>
         </div>
-        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:payment_list' %}?assignment_number={{ payment.assignment.assignment_number }}">Volver</a>
+        <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Volver</a>
       </div>
 
       <section class="data-section">
         <h2>Contexto</h2>
         <div class="row g-3">
-          {% for label, value in readonly_context.items %}
-            <div class="col">
-              <strong>{% if value %}{{ value }}{% else %}-{% endif %}</strong><br>
-              <span class="text-muted">{{ label }}</span>
-            </div>
-          {% endfor %}
+          <div class="col"><strong>{{ assignment.property_unit.project.name }}</strong><br><span class="text-muted">Proyecto</span></div>
+          <div class="col"><strong>{% if assignment.property_unit.structural_group %}{{ assignment.property_unit.structural_group.grouping_type }}{% else %}-{% endif %}</strong><br><span class="text-muted">Tipo de agrupacion</span></div>
+          <div class="col"><strong>{% if assignment.property_unit.structural_group %}{{ assignment.property_unit.structural_group }}{% else %}-{% endif %}</strong><br><span class="text-muted">Agrupacion</span></div>
+          <div class="col"><strong>{{ assignment.property_unit }}</strong><br><span class="text-muted">Unidad</span></div>
+          <div class="col"><strong>{{ assignment.assignment_number }}</strong><br><span class="text-muted">Encargo fiduciario</span></div>
         </div>
       </section>
 
@@ -43,7 +42,7 @@
         </div>
         <div class="form-actions">
           <button class="btn btn-success" type="submit">Guardar</button>
-          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:payment_list' %}?assignment_number={{ payment.assignment.assignment_number }}">Cancelar</a>
+          <a class="btn btn-outline-secondary" href="{% url 'fiduciary:assignment_detail' assignment.pk %}">Cancelar</a>
         </div>
       </form>
     </section>

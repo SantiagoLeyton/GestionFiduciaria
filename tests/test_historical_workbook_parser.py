@@ -188,12 +188,14 @@ def test_parser_extracts_montecielo_style_title_and_preserves_novelty_section():
 
     parsed_sheet = parser._parse_sheet(sheet)
 
-    assert len(parsed_sheet.rows) == 1
+    assert len(parsed_sheet.rows) == 2
     assert parsed_sheet.rows[0].project == "Montecielo"
     assert parsed_sheet.rows[0].grouping_name == "T2"
+    assert parsed_sheet.rows[1].context == "novelty"
+    assert parsed_sheet.rows[1].unit_code == "303"
     assert parsed_sheet.ignored_row_reasons["novelty_section"] == 1
     assert parsed_sheet.ignored_row_reasons["novelty_subtitle"] == 1
-    assert parsed_sheet.ignored_row_reasons["novelty"] == 1
+    assert parsed_sheet.ignored_row_reasons.get("novelty", 0) == 0
     assert len(parsed_sheet.novelties) == 1
     novelty = parsed_sheet.novelties[0]
     assert isinstance(novelty, HistoricalNovelty)
@@ -342,7 +344,7 @@ def test_main_table_payment_mismatch_still_blocks_after_novelty_section_fix():
     assert "HIST_PAYMENT_DATE_RECEIPT_MISMATCH" in {issue.code for issue in parsed_sheet.issues}
 
 
-def test_novelty_section_rows_do_not_generate_payment_reconstruction_issues():
+def test_novelty_section_rows_are_preserved_and_diagnosed_when_they_have_payment_evidence():
     cells = {
         (1, 1): CellData(1, 1, "A", "A1", "CONJUNTO CERRADO ROUNDTRIP T1"),
         (4, 1): CellData(4, 1, "A", "A4", "ENCARGO FIDUCIARIO"),
@@ -381,15 +383,16 @@ def test_novelty_section_rows_do_not_generate_payment_reconstruction_issues():
     parsed_sheet = HistoricalWorkbookParser(Path("roundtrip.xlsx"), grouping_type_hint="Torre")._parse_sheet(sheet)
     issue_codes = {issue.code for issue in parsed_sheet.issues}
 
-    assert len(parsed_sheet.rows) == 1
+    assert len(parsed_sheet.rows) == 2
+    assert parsed_sheet.rows[1].context == "novelty"
     assert len(parsed_sheet.novelties) == 1
     assert parsed_sheet.novelties[0].row_number == 7
-    assert "HIST_PAYMENT_DATE_RECEIPT_MISMATCH" not in issue_codes
+    assert "HIST_PAYMENT_DATE_RECEIPT_MISMATCH" in issue_codes
     assert "HIST_PAYMENT_VALUE_COUNT_MISMATCH" not in issue_codes
     assert "HIST_CESSION_VALUE_RECEIPT_MISMATCH" not in issue_codes
     assert "HIST_TRANSFER_VALUE_RECEIPT_MISMATCH" not in issue_codes
     assert parsed_sheet.ignored_row_reasons["novelty_section"] == 1
-    assert parsed_sheet.ignored_row_reasons["novelty"] == 1
+    assert parsed_sheet.ignored_row_reasons.get("novelty", 0) == 0
 
 
 def test_parser_statistics_from_real_workbook(parsed_workbook):

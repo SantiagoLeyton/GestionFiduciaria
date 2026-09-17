@@ -11,6 +11,7 @@ class CellData:
     letter: str
     coordinate: str
     value: Any = None
+    raw_value: str | None = None
     formula: str | None = None
     has_cached_value: bool = False
     is_date: bool = False
@@ -113,6 +114,21 @@ class ReconstructedHistoricalPayment:
 
 
 @dataclass(frozen=True)
+class HistoricalInterest:
+    receipt: str
+    date_value: str
+    date_iso: str
+    amount: Decimal
+    source_row: int
+    source_column: str
+    source_header: str
+    value_source_column: str
+    value_source_header: str
+    value_had_formula: bool = False
+    value_formula: str = ""
+
+
+@dataclass(frozen=True)
 class HistoricalNoveltyCell:
     coordinate: str
     column_letter: str
@@ -159,6 +175,8 @@ class HistoricalRow:
     clients: list[HistoricalClient] = field(default_factory=list)
     payments: list[HistoricalMonthlyPayment] = field(default_factory=list)
     reconstructed_payments: list[ReconstructedHistoricalPayment] = field(default_factory=list)
+    interests: list[HistoricalInterest] = field(default_factory=list)
+    context: str = "main_table"
 
 
 @dataclass(frozen=True)

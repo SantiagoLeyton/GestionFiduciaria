@@ -42,7 +42,7 @@
         <div class="section-header"><h2>Unidades registradas</h2><span>{{ property_units|length }} registro{{ property_units|length|pluralize }}</span></div>
         <div class="table-responsive">
           <table class="table align-middle data-table">
-            <thead><tr><th>Codigo</th><th>Nombre</th><th>Proyecto</th><th>Agrupacion</th><th>Titular</th><th>Encargo fiduciario</th><th>Ultimo pago</th><th>Estado</th><th>Acciones</th></tr></thead>
+            <thead><tr><th>Codigo</th><th>Nombre</th><th>Proyecto</th><th>Agrupacion</th><th>Titular</th><th>Encargo fiduciario</th><th>Total pagado</th><th>Estado</th><th>Acciones</th></tr></thead>
             <tbody>
               {% for entity in property_units %}
                 <tr>
@@ -62,16 +62,7 @@
                     {% endfor %}
                   </td>
                   <td>
-                    {% with assignment=entity.active_assignments|first %}
-                      {% if assignment and assignment.prefetched_payments %}
-                        {% with payment=assignment.prefetched_payments|last %}
-                          {% if payment.exact_date %}{{ payment.exact_date }}{% else %}{{ payment.period_month }}/{{ payment.period_year }}{% endif %}
-                          - {{ payment.amount|money_co }}
-                        {% endwith %}
-                      {% else %}
-                        No se han realizado pagos aun
-                      {% endif %}
-                    {% endwith %}
+                    {{ entity.total_paid|default:0|money_co }}
                   </td>
                   <td>{% if entity.is_active %}<span class="status-pill status-active">Activo</span>{% else %}<span class="status-pill status-inactive">Inactivo</span>{% endif %}</td>
                   <td class="actions-cell">

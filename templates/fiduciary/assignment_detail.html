@@ -32,14 +32,36 @@
         {% endif %}
       </section>
       <section class="data-section">
-        <div class="section-header">
-          <h2>Informacion contractual</h2>
+        <h2>Datos de la unidad</h2>
+        <div class="row g-3">
+          <div class="col-md-3"><strong>{{ assignment.property_unit.project.name }}</strong><br><span class="text-muted">Proyecto</span></div>
+          <div class="col-md-3"><strong>{% if assignment.property_unit.structural_group and assignment.property_unit.structural_group.grouping_type %}{{ assignment.property_unit.structural_group.grouping_type.name }}{% else %}-{% endif %}</strong><br><span class="text-muted">Tipo de agrupacion</span></div>
+          <div class="col-md-3"><strong><a href="{% url 'real_estate:property_unit_history' assignment.property_unit.pk %}?assignment={{ assignment.pk }}">{{ assignment.property_unit.name|default:assignment.property_unit.code }}</a></strong><br><span class="text-muted">Unidad</span></div>
+          <div class="col-md-3"><strong>{% if assignment.property_unit.area %}{{ assignment.property_unit.area }} m2{% else %}-{% endif %}</strong><br><span class="text-muted">Area</span></div>
         </div>
-        <div class="row g-3 mb-3">
-          <div class="col"><strong>{% if assignment.adhesion_contract_date %}{{ assignment.adhesion_contract_date|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</strong><br><span class="text-muted">Contrato de adhesion</span></div>
-          <div class="col"><strong>{% if assignment.promise_date %}{{ assignment.promise_date|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</strong><br><span class="text-muted">Promesa</span></div>
-          <div class="col"><strong>{% if assignment.promised_delivery_date %}{{ assignment.promised_delivery_date|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</strong><br><span class="text-muted">Entrega segun promesa</span></div>
-          <div class="col"><strong>{% if assignment.actual_delivery_date %}{{ assignment.actual_delivery_date|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</strong><br><span class="text-muted">Entrega real</span></div>
+      </section>
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Titulares del encargo</h2>
+          {% if can_create and assignment.is_active %}
+            <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_secondary_create' assignment.pk %}">AÃ±adir cliente secundario</a>
+          {% endif %}
+        </div>
+        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Cliente</th><th>Rol</th><th>Estado</th></tr></thead><tbody>
+          {% for holder in assignment.holders.all %}
+            <tr><td><a href="{% url 'fiduciary:client_detail' holder.client.pk %}">{{ holder.client.full_name }}</a></td><td>{% if holder.is_primary %}Principal{% else %}Secundario{% endif %}</td><td>{% if holder.is_active %}Vigente{% else %}Finalizado{% endif %}</td></tr>
+          {% empty %}<tr><td colspan="3">Sin titulares registrados.</td></tr>{% endfor %}
+        </tbody></table></div>
+      </section>
+      <section class="data-section">
+        <h2>Resumen financiero</h2>
+        <div class="row g-3">
+          <div class="col-md-4"><strong>{{ financial_summary.apartment_value|money_co }}</strong><br><span class="text-muted">Valor del inmueble</span></div>
+          <div class="col-md-4"><strong>{{ financial_summary.total_received|money_co }}</strong><br><span class="text-muted">Total recibido en pagos</span></div>
+          <div class="col-md-4"><strong>{{ financial_summary.balance_due|money_co }}</strong><br><span class="text-muted">Saldo por cobrar</span></div>
+          <div class="col-md-4"><strong>{{ financial_summary.credit|money_co }}</strong><br><span class="text-muted">Total crédito</span></div>
+          <div class="col-md-4"><strong>{{ financial_summary.total_subsidies|money_co }}</strong><br><span class="text-muted">Total subsidios</span></div>
+          <div class="col-md-4"><strong>{{ financial_summary.own_resources|money_co }}</strong><br><span class="text-muted">Recursos propios</span></div>
         </div>
       </section>
       <section class="data-section">
@@ -48,6 +70,10 @@
           {% if can_create and assignment_operationally_active %}
             <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_payment_create' assignment.pk %}">Registrar pago</a>
           {% endif %}
+        </div>
+        <div class="row g-3 mb-3">
+          <div class="col"><strong>{{ financial_summary.constructora_payments|money_co }}</strong><br><span class="text-muted">Pagos constructora</span></div>
+          <div class="col"><strong>{{ financial_summary.fiducia_payments|money_co }}</strong><br><span class="text-muted">Pagos fiducia</span></div>
         </div>
         <form class="row g-2 mb-3 align-items-end" method="post" action="{% url 'fiduciary:assignment_financial_entity_update' assignment.pk %}">
           {% csrf_token %}
@@ -61,14 +87,7 @@
             </div>
           {% endif %}
         </form>
-        {% if payment_count %}
-          <div class="row g-3 mb-3">
-            <div class="col"><strong>{{ payment_count }}</strong><br><span class="text-muted">Cantidad</span></div>
-            <div class="col"><strong>{{ payment_total|money_co }}</strong><br><span class="text-muted">Total recibido</span></div>
-            <div class="col"><strong>{% if first_payment.exact_date %}{{ first_payment.exact_date }}{% else %}{{ first_payment.period_month }}/{{ first_payment.period_year }}{% endif %}</strong><br><span class="text-muted">Primer pago</span></div>
-            <div class="col"><strong>{% if last_payment.exact_date %}{{ last_payment.exact_date }}{% else %}{{ last_payment.period_month }}/{{ last_payment.period_year }}{% endif %}</strong><br><span class="text-muted">Ultimo pago</span></div>
-          </div>
-        {% endif %}
+        <h3 class="h6 text-muted">Movimientos de pago</h3>
         {% if movements %}
           <div class="table-responsive">
             <table class="table data-table align-middle">
@@ -105,16 +124,99 @@
       </section>
       <section class="data-section">
         <div class="section-header">
-          <h2>Titulares del encargo</h2>
-          {% if can_create and assignment.is_active %}
-            <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_secondary_create' assignment.pk %}">Añadir cliente secundario</a>
+          <h2>Créditos y subsidios</h2>
+          {% if can_update %}
+            <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_credit_subsidy_create' assignment.pk %}">Registrar</a>
           {% endif %}
         </div>
-        <div class="table-responsive"><table class="table data-table"><thead><tr><th>Cliente</th><th>Rol</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>
-          {% for holder in assignment.holders.all %}
-            <tr><td><a href="{% url 'fiduciary:client_detail' holder.client.pk %}">{{ holder.client.full_name }}</a></td><td>{% if holder.is_primary %}Principal{% else %}Secundario{% endif %}</td><td>{% if holder.is_active %}Vigente{% else %}Finalizado{% endif %}</td><td>{% if can_update and holder.is_active %}<form method="post" action="{% url 'fiduciary:holder_finalize' holder.pk %}" class="status-action-form">{% csrf_token %}<input class="form-control form-control-sm" name="change_reason" placeholder="Motivo" required><input class="form-control form-control-sm" type="date" name="end_date" required><button class="btn btn-sm btn-outline-secondary">Finalizar</button></form>{% endif %}</td></tr>
-          {% empty %}<tr><td colspan="4">Sin titulares registrados.</td></tr>{% endfor %}
-        </tbody></table></div>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6"><strong>{{ financial_summary.credit|money_co }}</strong><br><span class="text-muted">Total crédito</span></div>
+          <div class="col-md-6"><strong>{{ financial_summary.total_subsidies|money_co }}</strong><br><span class="text-muted">Total subsidios</span></div>
+        </div>
+        <div class="table-responsive">
+          <table class="table data-table align-middle">
+            <thead><tr><th>FECHA</th><th>TIPO</th><th>VALOR</th><th>ENTIDAD/BANCO</th>{% if can_update %}<th>ACCIONES</th>{% endif %}</tr></thead>
+            <tbody>
+              {% for item in credit_subsidies %}
+                <tr>
+                  <td>{% if item.date %}{{ item.date|date:"d/m/Y" }}{% else %}-{% endif %}</td>
+                  <td>{{ item.get_entry_type_display }}</td>
+                  <td>{{ item.amount|money_co }}</td>
+                  <td>{{ item.entity|default:"-" }}</td>
+                  {% if can_update %}<td><a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_credit_subsidy_update' assignment.pk item.pk %}">Editar</a></td>{% endif %}
+                </tr>
+              {% empty %}
+                <tr><td colspan="{% if can_update %}5{% else %}4{% endif %}">Sin créditos ni subsidios registrados.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Intereses</h2>
+          {% if can_update %}
+            <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_interest_create' assignment.pk %}">Registrar</a>
+          {% endif %}
+        </div>
+        <div class="table-responsive">
+          <table class="table data-table align-middle">
+            <thead><tr><th>RECIBO</th><th>FECHA</th><th>VALOR</th>{% if can_update %}<th>ACCIONES</th>{% endif %}</tr></thead>
+            <tbody>
+              {% for interest in interests %}
+                <tr>
+                  <td>{{ interest.receipt|default:"-" }}</td>
+                  <td>{{ interest.interest|default:"-" }}</td>
+                  <td>{{ interest.amount|money_co }}</td>
+                  {% if can_update %}<td><a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_interest_update' assignment.pk interest.pk %}">Editar</a></td>{% endif %}
+                </tr>
+              {% empty %}
+                <tr><td colspan="{% if can_update %}4{% else %}3{% endif %}">Sin intereses registrados.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Informacion contractual</h2>
+          {% if can_update %}
+            <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_update' assignment.pk %}">Editar</a>
+          {% endif %}
+        </div>
+        <div class="row g-3 mb-3">
+          <div class="col"><strong>{% if assignment.adhesion_contract_date %}{{ assignment.adhesion_contract_date|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</strong><br><span class="text-muted">Contrato de adhesion</span></div>
+          <div class="col"><strong>{% if assignment.promise_date %}{{ assignment.promise_date|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</strong><br><span class="text-muted">Promesa</span></div>
+          <div class="col"><strong>{% if assignment.promised_delivery_date %}{{ assignment.promised_delivery_date|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</strong><br><span class="text-muted">Entrega segun promesa</span></div>
+          <div class="col"><strong>{% if assignment.actual_delivery_date %}{{ assignment.actual_delivery_date|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</strong><br><span class="text-muted">Entrega real</span></div>
+        </div>
+      </section>
+      <section class="data-section">
+        <div class="section-header">
+          <h2>Documentación legal</h2>
+          {% if can_update %}
+            <a class="btn btn-sm btn-outline-secondary" href="{% url 'fiduciary:assignment_legal_documentation_update' assignment.pk %}">Editar</a>
+          {% endif %}
+        </div>
+        <div class="table-responsive">
+          <table class="table data-table align-middle">
+            <thead><tr><th>MATRÍCULA</th><th>FECHA ESC</th><th>ESCRITURA</th><th>NOTARÍA</th><th>FECHA C/TRAD</th><th>FACTURA ELECTRÓNICA</th></tr></thead>
+            <tbody>
+              {% if legal_documentation %}
+                <tr>
+                  <td>{{ legal_documentation.registration_number|default:"-" }}</td>
+                  <td>{% if legal_documentation.deed_date %}{{ legal_documentation.deed_date|date:"d/m/Y" }}{% else %}-{% endif %}</td>
+                  <td>{{ legal_documentation.deed_number|default:"-" }}</td>
+                  <td>{{ legal_documentation.notary|default:"-" }}</td>
+                  <td>{% if legal_documentation.tradition_certificate_date %}{{ legal_documentation.tradition_certificate_date|date:"d/m/Y" }}{% else %}-{% endif %}</td>
+                  <td>{{ legal_documentation.electronic_invoice|default:"-" }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="6">Sin documentación legal registrada.</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
       </section>
       <section class="data-section">
         <h2>Observaciones relacionadas</h2>
